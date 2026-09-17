@@ -1,0 +1,167 @@
+name: Habilitador técnico
+description: Define un resultado técnico acotado, ejecutable y vinculado a historias o controles de validación.
+title: "[TE-000] "
+labels:
+  - "type:technical-enabler"
+  - "status:proposed"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describa una capacidad técnica verificable que quepa en una unidad de revisión.
+        No agrupe un subsistema completo ni sustituya resultados de producto.
+
+  - type: input
+    id: enabler_id
+    attributes:
+      label: ID estable
+      description: Use el identificador asignado en el backlog.
+      placeholder: TE-000
+    validations:
+      required: true
+
+  - type: textarea
+    id: bounded_outcome
+    attributes:
+      label: Resultado técnico acotado
+      description: Defina una capacidad terminada y verificable, no una actividad abierta.
+      placeholder: Al finalizar, el sistema podrá ... y se verificará mediante ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: linked_issues
+    attributes:
+      label: Historias y controles de validación vinculados
+      description: Enumere cada historia, experimento o control de validación que este habilitador desbloquea.
+      placeholder: US-001, US-002, GATE-001
+    validations:
+      required: true
+
+  - type: textarea
+    id: preconditions
+    attributes:
+      label: Precondiciones
+      description: Declare decisiones, contratos o capacidades que deben existir antes de comenzar. Escriba “Ninguna” si corresponde.
+      placeholder: |
+        - TE-000 cerrado
+        - Contrato ... definido
+    validations:
+      required: true
+
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: Entregables exactos
+      description: Enumere artefactos, comportamientos o instrumentos concretos que deben quedar disponibles.
+      placeholder: |
+        - Entregable 1
+        - Entregable 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verificación y evidencia
+      description: Indique comandos aprobados, pruebas, consultas o comprobaciones repetibles y el resultado esperado.
+      placeholder: |
+        - Comando o comprobación:
+        - Resultado esperado:
+        - Evidencia conservada:
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_impact
+    attributes:
+      label: Impacto de seguridad y aislamiento entre streamers
+      description: Defina superficies afectadas, decisiones de autorización y evidencia con al menos dos cuentas de streamers. Indique “Sin impacto” con justificación cuando corresponda.
+      placeholder: |
+        - Superficies afectadas:
+        - Controles de autorización:
+        - Pruebas de aislamiento entre streamers:
+    validations:
+      required: true
+
+  - type: textarea
+    id: failure_rollback
+    attributes:
+      label: Fallos, limpieza y reversión
+      description: Defina el estado observable ante fallos parciales, cómo se evita estado huérfano y cómo se revierte o desactiva de forma segura.
+      placeholder: |
+        - Falla antes de confirmar:
+        - Falla después de confirmar:
+        - Limpieza:
+        - Reversión o desactivación segura:
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias exactas
+      description: Use IDs estables. Escriba “Ninguna” si no existen.
+      placeholder: TE-001, US-001
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Prioridad
+      options:
+        - "P0 — Seguridad u operación indispensable"
+        - "P1 — Flujo principal del MVP"
+        - "P2 — Validación del piloto"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: expected_size
+    attributes:
+      label: Tamaño esperado
+      description: Mida el alcance de revisión, no el tiempo de desarrollo.
+      options:
+        - "S — Resultado técnico pequeño"
+        - "M — Resultado técnico medio"
+        - "L — Debe descomponerse antes de aprobar"
+    validations:
+      required: true
+
+  - type: textarea
+    id: definition_of_done
+    attributes:
+      label: Definición de Terminado
+      description: Enumere condiciones objetivas que prueban que el resultado está completo y utilizable por los elementos de trabajo vinculados.
+      placeholder: |
+        - [ ] Entregables completos
+        - [ ] Evidencia repetible
+        - [ ] Fallos y aislamiento verificados
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Trazabilidad
+      description: Relacione requisitos Rxx, exclusiones Xxx y elementos de trabajo propietarios.
+      placeholder: R23, R29; US-001; GATE-001
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: quality_attestations
+    attributes:
+      label: Confirmaciones obligatorias
+      options:
+        - label: El resultado está acotado y cabe en una unidad de revisión.
+          required: true
+        - label: Los entregables son exactos y no describen un subsistema completo.
+          required: true
+        - label: La evidencia puede ejecutarse de forma repetible y tiene resultados esperados explícitos.
+          required: true
+        - label: El impacto de seguridad y aislamiento entre streamers está cubierto o justificado como inexistente.
+          required: true
+        - label: Los comportamientos ante fallos, limpieza y reversión son observables.
+          required: true

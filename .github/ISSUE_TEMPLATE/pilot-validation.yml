@@ -1,0 +1,185 @@
+name: Validación de piloto
+description: Define un experimento, control previo al piloto o control posterior con evidencia auditable.
+title: "[EXP-000 o GATE-000] "
+labels:
+  - "type:experiment-gate"
+  - "status:proposed"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Defina un protocolo que distinga APROBADO, FALLIDO e INCONCLUSO sin interpretación subjetiva.
+        Un incidente de seguridad no puede compensarse ni promediarse.
+
+  - type: input
+    id: validation_id
+    attributes:
+      label: ID estable
+      description: Use el identificador asignado en el backlog.
+      placeholder: EXP-000 o GATE-000
+    validations:
+      required: true
+
+  - type: dropdown
+    id: validation_class
+    attributes:
+      label: Clase de validación
+      options:
+        - Experimento
+        - Control previo al piloto
+        - Control posterior al piloto
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objetivo y decisión que habilita
+      description: Declare qué evidencia se busca y qué decisión concreta podrá tomarse.
+      placeholder: Esta validación determinará si ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: entry_conditions
+    attributes:
+      label: Condiciones de entrada
+      description: Enumere estados, versiones, elementos de trabajo cerrados y controles de validación previos obligatorios.
+      placeholder: |
+        - Dependencia ... cerrada
+        - Versiones soportadas registradas
+        - Evidencia previa disponible
+    validations:
+      required: true
+
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocolo
+      description: Describa pasos, actores, orden, clientes, escenarios concurrentes y controles para repetir la validación.
+      placeholder: |
+        1. Preparar ...
+        2. Ejecutar ...
+        3. Registrar ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample_evidence
+    attributes:
+      label: Muestra y evidencia obligatoria
+      description: Defina cantidad mínima, validez de cada muestra, instrumentos, metadatos y evidencia necesaria. La ausencia debe producir INCONCLUSO.
+      placeholder: |
+        - Tamaño mínimo de muestra:
+        - Condiciones de validez:
+        - Evidencia por ejecución:
+        - Evidencia agregada:
+    validations:
+      required: true
+
+  - type: textarea
+    id: thresholds
+    attributes:
+      label: Umbrales medibles
+      description: Declare fórmulas, ventanas, percentiles, tiempos y límites inclusivos o exclusivos.
+      placeholder: |
+        - Métrica:
+        - Umbral:
+        - Cálculo:
+        - Condiciones de medición:
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_conditions
+    attributes:
+      label: Condiciones de seguridad de tolerancia cero
+      description: Enumere accesos, fugas, secretos y cortes cuya sola ocurrencia produce FALLIDO.
+      placeholder: |
+        - Cualquier acceso no autorizado produce FALLIDO.
+        - Cualquier fuga entre cuentas de streamers produce FALLIDO.
+        - Cualquier secreto expuesto produce FALLIDO.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcomes
+    attributes:
+      label: Resultados APROBADO, FALLIDO e INCONCLUSO
+      description: Defina condiciones mutuamente distinguibles para los tres resultados.
+      placeholder: |
+        - APROBADO:
+        - FALLIDO:
+        - INCONCLUSO:
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias exactas
+      description: Use IDs estables y respete la secuencia GATE-001 → EXP-001 → GATE-002. Escriba “Ninguna” si no existen.
+      placeholder: GATE-001, EXP-001, TE-010
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence_retention
+    attributes:
+      label: Conservación y acceso a la evidencia
+      description: Defina ubicación, formato, período, acceso autorizado y redacción de secretos para permitir una evaluación independiente.
+      placeholder: |
+        - Evidencia conservada:
+        - Ubicación o referencia:
+        - Acceso autorizado:
+        - Redacción de secretos:
+        - Período de conservación:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Prioridad
+      options:
+        - "P0 — Control obligatorio"
+        - "P2 — Experimento de validación"
+    validations:
+      required: true
+
+  - type: textarea
+    id: definition_of_done
+    attributes:
+      label: Definición de Terminado
+      description: Enumere la evidencia que permite reproducir el resultado y cerrar la validación.
+      placeholder: |
+        - [ ] Protocolo ejecutado sin desviaciones no registradas
+        - [ ] Evidencia completa y recalculable
+        - [ ] Resultado clasificado como APROBADO, FALLIDO o INCONCLUSO
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Trazabilidad
+      description: Relacione requisitos Rxx, exclusiones Xxx, historias, habilitadores y controles de validación cubiertos.
+      placeholder: R19, R23–R26; US-001–US-024; TE-010
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: evidence_attestations
+    attributes:
+      label: Confirmaciones obligatorias
+      options:
+        - label: El protocolo distingue APROBADO, FALLIDO e INCONCLUSO mediante condiciones observables.
+          required: true
+        - label: La muestra y los umbrales permiten recalcular el resultado de forma independiente.
+          required: true
+        - label: La falta de evidencia obligatoria produce INCONCLUSO, nunca APROBADO.
+          required: true
+        - label: Cualquier incidente de seguridad de tolerancia cero produce FALLIDO y no puede promediarse.
+          required: true
+        - label: La evidencia se conserva sin credenciales secretas, enlaces de invitación ni credenciales OBS expuestas.
+          required: true

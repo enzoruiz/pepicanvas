@@ -1,0 +1,185 @@
+name: Historia de usuario
+description: Define un resultado vertical, observable y verificable para una persona usuaria.
+title: "[US-000] "
+labels:
+  - "type:user-story"
+  - "status:proposed"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describa un resultado de producto demostrable de extremo a extremo.
+        Separe el trabajo técnico no observable en un habilitador técnico.
+
+  - type: input
+    id: story_id
+    attributes:
+      label: ID estable
+      description: Use el identificador asignado en el backlog.
+      placeholder: US-000
+    validations:
+      required: true
+
+  - type: dropdown
+    id: epic
+    attributes:
+      label: Épica
+      description: Seleccione la épica propietaria del resultado.
+      options:
+        - "EP-01 — Identidad, suscripción y acceso"
+        - "EP-02 — Canvas y contenido persistente"
+        - "EP-03 — Medios y almacenamiento"
+        - "EP-04 — Colaboración en tiempo real"
+        - "EP-05 — OBS y compatibilidad"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: persona
+    attributes:
+      label: Persona principal
+      options:
+        - Streamer
+        - Moderador
+        - Streamer y moderador
+        - Operador del producto
+        - Audiencia mediante OBS
+    validations:
+      required: true
+
+  - type: textarea
+    id: narrative
+    attributes:
+      label: Narrativa de resultado
+      description: "Use el formato: Como [persona], quiero [capacidad], para [resultado]."
+      placeholder: Como ..., quiero ..., para ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: business_rules
+    attributes:
+      label: Reglas de negocio
+      description: Enumere reglas observables, límites inclusivos y estados aplicables.
+      placeholder: |
+        - Regla 1
+        - Regla 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Criterios de aceptación Dado/Cuando/Entonces
+      description: Incluya el flujo exitoso y cada resultado negativo o límite relevante.
+      placeholder: |
+        ### Escenario: Resultado observable
+        Dado que ...
+        Cuando ...
+        Entonces ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: access_isolation
+    attributes:
+      label: Acceso, autorización y aislamiento
+      description: Defina actores permitidos y rechazados, cuenta de streamer propietaria y pruebas con al menos dos cuentas de streamers.
+      placeholder: |
+        - Acceso permitido:
+        - Acceso rechazado:
+        - Aislamiento entre streamers:
+    validations:
+      required: true
+
+  - type: textarea
+    id: resilience_cases
+    attributes:
+      label: Errores, reconexión y concurrencia
+      description: Defina fallos seguros, limpieza, carreras, orden de confirmación, reconexión y resincronización. Indique “No aplica” con justificación cuando corresponda.
+      placeholder: |
+        - Error o carga fallida:
+        - Reconexión:
+        - Concurrencia y carreras:
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Fuera de alcance
+      description: Enumere exclusiones explícitas que esta historia no debe introducir.
+      placeholder: |
+        - Exclusión 1
+        - Exclusión 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias exactas
+      description: Use IDs estables. Escriba “Ninguna” si no existen.
+      placeholder: TE-001, US-001
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Prioridad
+      options:
+        - "P0 — Seguridad u operación indispensable"
+        - "P1 — Flujo principal del MVP"
+        - "P2 — Validación del piloto"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: expected_size
+    attributes:
+      label: Tamaño esperado
+      description: Mida el alcance de revisión, no el tiempo de desarrollo.
+      options:
+        - "S — Corte vertical pequeño"
+        - "M — Corte vertical medio"
+        - "L — Debe descomponerse antes de aprobar"
+    validations:
+      required: true
+
+  - type: textarea
+    id: definition_of_done
+    attributes:
+      label: Definición de Terminado
+      description: Enumere evidencia objetiva y repetible necesaria para cerrar la historia.
+      placeholder: |
+        - [ ] Prueba automatizada ...
+        - [ ] Demostración ...
+        - [ ] Evidencia de aislamiento ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Trazabilidad
+      description: Relacione requisitos Rxx, exclusiones Xxx y controles de validación aplicables.
+      placeholder: R01, R23; X01; GATE-001
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: quality_attestations
+    attributes:
+      label: Confirmaciones obligatorias
+      options:
+        - label: La historia entrega un resultado vertical demostrable de extremo a extremo.
+          required: true
+        - label: Todos los criterios tienen resultados deterministas y observables.
+          required: true
+        - label: Los controles de autorización y aislamiento entre streamers están explícitos.
+          required: true
+        - label: Los casos de error, reconexión y concurrencia están cubiertos o justificados como no aplicables.
+          required: true
+        - label: El trabajo técnico no observable está separado en habilitadores técnicos.
+          required: true
