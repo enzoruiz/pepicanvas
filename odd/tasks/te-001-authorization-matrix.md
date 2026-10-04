@@ -53,10 +53,20 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Rollback boundary: revert `c97f17d` to remove only `backend/go.mod` and `backend/internal/access`; no persistence, transport, UI, or later authorization guard is coupled to this slice.
   - RDD outcome: `disabled/unmanaged`; global RDD is off, so no receipt or review-authority workflow applied.
   - Remaining risks: AUTH-03 still owns non-enumerating public denials and time-of-use reauthorization; no transport or persistence consumer exists yet.
-- [ ] **AUTH-03 — Add safe denial and reauthorization guards**
-  - Route: delegated writer; security behavior and race-oriented tests span multiple files.
+- [x] **AUTH-03 — Add safe denial and reauthorization guards**
+  - Route: general fallback sub-agent; one bounded, framework-neutral Go work unit covered the public denial and three operation guards.
   - Acceptance: one public denial contract reveals no foreign metadata, and authorization is re-evaluated immediately before mutation or delivery.
   - Checks: focused adversarial tests, full backend race suite, and `git diff --check`.
+  - Scope: added one comparable `ErrAccessDenied`, a `Check` adapter over the existing positive matrix, and current-fact guards for mutation, read delivery, and event delivery.
+  - RED: `cd backend && go test -race ./internal/access` failed to build with undefined `Check`, `ErrAccessDenied`, `GuardMutation`, `GuardReadDelivery`, `GuardEventDelivery`, and `RequestLoader` production symbols.
+  - GREEN: after implementation and refactoring, `cd backend && go test -race ./internal/access` returned `ok github.com/enzoruiz/pepicanvas/backend/internal/access 1.009s`; the final focused run returned `ok github.com/enzoruiz/pepicanvas/backend/internal/access (cached)`.
+  - Verification: focused race test returned `ok ... (cached)`; full backend race suite returned `ok ... (cached)`; `./scripts/check-control-contract.sh` returned `OK: contrato de controles válido`; `git diff --check` produced no output.
+  - Commit: `d8b1f52` (`feat(access): guard operations with current authorization`).
+  - Authored change size: 308 inserted lines across four files, within the advisory 400-line work-unit budget.
+  - Rollback boundary: revert `d8b1f52` to remove only the denial adapter, framework-neutral guards, and their tests; the AUTH-02 policy matrix remains intact.
+  - Chain strategy: `stacked-to-main`; this is the second independent work unit and no remote operation or pull request was performed.
+  - RDD outcome: `disabled/unmanaged`; global RDD remains off, so no receipt or review-authority workflow applied.
+  - Remaining risks: no transport or persistence consumer exists yet, and consumers needing atomic state-to-operation consistency must execute the loader and callback inside their future transactional boundary.
 - [ ] **AUTH-04 — Integrate automated verification**
   - Route: delegated writer; CI and evidence must match the executable Go baseline.
   - Acceptance: CI runs the backend race suite and existing control-contract validation without weakening either check.
@@ -82,9 +92,10 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - Original worktree untracked files remain untouched.
 - No source code was written before this tracker and its recovery mirror.
 - AUTH-02 completed in `c97f17d` with 439 inserted lines and all required local checks passing.
+- AUTH-03 completed in `d8b1f52` with 308 inserted lines and all required local checks passing.
 - Native assessment classified `8e64801..988c686` as medium risk because it introduces `backend/go.mod`; global RDD is disabled, and the parent spot-check `go test -race ./...` passed.
 - Running implementation size exceeded 400 lines, so subsequent work units will be delivered as independent PRs to `main` in order.
 
 ## Next step
 
-Implement AUTH-03 test-first as the next independent stacked-to-main work unit.
+Implement AUTH-04 as the next independent stacked-to-main work unit.
