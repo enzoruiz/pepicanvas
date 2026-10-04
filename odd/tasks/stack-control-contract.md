@@ -62,6 +62,9 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - STACK-01 completed from read-only evidence; no local implementation had started before this document.
 - STACK-02 and STACK-03 completed after one verifier-driven correction to reject malformed field types, marker ordering, and non-canonical control headings.
 - STACK-02 commit: `1c113be` (`docs(stack): define cross-cutting control contract`).
+- STACK-03 commit: `b6c124e` (`feat(issues): enforce cross-cutting control mapping`).
+- Running authored local lines: 332 across both work units, below the 400-line delivery threshold.
+- Review outcome: `disabled/unmanaged`; RDD was globally disabled, so ordinary repository policy applies.
 
 ## Next step
 
