@@ -40,10 +40,19 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Route: delegated exploration; implementation preparation required broad repository and policy evidence.
   - Acceptance: architecture, tests, policy gaps, safe worktree, and authoritative baseline are resolved before source writes.
   - Evidence: branch `feat/te-001-authorization-matrix` created from `44c3616`; maintainer approved the policy baseline in-session.
-- [ ] **AUTH-02 — Implement the executable fail-closed matrix**
+- [x] **AUTH-02 — Implement the executable fail-closed matrix**
   - Route: delegated writer; coordinated implementation and tests span multiple non-trivial files.
   - Acceptance: closed vocabularies and explicit policy rows cover roles, resources, actions, subscription, invitation, membership, and two-tenant isolation.
   - Checks: observed RED then GREEN with `go test -race ./internal/access`; `go test -race ./...`; `git diff --check`.
+  - Scope: added the Go 1.25 module and the standard-library-only authorization types, positive policy table, and behavior tests under `backend/internal/access`.
+  - RED: `cd backend && go test -race ./internal/access` failed to build because production symbols such as `Role`, `Resource`, `Action`, and `Request` were undefined.
+  - GREEN: `cd backend && go test -race ./internal/access` returned `ok github.com/enzoruiz/pepicanvas/backend/internal/access 1.010s`; after refactoring and complete inactive-subscription coverage it returned `ok github.com/enzoruiz/pepicanvas/backend/internal/access 1.009s`.
+  - Verification: focused race test returned `ok ... (cached)`; full backend race suite returned `ok ... (cached)`; `./scripts/check-control-contract.sh` returned `OK: contrato de controles válido`; `git diff --check` produced no output.
+  - Commit: `c97f17d` (`feat(access): enforce fail-closed authorization matrix`).
+  - Authored change size: 439 inserted lines across four files. The advisory forecast was exceeded to keep the closed vocabularies readable and retain complete behavior and tenant-isolation tests.
+  - Rollback boundary: revert `c97f17d` to remove only `backend/go.mod` and `backend/internal/access`; no persistence, transport, UI, or later authorization guard is coupled to this slice.
+  - RDD outcome: `disabled/unmanaged`; global RDD is off, so no receipt or review-authority workflow applied.
+  - Remaining risks: AUTH-03 still owns non-enumerating public denials and time-of-use reauthorization; no transport or persistence consumer exists yet.
 - [ ] **AUTH-03 — Add safe denial and reauthorization guards**
   - Route: delegated writer; security behavior and race-oriented tests span multiple files.
   - Acceptance: one public denial contract reveals no foreign metadata, and authorization is re-evaluated immediately before mutation or delivery.
@@ -71,6 +80,7 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - Branch point: `44c3616`.
 - Original worktree untracked files remain untouched.
 - No source code was written before this tracker and its recovery mirror.
+- AUTH-02 completed in `c97f17d` with 439 inserted lines and all required local checks passing.
 
 ## Next step
 
