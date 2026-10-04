@@ -90,8 +90,8 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 
 ## Delivery plan
 
-- Strategy: `ask-on-risk`.
-- Chain strategy: `stacked-to-main`, selected by the maintainer after AUTH-02 crossed the 400-line review threshold.
+- Strategy: `exception-ok`, explicitly selected by the maintainer for one honest issue-closing PR after repository policy made per-slice `Closes #1` links semantically incorrect.
+- Superseded chain strategy: `stacked-to-main`; retained as historical evidence but not used for delivery.
 - Forecast: approximately 380 authored lines for the first autonomous matrix slice; later reauthorization and CI work remain separate work units.
 - Slice 1: executable matrix and tests (`c97f17d`); 439 implementation lines form one cohesive policy-and-evidence unit and may require an explicit size exception at PR preparation.
 - Slice 2: denial and reauthorization guards.
@@ -110,8 +110,8 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - Native assessment classified `8e64801..988c686` as medium risk because it introduces `backend/go.mod`; global RDD is disabled, and the parent spot-check `go test -race ./...` passed.
 - Native assessment classified AUTH-03 as medium risk and under budget; the parent race-suite spot-check passed.
 - Native assessment classified AUTH-04 as high risk because the workflow executes shell processes; required independent verification passed with no findings.
-- Running implementation size exceeded 400 lines, so subsequent work units will be delivered as independent PRs to `main` in order.
+- Running implementation size exceeded 400 lines; the maintainer approved a single-PR `size:exception` so the complete issue behavior, tests, guards, CI, and evidence remain linked to the one approved issue.
 
 ## Next step
 
-Prepare the ordered stacked-to-main delivery only after explicit remote authorization. Slice 1 remains a cohesive 439-line implementation and needs an explicit `size:exception` before PR creation.
+Push `feat/te-001-authorization-matrix`, create one PR to `main` that closes #1, and apply the authorized `size:exception` with its documented rationale.
