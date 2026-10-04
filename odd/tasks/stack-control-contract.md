@@ -73,7 +73,10 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - #40–#45 were normalized through separately authorized exact mutations: `priority:p0` and milestone `MVP piloto` were confirmed while all unrelated state remained unchanged.
 - Final remote inventory: 44 open issues, 44 with control references, 44 with priority labels, and 44 in milestone `MVP piloto`.
 - PR preparation found two ShellCheck `SC1007` diagnostics in path setup. Replacing `CDPATH= cd` with `CDPATH='' cd` cleared ShellCheck, `sh -n`, `dash -n`, functional validation, and `git diff --check`.
+- Delivery issue: #46 (`TE-018`), approved with `status:approved`.
+- Pull request: #47 (`feat(issues): enforce cross-cutting stack controls`), targeting `main` with exactly `type:feature`.
+- GitHub reported no automated checks for the branch at PR creation time.
 
 ## Next step
 
-Local implementation and remote backlog alignment are complete. Delivery of the feature branch remains a separate human decision.
+Implementation, backlog alignment, and PR creation are complete. Review and merge remain separate human decisions.
