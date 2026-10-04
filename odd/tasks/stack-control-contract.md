@@ -45,9 +45,10 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - [x] **STACK-05 — Reconcile and close**
   - Route: inline verification plus bounded delegated checks when applicable.
   - Evidence: 44 open issues reference controls, have a priority label and belong to `MVP piloto`; local validator and `git diff --check` pass; unrelated untracked files remain untouched.
-- [ ] **STACK-06 — Add automated control-contract validation**
+- [x] **STACK-06 — Add automated control-contract validation**
   - Route: inline; one focused workflow plus mechanical tracking updates.
   - Acceptance: pull requests that change the contract, forms, validator, or workflow run ShellCheck, POSIX shell syntax checks, and the functional validator.
+  - Evidence: GitHub Actions run `37234902726` passed `Validate control contract` on commit `5e24cd3` after correcting the initial SC2015 finding.
 
 ## Delivery plan
 
@@ -80,7 +81,8 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - Pull request: #47 (`feat(issues): enforce cross-cutting stack controls`), targeting `main` with exactly `type:feature`.
 - GitHub reported no automated checks for the branch at PR creation time.
 - STACK-06 authorized after merge was blocked by the absence of automated checks.
+- STACK-06 implementation commits: `f7ea2e6` (`ci(controls): validate control contract`) and `5e24cd3` (`fix(controls): satisfy ShellCheck condition semantics`).
 
 ## Next step
 
-Complete STACK-06, observe the GitHub check, and merge only after it passes.
+Automated validation passes. Merge PR #47 under ordinary repository policy.
