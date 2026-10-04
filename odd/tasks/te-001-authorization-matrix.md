@@ -114,4 +114,4 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 
 ## Next step
 
-Push `feat/te-001-authorization-matrix`, create one PR to `main` that closes #1, and apply the authorized `size:exception` with its documented rationale.
+PR #48 (`https://github.com/enzoruiz/pepicanvas/pull/48`) is open against `main`, closes approved issue #1, and has exactly `type:feature` plus the authorized `size:exception`; next observe its automated checks without merging.
