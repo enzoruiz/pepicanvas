@@ -67,8 +67,11 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - Review outcome: `disabled/unmanaged`; RDD was globally disabled, so ordinary repository policy applies.
 - STACK-04 partial remote progress: all 38 pre-existing issues were updated and read back; TE-012 through TE-015 were created as issues #40–#43.
 - TE-016 creation returned no identity during a network failure. Later authoritative reads confirmed that issue #44 does not exist and no TE-016 issue was created. TE-017 was not attempted.
-- Remote continuation is paused pending an explicit renewed instruction for a fresh TE-016 creation attempt followed by TE-017.
+- A renewed explicit instruction authorized fresh publication: TE-016 and TE-017 were created and read back exactly as issues #44 and #45.
+- Final read-only inventory: 44 open issues; all 38 pre-existing issues have the canonical controls section, and #40–#45 contain their applicable control IDs in the form-authoritative verification field.
+- Native dependencies remain textual because the installed GitHub CLI exposes no stable mutation and readback operation for them.
+- STACK-04 remains open only for an explicit decision on normalizing milestone and priority labels for #40–#45.
 
 ## Next step
 
-Resolve the interrupted TE-016/TE-017 publication, then reconcile the final local and remote state.
+Resolve metadata normalization for #40–#45, then reconcile the final local and remote state.
