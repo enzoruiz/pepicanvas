@@ -79,9 +79,13 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Remaining limitation: GitHub-hosted execution is unobserved because no push or other remote operation was authorized.
   - Chain strategy: `stacked-to-main`; this is the third independent work unit and no remote operation or pull request was performed.
   - RDD outcome: `disabled/unmanaged`; global RDD remains off, so no receipt or review-authority workflow applied.
-- [ ] **AUTH-05 — Reconcile evidence and close**
+- [x] **AUTH-05 — Reconcile evidence and close**
   - Route: inline status reconciliation after implementation and verification.
   - Acceptance: every task records commits, exact checks, review outcome, rollback boundary, and remaining limitations.
+  - Evidence: the worktree was clean after each implementation slice; parent spot-checks reran the complete Go race suite successfully after AUTH-02, AUTH-03, and AUTH-04.
+  - Independent verification: AUTH-04 received PASS with no candidate-caused CRITICAL, WARNING, or SUGGESTION findings; official static actions, read-only permissions, trusted command inputs, Go version resolution, working directories, and unchanged control validation were confirmed.
+  - Tooling limitation: `actionlint` and local ShellCheck were unavailable; read-only PyYAML assertions passed, and GitHub-hosted execution remains unobserved until an authorized push.
+  - Delivery boundary: local development is complete; preparing stacked branches or pull requests is a separate remote-delivery action.
 
 ## Delivery plan
 
@@ -103,8 +107,10 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - AUTH-03 completed in `d8b1f52` with 308 inserted lines and all required local checks passing.
 - AUTH-04 completed in `44c27cb` with 44 inserted lines and all required local checks passing; hosted CI remains unobserved.
 - Native assessment classified `8e64801..988c686` as medium risk because it introduces `backend/go.mod`; global RDD is disabled, and the parent spot-check `go test -race ./...` passed.
+- Native assessment classified AUTH-03 as medium risk and under budget; the parent race-suite spot-check passed.
+- Native assessment classified AUTH-04 as high risk because the workflow executes shell processes; required independent verification passed with no findings.
 - Running implementation size exceeded 400 lines, so subsequent work units will be delivered as independent PRs to `main` in order.
 
 ## Next step
 
-Reconcile AUTH-05 without changing the completed implementation slices.
+Prepare the ordered stacked-to-main delivery only after explicit remote authorization. Slice 1 remains a cohesive 439-line implementation and needs an explicit `size:exception` before PR creation.
