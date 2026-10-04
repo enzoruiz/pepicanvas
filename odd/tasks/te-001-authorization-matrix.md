@@ -71,6 +71,7 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Route: delegated writer; CI and evidence must match the executable Go baseline.
   - Acceptance: CI runs the backend race suite and existing control-contract validation without weakening either check.
   - Checks: workflow structural readback, local command parity, and `git diff --check`.
+  - Test-first exception: CI configuration has no meaningful local workflow execution boundary in this worktree, so no synthetic RED was produced; verification uses local command parity and read-only YAML structure checks.
 - [ ] **AUTH-05 — Reconcile evidence and close**
   - Route: inline status reconciliation after implementation and verification.
   - Acceptance: every task records commits, exact checks, review outcome, rollback boundary, and remaining limitations.
