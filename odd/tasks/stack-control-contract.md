@@ -38,13 +38,13 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
   - Route: delegated writer; coordinated changes across three non-trivial YAML files and one validator.
   - Acceptance: every form requires control applicability/evidence without duplicating control definitions.
   - Evidence: all three forms require `cross_cutting_controls`; `sh -n`, `dash -n`, nominal validation, executable mode, and three independent mutation checks passed.
-- [ ] **STACK-04 — Update the live GitHub backlog**
+- [x] **STACK-04 — Update the live GitHub backlog**
   - Route: delegated remote worker after explicit destination/operation/session authorization.
   - Acceptance: existing owners are amended, missing technical enablers are created, and every issue references applicable controls with exact readback.
-  - Checks: one authorized mutation per target followed by target-host readback; stop on unknown outcomes.
-- [ ] **STACK-05 — Reconcile and close**
+  - Evidence: 38 existing issues updated; TE-012–TE-017 created as #40–#45; every write received exact target-host readback. One uncertain TE-016 attempt stopped the workflow and was proven absent before a separately authorized fresh creation.
+- [x] **STACK-05 — Reconcile and close**
   - Route: inline verification plus bounded delegated checks when applicable.
-  - Acceptance: local and remote state agree, all checks are recorded, and no unrelated files changed.
+  - Evidence: 44 open issues reference controls, have a priority label and belong to `MVP piloto`; local validator and `git diff --check` pass; unrelated untracked files remain untouched.
 
 ## Delivery plan
 
@@ -70,8 +70,9 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - A renewed explicit instruction authorized fresh publication: TE-016 and TE-017 were created and read back exactly as issues #44 and #45.
 - Final read-only inventory: 44 open issues; all 38 pre-existing issues have the canonical controls section, and #40–#45 contain their applicable control IDs in the form-authoritative verification field.
 - Native dependencies remain textual because the installed GitHub CLI exposes no stable mutation and readback operation for them.
-- STACK-04 remains open only for an explicit decision on normalizing milestone and priority labels for #40–#45.
+- #40–#45 were normalized through separately authorized exact mutations: `priority:p0` and milestone `MVP piloto` were confirmed while all unrelated state remained unchanged.
+- Final remote inventory: 44 open issues, 44 with control references, 44 with priority labels, and 44 in milestone `MVP piloto`.
 
 ## Next step
 
-Resolve metadata normalization for #40–#45, then reconcile the final local and remote state.
+Local implementation and remote backlog alignment are complete. Delivery of the feature branch remains a separate human decision.
