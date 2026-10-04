@@ -148,3 +148,135 @@ No se usa una biblioteca de estado de servidor (TanStack Query), porque casi tod
 | Frameworks HTTP de Go (Gin, Echo, Fiber) | Resuelven routing y binding, que la stdlib ya cubre; no aportan nada a WebSocket, orden ni cortes de acceso. Fiber además es incompatible con `net/http` |
 | CSS Modules | Obligaría a construir y estilizar a mano componentes accesibles |
 | Biome | Su análisis con tipos es parcial y no tiene un equivalente a `eslint-plugin-boundaries` |
+
+## Contrato transversal de controles
+
+Este catálogo es la definición canónica de las garantías transversales del MVP. Los issues consumidores deben referenciar los identificadores aplicables y la evidencia que producirán; no deben copiar ni reinterpretar estas definiciones. Los términos **debe**, **no debe** y **solo** expresan requisitos normativos.
+
+### Aplicación desde el backlog
+
+1. Cada historia, habilitador o validación debe declarar una línea por control aplicable con el formato `<ID> — <evidencia esperada>`.
+2. Cuando ningún control sea aplicable, el issue debe registrar `No aplica` y justificarlo respecto de sus superficies y datos. No alcanza con afirmar que el cambio es pequeño.
+3. El issue propietario implementa y mantiene la capacidad común. Un issue consumidor sigue siendo responsable de demostrar que la usa correctamente en su propio recorrido.
+4. Si un cambio altera una obligación, una superficie, la evidencia mínima, el comportamiento ante fallo o una exclusión, primero debe actualizar este catálogo y revisar sus consumidores.
+5. Las exclusiones del MVP limitan la solución permitida; no eliminan la obligación del control.
+
+### Definition of Ready y Definition of Done
+
+Un issue está **Ready** cuando identifica los controles aplicables, enlaza sus propietarios, especifica evidencia repetible y resuelve cualquier dependencia que impida verificarla. Está **Done** cuando conserva la evidencia declarada, verifica los fallos exigidos y no introduce una excepción sin documentarla en este contrato. La Definition of Done del issue debe contener los resultados concretos; no debe duplicar la prosa del catálogo.
+
+<!-- CONTROL-CONTRACT:START -->
+
+### CTRL-CONS-01 — Consistencia entre PostgreSQL y WebSocket
+
+- **Obligación:** toda mutación durable debe confirmar primero la transacción de dominio y un evento de outbox en la misma transacción PostgreSQL. Un publicador reintentable entrega después el evento al actor del canvas y marca su entrega; ninguna confirmación WebSocket puede representar estado que no quedó confirmado en PostgreSQL.
+- **Familias y superficies aplicables:** mutaciones de canvas, objetos, miembros, suscripciones, credenciales OBS y cualquier operación durable que produzca una notificación WebSocket.
+- **Issue propietario planificado:** `TE-012 — Publicar mutaciones durables mediante outbox PostgreSQL`.
+- **Evidencia mínima:** prueba de integración con PostgreSQL real que fuerce una caída entre el commit y la publicación, reinicie el publicador y demuestre entrega posterior sin pérdida; métricas o consulta que permitan observar pendientes y antigüedad.
+- **Comportamiento ante fallo:** conservar el evento pendiente, reintentar con espera acotada y no revertir un commit ya confirmado. Si no puede publicarse, el cliente debe recuperar el estado por resincronización; la cola pendiente debe quedar observable y operable.
+- **Exclusiones MVP:** no se incorporan Redis, Kafka ni otro broker; no se promete entrega exactamente una vez ni coordinación entre múltiples instancias. El orden autoritativo sigue siendo por canvas y la entrega es al menos una vez.
+
+### CTRL-S3-01 — Reconciliación entre PostgreSQL y almacenamiento S3
+
+- **Obligación:** PostgreSQL debe registrar el estado del asset como `pending`, `ready`, `quarantined` o `deleting`. Solo `ready` puede asociarse a objetos o servirse. La carga, inspección y eliminación deben ser reanudables, y un reconciliador debe detectar objetos temporales, registros incompletos y eliminaciones pendientes.
+- **Familias y superficies aplicables:** imágenes, GIF, audio, video, miniaturas y cualquier flujo que escriba o elimine objetos en MinIO, S3 o un servicio compatible.
+- **Issue propietario planificado:** `TE-013 — Reconciliar assets entre PostgreSQL y almacenamiento S3`.
+- **Evidencia mínima:** pruebas de integración que interrumpan cada transición antes y después de escribir en S3, ejecuten reconciliación y demuestren convergencia; inventario consultable por estado y edad sin exponer nombres privados.
+- **Comportamiento ante fallo:** no publicar ni contabilizar como utilizable un asset incompleto; mantenerlo en un estado reintentable o aislado, liberar reservas cuando corresponda y programar limpieza idempotente. Una discrepancia no puede resolverse borrando contenido válido sin evidencia de propiedad.
+- **Exclusiones MVP:** no hay transacción distribuida, replicación multirregión, versionado de bucket ni garantía inmediata de recolección; la reconciliación periódica y bajo demanda es suficiente para el piloto.
+
+### CTRL-IDEM-01 — Idempotencia y deduplicación
+
+- **Obligación:** toda mutación HTTP o WebSocket susceptible de reintento debe aceptar un identificador de operación estable dentro de su ámbito, persistir o retener el resultado autoritativo y devolver el mismo resultado ante repeticiones equivalentes. Reutilizar el identificador con un payload distinto debe rechazarse.
+- **Familias y superficies aplicables:** comandos del canvas, cambios de orden, reproducción de medios, cargas finalizables, invitaciones, rotaciones, reintentos de outbox y tareas de reconciliación.
+- **Issue propietario planificado:** `TE-007 — Serializar y deduplicar comandos por canvas`, ampliado por el issue implementador de cada operación durable fuera del actor.
+- **Evidencia mínima:** pruebas con duplicados antes, durante y después de una reconexión o timeout que demuestren un único efecto durable y una respuesta estable; caso negativo de colisión entre identificador y payload.
+- **Comportamiento ante fallo:** no repetir efectos laterales de manera ciega; consultar el resultado registrado o dejar la operación reintentable. Si no puede determinarse equivalencia, rechazar de forma explícita y exigir un identificador nuevo para una intención nueva.
+- **Exclusiones MVP:** no existe deduplicación global ni indefinida; el ámbito y la retención pueden definirse por operación. Las acciones de presencia efímera sin efecto durable pueden quedar excluidas con justificación.
+
+### CTRL-WEB-01 — Protección de origen y solicitudes web
+
+- **Obligación:** HTTP con efecto lateral debe validar un token CSRF ligado a la sesión además de las cookies `SameSite`; WebSocket debe validar `Origin` contra una lista exacta antes del upgrade. CORS permanece cerrado salvo necesidad documentada, y nunca sustituye autorización ni aislamiento entre streamers.
+- **Familias y superficies aplicables:** autenticación basada en cookies, formularios y API mutante, invitaciones, administración, cargas, editor WebSocket y overlay OBS cuando inicie una conexión autenticada.
+- **Issue propietario planificado:** `TE-014 — Endurecer ingreso HTTP y WebSocket`.
+- **Evidencia mínima:** pruebas de integración para origen permitido, ausente y hostil; token CSRF válido, faltante e inválido; cookies y cabeceras de seguridad verificadas sobre HTTPS o su terminación representativa.
+- **Comportamiento ante fallo:** rechazar antes de ejecutar dominio, escribir archivos o abrir el WebSocket; responder sin reflejar secretos y registrar motivo, ruta y correlación con cardinalidad controlada.
+- **Exclusiones MVP:** no se admite integración web de terceros ni CORS comodín. Clientes no navegador y despliegues con múltiples orígenes requieren una decisión explícita posterior.
+
+### CTRL-RATE-01 — Límites de abuso y costo
+
+- **Obligación:** los puntos de entrada con riesgo de fuerza bruta, enumeración, consumo intensivo o creación no acotada deben aplicar límites explícitos por una combinación adecuada de cuenta, sesión, streamer e IP. Los límites deben ser deterministas, observables y no debilitar la autorización.
+- **Familias y superficies aplicables:** inicio de sesión, creación y aceptación de invitaciones, subida e inspección de medios, rotación de credenciales, apertura o reconexión WebSocket y comandos de alta frecuencia.
+- **Issue propietario planificado:** `TE-014 — Endurecer ingreso HTTP y WebSocket`.
+- **Evidencia mínima:** pruebas del límite y su ventana, respuesta `429` o cierre documentado, recuperación al vencer la ventana y métricas sin dimensiones no acotadas; caso que demuestre aislamiento entre streamers.
+- **Comportamiento ante fallo:** rechazar trabajo nuevo antes de consumir el recurso costoso, indicar una espera segura cuando corresponda y conservar la disponibilidad de operaciones de revocación o emergencia. La indisponibilidad del limitador local debe fallar de forma segura en superficies sensibles.
+- **Exclusiones MVP:** el limitador puede vivir en memoria por existir una sola instancia; no se incorpora un almacén distribuido, reputación de IP, CAPTCHA ni mitigación DDoS de capa de red.
+
+### CTRL-MEDIA-01 — Ejecución acotada de ffprobe y ffmpeg
+
+- **Obligación:** la inspección debe ejecutar binarios fijados por release como procesos sin shell, con argumentos controlados, identidad sin privilegios, directorio temporal aislado y límites de tiempo, bytes, resolución, duración, cantidad de streams, memoria, CPU, procesos y salida capturada. El tipo declarado nunca sustituye la inspección completa.
+- **Familias y superficies aplicables:** carga, validación, decodificación, extracción de metadatos y cualquier transformación de imagen, GIF, audio o video.
+- **Issue propietario planificado:** `TE-005 — Validar medios por contenido y decodificación completa`.
+- **Evidencia mínima:** pruebas con archivo válido y muestras truncadas, sobredimensionadas, lentas, con salida excesiva o estructura maliciosa; comprobación de timeout, terminación del grupo de procesos y limpieza temporal.
+- **Comportamiento ante fallo:** terminar el proceso y sus descendientes, rechazar o aislar el asset, eliminar temporales, liberar la reserva aplicable y registrar categorías acotadas sin conservar contenido privado en logs.
+- **Exclusiones MVP:** no hay transcodificación para entrega, análisis antivirus general ni sandbox distribuido. Los límites del host o contenedor complementan, pero no reemplazan, los límites del proceso.
+
+### CTRL-TRACE-01 — Correlación de operaciones
+
+- **Obligación:** cada recorrido debe propagar un identificador de correlación y contexto OpenTelemetry desde HTTP o WebSocket hacia dominio, PostgreSQL, outbox, actor del canvas, S3 y subprocesos. Logs, métricas y trazas deben permitir relacionar aceptación, persistencia, publicación y render sin incluir secretos ni contenido privado.
+- **Familias y superficies aplicables:** todos los endpoints, conexiones y comandos; obligatoria en recorridos asíncronos, medios, revocación, resincronización y medición del piloto.
+- **Issue propietario planificado:** `TE-015 — Correlacionar operaciones y conservar evidencia operativa`.
+- **Evidencia mínima:** prueba de integración o recorrido instrumentado que muestre una correlación continua a través de al menos una frontera asíncrona; consulta reproducible de logs o trazas por identificador y verificación de redacción.
+- **Comportamiento ante fallo:** la indisponibilidad del exportador no debe bloquear el recorrido de producto ni acumular memoria sin límite; debe descartar de forma acotada, exponer la pérdida mediante métricas y mantener logs locales correlacionados.
+- **Exclusiones MVP:** no se exige un backend específico de telemetría, trazado exhaustivo de cada frame ni alta disponibilidad del colector. El muestreo no puede eliminar recorridos de seguridad o evidencia obligatoria definidos por una validación.
+
+### CTRL-EVID-01 — Evidencia durable y evaluable
+
+- **Obligación:** la evidencia exigida por un issue o control del piloto debe almacenarse fuera de buffers de proceso con versión de release, escenario, instante, resultado, correlación y ubicación verificable. Debe ser legible por una persona evaluadora autorizada y estar redactada antes de persistirse.
+- **Familias y superficies aplicables:** pruebas de integración y E2E, GATE, experimentos, incidentes de seguridad, métricas de latencia, restauraciones, reconciliaciones y verificaciones de compatibilidad OBS.
+- **Issue propietario planificado:** `TE-015 — Correlacionar operaciones y conservar evidencia operativa`.
+- **Evidencia mínima:** manifiesto por ejecución con referencias a artefactos durables, comprobación de integridad, política de acceso y retención, más una lectura independiente que permita recalcular o clasificar el resultado.
+- **Comportamiento ante fallo:** si falta evidencia obligatoria, el resultado es `INCONCLUSO`, nunca aprobado; si la escritura durable falla, debe señalarse la ejecución como incompleta y evitar que artefactos parciales parezcan válidos.
+- **Exclusiones MVP:** no se define un data lake, SIEM ni retención indefinida. Logs efímeros del proceso y capturas sin metadatos no constituyen evidencia suficiente.
+
+### CTRL-VERS-01 — Versiones reproducibles por release
+
+- **Obligación:** cada release debe fijar y registrar versiones exactas de Go, módulos, Node.js, gestor de paquetes, dependencias frontend, PostgreSQL, almacenamiento S3 compatible, ffmpeg/ffprobe, navegadores y OBS usados para construir o validar. Las actualizaciones requieren una revisión explícita y regeneración de evidencia afectada.
+- **Familias y superficies aplicables:** build, CI, imágenes o paquetes de despliegue, migraciones, validación de medios, pruebas de navegadores y matriz OBS.
+- **Issue propietario planificado:** `TE-011 — Registrar la matriz exacta de clientes soportados por versión`, ampliado para conservar también el manifiesto reproducible del toolchain y la release.
+- **Evidencia mínima:** manifiesto versionado y generado por release, instalación limpia reproducible, hashes o lockfiles aplicables y registro exacto de clientes usados por GATE o experimento.
+- **Comportamiento ante fallo:** no promover una release cuando una versión requerida sea implícita, mutable o no reproducible; una diferencia detectada invalida la evidencia dependiente hasta repetirla o justificar su equivalencia.
+- **Exclusiones MVP:** no se exige reproducción bit a bit en hardware distinto ni soporte simultáneo de versiones no listadas. La frase «última versión estable» orienta actualizaciones, pero no reemplaza el pin del release.
+
+### CTRL-RESTORE-01 — Backup y restauración verificable
+
+- **Obligación:** debe existir un procedimiento conjunto y versionado para respaldar PostgreSQL y assets `ready`, restaurarlos en un entorno aislado y reconciliar sus referencias. Deben declararse RPO, RTO, cifrado, acceso, retención y orden de recuperación antes del piloto.
+- **Familias y superficies aplicables:** estado durable de cuentas, membresías, canvas, assets, sesiones o credenciales recuperables, outbox y metadatos necesarios para operación.
+- **Issue propietario planificado:** `TE-017 — Verificar backup y restauración de PostgreSQL y assets`.
+- **Evidencia mínima:** restauración periódica desde copias reales en un entorno limpio, consulta de integridad referencial y assets, medición observada de RPO/RTO y manifiesto durable sin secretos expuestos.
+- **Comportamiento ante fallo:** no declarar el backup válido; conservar las copias anteriores, aislar la restauración fallida y bloquear el inicio del piloto o una recuperación productiva hasta obtener una restauración íntegra y reconciliada.
+- **Exclusiones MVP:** no se requiere conmutación automática, recuperación multirregión ni cero pérdida. Un backup creado pero nunca restaurado no satisface el control.
+
+### CTRL-READY-01 — Salud y preparación operativa
+
+- **Obligación:** el proceso debe exponer una señal de vida separada de una señal de preparación. La preparación solo puede ser positiva cuando configuración, migraciones, PostgreSQL y recursos imprescindibles permiten aceptar trabajo; debe volverse negativa durante inicio, degradación no operable y cierre.
+- **Familias y superficies aplicables:** servidor Go, despliegue, balanceador o supervisor, PostgreSQL, almacenamiento requerido por rutas críticas y publicador de outbox.
+- **Issue propietario planificado:** `TE-016 — Operar salud, preparación y cierre ordenado`.
+- **Evidencia mínima:** pruebas que distingan proceso vivo de servicio preparado, simulen dependencias requeridas caídas y confirmen transiciones de estado sin reinicios en bucle; procedimiento de diagnóstico con respuestas acotadas.
+- **Comportamiento ante fallo:** retirar la instancia de servicio sin revelar configuración ni credenciales. Una dependencia opcional degradada debe identificarse sin convertir automáticamente la señal de vida en fallo.
+- **Exclusiones MVP:** no se incorpora una plataforma de orquestación específica ni autorreparación compleja. La señal no garantiza por sí sola la corrección funcional de todos los recorridos.
+
+### CTRL-SHUTDOWN-01 — Cierre ordenado
+
+- **Obligación:** ante una señal de terminación, el proceso debe dejar de estar preparado, rechazar trabajo nuevo, drenar HTTP, cerrar WebSockets con motivo reintentable, detener consumidores y temporizadores, resolver o dejar reintentables outbox y reconciliaciones, terminar subprocesos y cerrar pools dentro de un presupuesto definido.
+- **Familias y superficies aplicables:** servidor HTTP, WebSocket, actores de canvas, publicador de outbox, reconciliador S3, inspección de medios, telemetría y conexiones PostgreSQL/S3.
+- **Issue propietario planificado:** `TE-016 — Operar salud, preparación y cierre ordenado`.
+- **Evidencia mínima:** prueba de proceso con trabajo HTTP, WebSocket, outbox y ffmpeg en curso que envíe la señal, mida el presupuesto y demuestre ausencia de commits parciales, procesos huérfanos y conexiones aceptadas después del drenaje.
+- **Comportamiento ante fallo:** al vencer el presupuesto, cancelar contextos y terminar recursos restantes; preservar operaciones durables como reintentables y emitir evidencia correlacionada antes del cierre cuando sea posible. Nunca confirmar al cliente una operación no durable para acelerar la salida.
+- **Exclusiones MVP:** no se coordinan múltiples instancias ni migraciones en vivo. El objetivo de ≤2 s para conexiones individuales no implica que todo el proceso comparta ese mismo presupuesto.
+
+<!-- CONTROL-CONTRACT:END -->
+
+### Mantenimiento del contrato
+
+`scripts/check-control-contract.sh` valida la lista aprobada y la integración mínima de los Issue Forms. El script detecta deriva estructural; la revisión humana debe validar el significado, la proporcionalidad y la evidencia de cada cambio. Un nuevo control transversal requiere un ID estable, un propietario planificado y la actualización coordinada del catálogo y del validador.
