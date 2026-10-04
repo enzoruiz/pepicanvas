@@ -68,8 +68,9 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 ## Delivery plan
 
 - Strategy: `ask-on-risk`.
+- Chain strategy: `stacked-to-main`, selected by the maintainer after AUTH-02 crossed the 400-line review threshold.
 - Forecast: approximately 380 authored lines for the first autonomous matrix slice; later reauthorization and CI work remain separate work units.
-- Slice 1: executable matrix and tests.
+- Slice 1: executable matrix and tests (`c97f17d`); 439 implementation lines form one cohesive policy-and-evidence unit and may require an explicit size exception at PR preparation.
 - Slice 2: denial and reauthorization guards.
 - Slice 3: automated verification and final evidence.
 
@@ -81,7 +82,9 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - Original worktree untracked files remain untouched.
 - No source code was written before this tracker and its recovery mirror.
 - AUTH-02 completed in `c97f17d` with 439 inserted lines and all required local checks passing.
+- Native assessment classified `8e64801..988c686` as medium risk because it introduces `backend/go.mod`; global RDD is disabled, and the parent spot-check `go test -race ./...` passed.
+- Running implementation size exceeded 400 lines, so subsequent work units will be delivered as independent PRs to `main` in order.
 
 ## Next step
 
-Implement AUTH-02 test-first as the first work unit.
+Implement AUTH-03 test-first as the next independent stacked-to-main work unit.
