@@ -72,6 +72,7 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - Native dependencies remain textual because the installed GitHub CLI exposes no stable mutation and readback operation for them.
 - #40–#45 were normalized through separately authorized exact mutations: `priority:p0` and milestone `MVP piloto` were confirmed while all unrelated state remained unchanged.
 - Final remote inventory: 44 open issues, 44 with control references, 44 with priority labels, and 44 in milestone `MVP piloto`.
+- PR preparation found two ShellCheck `SC1007` diagnostics in path setup. Replacing `CDPATH= cd` with `CDPATH='' cd` cleared ShellCheck, `sh -n`, `dash -n`, functional validation, and `git diff --check`.
 
 ## Next step
 
