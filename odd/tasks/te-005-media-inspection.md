@@ -71,6 +71,11 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
   - Rollback boundary: revert the MEDIA-01 work-unit commit to remove only this tracker and `backend/internal/media`; the existing access package and backend module remain unchanged.
   - Commit: `296bf1b` (`feat(media): define inspection acceptance contract`).
   - Authored change size: 687 inserted lines across five files: 564 lines for the domain contract and tests plus 123 lines for this governing tracker.
+  - Follow-up proof correction: the original tests did not directly demonstrate rejection of an invalid non-first GIF frame, custom-limit boundaries beyond `MaxPixels`, or representative negative stream, dimension, duration, and GIF-frame metadata.
+  - Follow-up coverage: table-driven tests now reject invalid width, height, and pixel area on the second GIF frame; exercise custom byte, width, height, pixel, duration, GIF-frame, and stream limits at the exact boundary and one unit beyond; and cover zero plus representative negative metadata.
+  - Follow-up progression: this is verification-only work for already-correct production behavior, so no production RED is claimed. The first focused run exposed only test-fixture interference between custom axis and pixel limits; after each ceiling received independent limits, the focused race test passed.
+  - Follow-up verification: `cd backend && go test -race -count=1 ./internal/media` returned `ok github.com/enzoruiz/pepicanvas/backend/internal/media 1.012s`; `cd backend && go test -race -count=1 ./...` returned `ok` for `internal/access` and `internal/media`, each in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
+  - Follow-up rollback boundary: revert the test-strengthening work-unit commit to remove only these independent proof cases and their tracker evidence; production behavior remains unchanged.
 - [ ] **MEDIA-02 — Controlled ffprobe, full ffmpeg decode adapter, and process containment**
   - Route: security-sensitive adapter work; reassess risk before implementation under `ask-on-risk`.
   - Acceptance: shell-free controlled arguments, full decode, timeout, bounded capture, descendant termination, temporary isolation and cleanup, and enforceable process, memory, and CPU containment.
@@ -115,9 +120,10 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
 - This tracker is the first file written for TE-005 in this worktree; no source file was changed before its creation.
-- MEDIA-01 is implemented test-first with exact-boundary, one-beyond, malformed-state, kind/property mismatch, horizontal/vertical dimension, invalid-configuration, and safe-rejection coverage.
+- The initial MEDIA-01 suite covered default-limit boundaries, custom `MaxPixels`, malformed states, kind/property mismatches, horizontal/vertical dimensions, invalid configuration, and safe rejections; it did not independently prove every claim later added by this follow-up.
 - The cohesive domain-and-tests work unit exceeds the advisory 400-line review budget. It cannot be split without separating behavior from its tests, so remote delivery requires an explicit size-risk decision rather than code compression.
 - MEDIA-01 completed in `296bf1b` with 687 inserted lines and all required local checks passing.
+- The bounded verification follow-up changes tests and this tracker only; no production file or behavior changed.
 
 ## Next step
 

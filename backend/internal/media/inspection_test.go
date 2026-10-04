@@ -137,6 +137,86 @@ func TestValidateAcceptsExactBoundariesAndRejectsOneBeyond(t *testing.T) {
 	}
 }
 
+func TestValidateHonorsCustomLimitsAtExactBoundaryAndOneBeyond(t *testing.T) {
+	t.Parallel()
+
+	byteLimits := DefaultLimits()
+	byteLimits.MaxImageBytes = 7
+	axisLimits := DefaultLimits()
+	axisLimits.MaxWidth = 20
+	axisLimits.MaxHeight = 20
+	pixelLimits := DefaultLimits()
+	pixelLimits.MaxPixels = 11
+	durationLimits := DefaultLimits()
+	durationLimits.MaxAudioDuration = 2 * time.Second
+	frameLimits := DefaultLimits()
+	frameLimits.MaxGIFFrames = 2
+	streamLimits := DefaultLimits()
+	streamLimits.MaxStreams = 2
+
+	tests := []struct {
+		name       string
+		inspection Inspection
+		limits     Limits
+		wantCode   RejectionCode
+	}{
+		{name: "bytes exact", inspection: withBytes(validInspection(KindImage), byteLimits.MaxImageBytes), limits: byteLimits},
+		{name: "bytes one beyond", inspection: withBytes(validInspection(KindImage), byteLimits.MaxImageBytes+1), limits: byteLimits, wantCode: RejectionInputTooLarge},
+		{name: "width exact", inspection: withDimensions(validInspection(KindImage), axisLimits.MaxWidth, 1), limits: axisLimits},
+		{name: "width one beyond", inspection: withDimensions(validInspection(KindImage), axisLimits.MaxWidth+1, 1), limits: axisLimits, wantCode: RejectionDimensionsExceeded},
+		{name: "height exact", inspection: withDimensions(validInspection(KindVideo), 1, axisLimits.MaxHeight), limits: axisLimits},
+		{name: "height one beyond", inspection: withDimensions(validInspection(KindVideo), 1, axisLimits.MaxHeight+1), limits: axisLimits, wantCode: RejectionDimensionsExceeded},
+		{name: "pixels exact", inspection: withDimensions(validInspection(KindVideo), 1, int(pixelLimits.MaxPixels)), limits: pixelLimits},
+		{name: "pixels one beyond", inspection: withDimensions(validInspection(KindVideo), 3, 4), limits: pixelLimits, wantCode: RejectionDimensionsExceeded},
+		{name: "duration exact", inspection: withDuration(validInspection(KindAudio), durationLimits.MaxAudioDuration), limits: durationLimits},
+		{name: "duration one beyond", inspection: withDuration(validInspection(KindAudio), durationLimits.MaxAudioDuration+time.Nanosecond), limits: durationLimits, wantCode: RejectionDurationExceeded},
+		{name: "GIF frames exact", inspection: withGIFFrames(validInspection(KindGIF), dimensions(frameLimits.MaxGIFFrames, 1, 1)), limits: frameLimits},
+		{name: "GIF frames one beyond", inspection: withGIFFrames(validInspection(KindGIF), dimensions(frameLimits.MaxGIFFrames+1, 1, 1)), limits: frameLimits, wantCode: RejectionFrameCountExceeded},
+		{name: "streams exact", inspection: withStreams(validInspection(KindAudio), streamLimits.MaxStreams), limits: streamLimits},
+		{name: "streams one beyond", inspection: withStreams(validInspection(KindAudio), streamLimits.MaxStreams+1), limits: streamLimits, wantCode: RejectionStreamCountExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := Validate(tt.inspection, tt.limits)
+			if tt.wantCode == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			assertRejection(t, err, tt.wantCode)
+		})
+	}
+}
+
+func TestValidateRejectsInvalidNonFirstGIFFrame(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	tests := []struct {
+		name       string
+		dimensions Dimensions
+	}{
+		{name: "width exceeds limit", dimensions: Dimensions{Width: limits.MaxWidth + 1, Height: 1}},
+		{name: "height exceeds limit", dimensions: Dimensions{Width: 1, Height: limits.MaxHeight + 1}},
+		{name: "pixels exceed limit", dimensions: Dimensions{Width: 3840, Height: 2161}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			frames := dimensions(2, 1, 1)
+			frames[1] = tt.dimensions
+			inspection := withGIFFrames(validInspection(KindGIF), frames)
+			assertRejection(t, Validate(inspection, limits), RejectionDimensionsExceeded)
+		})
+	}
+}
+
 func TestValidateRejectsMalformedContradictoryAndMismatchedMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -149,16 +229,20 @@ func TestValidateRejectsMalformedContradictoryAndMismatchedMetadata(t *testing.T
 		{name: "missing input size", input: withBytes(validInspection(KindImage), 0), code: RejectionInvalidMetadata},
 		{name: "negative input size", input: withBytes(validInspection(KindImage), -1), code: RejectionInvalidMetadata},
 		{name: "missing streams", input: withStreams(validInspection(KindAudio), 0), code: RejectionInvalidMetadata},
+		{name: "negative streams", input: withStreams(validInspection(KindAudio), -1), code: RejectionInvalidMetadata},
 		{name: "missing image dimensions", input: withDimensions(validInspection(KindImage), 0, 0), code: RejectionInvalidMetadata},
+		{name: "negative image width", input: withDimensions(validInspection(KindImage), -1, 1), code: RejectionInvalidMetadata},
 		{name: "partial video dimensions", input: withDimensions(validInspection(KindVideo), 1920, 0), code: RejectionInvalidMetadata},
 		{name: "image has duration", input: withDuration(validInspection(KindImage), time.Second), code: RejectionInvalidMetadata},
 		{name: "image has GIF frames", input: withGIFFrames(validInspection(KindImage), dimensions(1, 1, 1)), code: RejectionInvalidMetadata},
 		{name: "audio has dimensions", input: withDimensions(validInspection(KindAudio), 1, 1), code: RejectionInvalidMetadata},
 		{name: "audio has GIF frame count", input: withGIFFrames(validInspection(KindAudio), dimensions(1, 1, 1)), code: RejectionInvalidMetadata},
 		{name: "video missing duration", input: withDuration(validInspection(KindVideo), 0), code: RejectionInvalidMetadata},
+		{name: "audio has negative duration", input: withDuration(validInspection(KindAudio), -time.Second), code: RejectionInvalidMetadata},
 		{name: "video has GIF frames", input: withGIFFrames(validInspection(KindVideo), dimensions(1, 1, 1)), code: RejectionInvalidMetadata},
 		{name: "GIF missing duration", input: withDuration(validInspection(KindGIF), 0), code: RejectionInvalidMetadata},
 		{name: "GIF missing frame count", input: Inspection{Kind: KindGIF, InputBytes: 1, StreamCount: 1, Duration: time.Second}, code: RejectionInvalidMetadata},
+		{name: "GIF has negative frame count", input: Inspection{Kind: KindGIF, InputBytes: 1, StreamCount: 1, Duration: time.Second, GIFFrameCount: -1}, code: RejectionInvalidMetadata},
 		{name: "GIF frame count contradicts dimensions", input: Inspection{Kind: KindGIF, InputBytes: 1, StreamCount: 1, Duration: time.Second, GIFFrameCount: 2, GIFFrameDimensions: dimensions(1, 1, 1)}, code: RejectionInvalidMetadata},
 		{name: "GIF frame lacks width", input: withGIFDimensions(validInspection(KindGIF), 0, 1), code: RejectionInvalidMetadata},
 		{name: "GIF carries non-frame dimensions", input: withDimensions(validInspection(KindGIF), 1, 1), code: RejectionInvalidMetadata},
