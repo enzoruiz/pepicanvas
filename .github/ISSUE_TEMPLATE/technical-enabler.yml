@@ -130,6 +130,17 @@ body:
       required: true
 
   - type: textarea
+    id: cross_cutting_controls
+    attributes:
+      label: Controles técnicos transversales
+      description: Consulte el contrato canónico en docs/stack.md. Escriba una línea por control aplicable con su ID y la evidencia esperada; use “No aplica” con justificación cuando corresponda.
+      placeholder: |
+        CTRL-... — Evidencia esperada ...
+        No aplica — Justificación ...
+    validations:
+      required: true
+
+  - type: textarea
     id: definition_of_done
     attributes:
       label: Definición de Terminado
