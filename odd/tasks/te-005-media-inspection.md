@@ -69,7 +69,8 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
   - Final verification: the focused race test returned `ok github.com/enzoruiz/pepicanvas/backend/internal/media (cached)`; the full backend race suite returned `ok` for `internal/access` in `1.009s` and `internal/media` from cache; `git diff --check` produced no output.
   - Runtime harness: N/A for this pure domain contract; MEDIA-01 has no process, filesystem, network, persistence, quota, or playback boundary.
   - Rollback boundary: revert the MEDIA-01 work-unit commit to remove only this tracker and `backend/internal/media`; the existing access package and backend module remain unchanged.
-  - Commit and exact authored size: pending local commit and evidence readback.
+  - Commit: `296bf1b` (`feat(media): define inspection acceptance contract`).
+  - Authored change size: 687 inserted lines across five files: 564 lines for the domain contract and tests plus 123 lines for this governing tracker.
 - [ ] **MEDIA-02 — Controlled ffprobe, full ffmpeg decode adapter, and process containment**
   - Route: security-sensitive adapter work; reassess risk before implementation under `ask-on-risk`.
   - Acceptance: shell-free controlled arguments, full decode, timeout, bounded capture, descendant termination, temporary isolation and cleanup, and enforceable process, memory, and CPU containment.
@@ -116,8 +117,8 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
 - This tracker is the first file written for TE-005 in this worktree; no source file was changed before its creation.
 - MEDIA-01 is implemented test-first with exact-boundary, one-beyond, malformed-state, kind/property mismatch, horizontal/vertical dimension, invalid-configuration, and safe-rejection coverage.
 - The cohesive domain-and-tests work unit exceeds the advisory 400-line review budget. It cannot be split without separating behavior from its tests, so remote delivery requires an explicit size-risk decision rather than code compression.
-- MEDIA-01 commit identity and exact authored line count are pending local commit and tracker-only evidence follow-up.
+- MEDIA-01 completed in `296bf1b` with 687 inserted lines and all required local checks passing.
 
 ## Next step
 
-Record the MEDIA-01 commit identity and exact slice size, then stop before MEDIA-02 for its `ask-on-risk` process-containment assessment.
+Stop before MEDIA-02 and perform its `ask-on-risk` process-containment assessment before any adapter or fixture work.
