@@ -32,7 +32,9 @@ fail() {
 
 start_count=$(grep -c '^<!-- CONTROL-CONTRACT:START -->$' "$CONTRACT" || true)
 end_count=$(grep -c '^<!-- CONTROL-CONTRACT:END -->$' "$CONTRACT" || true)
-[ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] || fail 'bloque canónico inválido'
+if [ "$start_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+  fail 'bloque canónico inválido'
+fi
 
 start_line=$(awk '/^<!-- CONTROL-CONTRACT:START -->$/ { print NR }' "$CONTRACT")
 end_line=$(awk '/^<!-- CONTROL-CONTRACT:END -->$/ { print NR }' "$CONTRACT")
