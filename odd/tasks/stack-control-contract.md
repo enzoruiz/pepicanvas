@@ -65,7 +65,10 @@ The MVP stack covers the core technologies, but recovery, boundary security, pil
 - STACK-03 commit: `b6c124e` (`feat(issues): enforce cross-cutting control mapping`).
 - Running authored local lines: 332 across both work units, below the 400-line delivery threshold.
 - Review outcome: `disabled/unmanaged`; RDD was globally disabled, so ordinary repository policy applies.
+- STACK-04 partial remote progress: all 38 pre-existing issues were updated and read back; TE-012 through TE-015 were created as issues #40–#43.
+- TE-016 creation returned no identity during a network failure. Later authoritative reads confirmed that issue #44 does not exist and no TE-016 issue was created. TE-017 was not attempted.
+- Remote continuation is paused pending an explicit renewed instruction for a fresh TE-016 creation attempt followed by TE-017.
 
 ## Next step
 
-Commit the two verified local work units, record their identities, then prepare the separately authorized backlog update.
+Resolve the interrupted TE-016/TE-017 publication, then reconcile the final local and remote state.
