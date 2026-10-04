@@ -83,6 +83,7 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Route: inline status reconciliation after implementation and verification.
   - Acceptance: every task records commits, exact checks, review outcome, rollback boundary, and remaining limitations.
   - Evidence: the worktree was clean after each implementation slice; parent spot-checks reran the complete Go race suite successfully after AUTH-02, AUTH-03, and AUTH-04.
+  - Commit: `82a3c4d` (`docs(odd): close TE-001 local development`).
   - Independent verification: AUTH-04 received PASS with no candidate-caused CRITICAL, WARNING, or SUGGESTION findings; official static actions, read-only permissions, trusted command inputs, Go version resolution, working directories, and unchanged control validation were confirmed.
   - Tooling limitation: `actionlint` and local ShellCheck were unavailable; read-only PyYAML assertions passed, and GitHub-hosted execution remains unobserved until an authorized push.
   - Delivery boundary: local development is complete; preparing stacked branches or pull requests is a separate remote-delivery action.
