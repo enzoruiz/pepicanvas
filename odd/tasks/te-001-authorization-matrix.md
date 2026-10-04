@@ -67,11 +67,18 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
   - Chain strategy: `stacked-to-main`; this is the second independent work unit and no remote operation or pull request was performed.
   - RDD outcome: `disabled/unmanaged`; global RDD remains off, so no receipt or review-authority workflow applied.
   - Remaining risks: no transport or persistence consumer exists yet, and consumers needing atomic state-to-operation consistency must execute the loader and callback inside their future transactional boundary.
-- [ ] **AUTH-04 — Integrate automated verification**
+- [x] **AUTH-04 — Integrate automated verification**
   - Route: delegated writer; CI and evidence must match the executable Go baseline.
   - Acceptance: CI runs the backend race suite and existing control-contract validation without weakening either check.
-  - Checks: workflow structural readback, local command parity, and `git diff --check`.
+  - Scope: added a backend-only GitHub Actions workflow for pull requests, pushes to `main`, and manual dispatch; backend or workflow changes run the Go race suite and the repository control-contract validator with read-only contents permission.
   - Test-first exception: CI configuration has no meaningful local workflow execution boundary in this worktree, so no synthetic RED was produced; verification uses local command parity and read-only YAML structure checks.
+  - Verification: `cd backend && go test -race ./...` returned `ok github.com/enzoruiz/pepicanvas/backend/internal/access (cached)`; `./scripts/check-control-contract.sh` returned `OK: contrato de controles válido`; a read-only Python 3/PyYAML `BaseLoader` parse with exact assertions for triggers, permissions, job settings, action versions, Go module input, working directory, and commands returned `OK: backend workflow YAML parsed and required structure verified`; `git diff --check` produced no output.
+  - Commit: `44c27cb` (`ci(backend): verify executable baseline`).
+  - Authored change size: 44 inserted lines across the workflow and its initial tracker evidence, within the advisory 400-line work-unit budget.
+  - Rollback boundary: revert `44c27cb` and this evidence-only follow-up to remove only the backend workflow and AUTH-04 completion record; the existing control-contract workflow and AUTH-02/AUTH-03 implementation remain intact.
+  - Remaining limitation: GitHub-hosted execution is unobserved because no push or other remote operation was authorized.
+  - Chain strategy: `stacked-to-main`; this is the third independent work unit and no remote operation or pull request was performed.
+  - RDD outcome: `disabled/unmanaged`; global RDD remains off, so no receipt or review-authority workflow applied.
 - [ ] **AUTH-05 — Reconcile evidence and close**
   - Route: inline status reconciliation after implementation and verification.
   - Acceptance: every task records commits, exact checks, review outcome, rollback boundary, and remaining limitations.
@@ -94,9 +101,10 @@ PepiCanvas needs one server-authoritative policy boundary before product feature
 - No source code was written before this tracker and its recovery mirror.
 - AUTH-02 completed in `c97f17d` with 439 inserted lines and all required local checks passing.
 - AUTH-03 completed in `d8b1f52` with 308 inserted lines and all required local checks passing.
+- AUTH-04 completed in `44c27cb` with 44 inserted lines and all required local checks passing; hosted CI remains unobserved.
 - Native assessment classified `8e64801..988c686` as medium risk because it introduces `backend/go.mod`; global RDD is disabled, and the parent spot-check `go test -race ./...` passed.
 - Running implementation size exceeded 400 lines, so subsequent work units will be delivered as independent PRs to `main` in order.
 
 ## Next step
 
-Implement AUTH-04 as the next independent stacked-to-main work unit.
+Reconcile AUTH-05 without changing the completed implementation slices.
