@@ -1,0 +1,48 @@
+name: Control contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/workflows/control-contract.yml"
+      - "docs/stack.md"
+      - "scripts/check-control-contract.sh"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/workflows/control-contract.yml"
+      - "docs/stack.md"
+      - "scripts/check-control-contract.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: control-contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate control contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Validate shell script
+        run: |
+          shellcheck scripts/check-control-contract.sh
+          sh -n scripts/check-control-contract.sh
+          dash -n scripts/check-control-contract.sh
+
+      - name: Validate control contract
+        run: ./scripts/check-control-contract.sh
