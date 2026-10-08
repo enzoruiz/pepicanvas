@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
@@ -163,7 +162,7 @@ func classify(document probeDocument, inputBytes int64, formatDuration time.Dura
 	case "mp3":
 		return classifyAudio(base, videos, audios, containerMP3, formatDuration, formatHasDuration, func(codec string) bool { return codec == "mp3" })
 	case "wav":
-		return classifyAudio(base, videos, audios, containerWAV, formatDuration, formatHasDuration, func(codec string) bool { return strings.HasPrefix(codec, "pcm_") && len(codec) > 4 })
+		return classifyAudio(base, videos, audios, containerWAV, formatDuration, formatHasDuration, isApprovedWAVCodec)
 	case "flac":
 		return classifyAudio(base, videos, audios, containerFLAC, formatDuration, formatHasDuration, func(codec string) bool { return codec == "flac" })
 	case "ogg":
@@ -174,6 +173,15 @@ func classify(document probeDocument, inputBytes int64, formatDuration time.Dura
 		return classifyVideo(base, videos, audios, containerWebM, "vp9", "opus", formatDuration, formatHasDuration)
 	default:
 		return media.Inspection{}, normalizedFormat{}, ErrorUnsupportedMedia
+	}
+}
+
+func isApprovedWAVCodec(codec string) bool {
+	switch codec {
+	case "pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -279,7 +287,11 @@ func classifyVideo(base media.Inspection, videos, audios []probeStream, normaliz
 	if len(audios) == 1 && (audios[0].Width != 0 || audios[0].Height != 0) {
 		return media.Inspection{}, normalizedFormat{}, ErrorInvalidProbe
 	}
-	duration, ok := normalizedDuration(formatDuration, formatHasDuration, videos[0].Duration)
+	durationSources := []json.RawMessage{videos[0].Duration}
+	if len(audios) == 1 {
+		durationSources = append(durationSources, audios[0].Duration)
+	}
+	duration, ok := normalizedDuration(formatDuration, formatHasDuration, durationSources...)
 	if !ok {
 		return media.Inspection{}, normalizedFormat{}, ErrorInvalidProbe
 	}
@@ -293,18 +305,24 @@ func classifyVideo(base media.Inspection, videos, audios []probeStream, normaliz
 	return base, normalized, ""
 }
 
-func normalizedDuration(formatDuration time.Duration, formatPresent bool, streamRaw json.RawMessage) (time.Duration, bool) {
-	streamDuration, streamPresent, valid := parseDuration(streamRaw)
-	if !valid || (!formatPresent && !streamPresent) {
-		return 0, false
+func normalizedDuration(formatDuration time.Duration, formatPresent bool, streamRaw ...json.RawMessage) (time.Duration, bool) {
+	duration := formatDuration
+	durationPresent := formatPresent
+	for _, raw := range streamRaw {
+		streamDuration, streamPresent, valid := parseDuration(raw)
+		if !valid {
+			return 0, false
+		}
+		if !streamPresent {
+			continue
+		}
+		if durationPresent && duration != streamDuration {
+			return 0, false
+		}
+		duration = streamDuration
+		durationPresent = true
 	}
-	if formatPresent && streamPresent && formatDuration != streamDuration {
-		return 0, false
-	}
-	if formatPresent {
-		return formatDuration, true
-	}
-	return streamDuration, true
+	return duration, durationPresent
 }
 
 func parseDuration(raw json.RawMessage) (time.Duration, bool, bool) {
@@ -325,5 +343,9 @@ func parseDuration(raw json.RawMessage) (time.Duration, bool, bool) {
 	if math.IsNaN(nanoseconds) || math.IsInf(nanoseconds, 0) || nanoseconds > float64(math.MaxInt64) {
 		return 0, true, false
 	}
-	return time.Duration(math.Round(nanoseconds)), true, true
+	duration := time.Duration(math.Round(nanoseconds))
+	if duration <= 0 {
+		return 0, true, false
+	}
+	return duration, true, true
 }

@@ -29,15 +29,20 @@ func TestNormalizeProbeAcceptsApprovedMatrix(t *testing.T) {
 		{name: "PNG", format: "image2", streams: video("png", 800, 600, ""), kind: media.KindImage, container: containerPNG, videoCodec: "png"},
 		{name: "WebP", format: "webp_pipe", streams: video("webp", 800, 600, ""), kind: media.KindImage, container: containerWebP, videoCodec: "webp"},
 		{name: "MP3", format: "mp3", streams: audio("mp3", "2.5"), kind: media.KindAudio, container: containerMP3, audioCodec: "mp3", duration: 2500 * time.Millisecond},
-		{name: "WAV PCM", format: "wav", streams: audio("pcm_s16le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_s16le", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM unsigned 8-bit", format: "wav", streams: audio("pcm_u8", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_u8", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM signed 16-bit little-endian", format: "wav", streams: audio("pcm_s16le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_s16le", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM signed 24-bit little-endian", format: "wav", streams: audio("pcm_s24le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_s24le", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM signed 32-bit little-endian", format: "wav", streams: audio("pcm_s32le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_s32le", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM float 32-bit little-endian", format: "wav", streams: audio("pcm_f32le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_f32le", duration: 2500 * time.Millisecond},
+		{name: "WAV PCM float 64-bit little-endian", format: "wav", streams: audio("pcm_f64le", "2.5"), kind: media.KindAudio, container: containerWAV, audioCodec: "pcm_f64le", duration: 2500 * time.Millisecond},
 		{name: "FLAC", format: "flac", streams: audio("flac", "2.5"), kind: media.KindAudio, container: containerFLAC, audioCodec: "flac", duration: 2500 * time.Millisecond},
 		{name: "Ogg Vorbis", format: "ogg", streams: audio("vorbis", "2.5"), kind: media.KindAudio, container: containerOgg, audioCodec: "vorbis", duration: 2500 * time.Millisecond},
 		{name: "Ogg Opus", format: "ogg", streams: audio("opus", "2.5"), kind: media.KindAudio, container: containerOgg, audioCodec: "opus", duration: 2500 * time.Millisecond},
 		{name: "M4A AAC", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: audio("aac", "2.5"), kind: media.KindAudio, container: containerISOBaseMedia, audioCodec: "aac", duration: 2500 * time.Millisecond},
 		{name: "MP4 H.264", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1920, 1080, "2.5"), kind: media.KindVideo, container: containerISOBaseMedia, videoCodec: "h264", duration: 2500 * time.Millisecond},
-		{name: "MP4 H.264 AAC", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1920, 1080, "2.5") + "," + audio("aac", ""), kind: media.KindVideo, container: containerISOBaseMedia, videoCodec: "h264", audioCodec: "aac", duration: 2500 * time.Millisecond},
+		{name: "MP4 H.264 AAC", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1920, 1080, "2.5") + "," + audio("aac", "2.5"), kind: media.KindVideo, container: containerISOBaseMedia, videoCodec: "h264", audioCodec: "aac", duration: 2500 * time.Millisecond},
 		{name: "WebM VP9", format: "matroska,webm", streams: video("vp9", 1920, 1080, "2.5"), kind: media.KindVideo, container: containerWebM, videoCodec: "vp9", duration: 2500 * time.Millisecond},
-		{name: "WebM VP9 Opus", format: "matroska,webm", streams: video("vp9", 1920, 1080, "2.5") + "," + audio("opus", ""), kind: media.KindVideo, container: containerWebM, videoCodec: "vp9", audioCodec: "opus", duration: 2500 * time.Millisecond},
+		{name: "WebM VP9 Opus", format: "matroska,webm", streams: video("vp9", 1920, 1080, "2.5") + "," + audio("opus", "2.5"), kind: media.KindVideo, container: containerWebM, videoCodec: "vp9", audioCodec: "opus", duration: 2500 * time.Millisecond},
 	}
 
 	for _, tt := range tests {
@@ -107,6 +112,7 @@ func TestNormalizeProbeRejectsDisallowedAndContradictoryStreams(t *testing.T) {
 		{name: "unknown codec", format: "mp3", streams: audio("ac3", "1")},
 		{name: "JPEG codec mismatch", format: "jpeg_pipe", streams: video("png", 1, 1, "")},
 		{name: "WAV non-PCM", format: "wav", streams: audio("aac", "1")},
+		{name: "WAV fake PCM prefix codec", format: "wav", streams: audio("pcm_not_a_codec", "1")},
 		{name: "M4A wrong codec", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: audio("opus", "1")},
 		{name: "MP4 wrong video codec", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("vp9", 1, 1, "1")},
 		{name: "MP4 wrong audio codec", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1, 1, "1") + "," + audio("opus", "")},
@@ -114,6 +120,8 @@ func TestNormalizeProbeRejectsDisallowedAndContradictoryStreams(t *testing.T) {
 		{name: "WebM wrong audio codec", format: "matroska,webm", streams: video("vp9", 1, 1, "1") + "," + audio("aac", "")},
 		{name: "extra subtitle stream", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1, 1, "1") + `,{"codec_type":"subtitle","codec_name":"mov_text"}`},
 		{name: "extra data stream", format: "matroska,webm", streams: video("vp9", 1, 1, "1") + `,{"codec_type":"data","codec_name":"bin_data"}`},
+		{name: "extra attachment stream", format: "matroska,webm", streams: video("vp9", 1, 1, "1") + `,{"codec_type":"attachment","codec_name":"ttf"}`},
+		{name: "arbitrary unknown stream type", format: "matroska,webm", streams: video("vp9", 1, 1, "1") + `,{"codec_type":"mystery","codec_name":"unknown"}`},
 		{name: "multiple video streams", format: "mov,mp4,m4a,3gp,3g2,mj2", streams: video("h264", 1, 1, "1") + "," + video("h264", 1, 1, "1")},
 		{name: "multiple audio streams", format: "mp3", streams: audio("mp3", "1") + "," + audio("mp3", "1")},
 		{name: "mixed audio and video in audio container", format: "mp3", streams: audio("mp3", "1") + "," + video("mjpeg", 1, 1, "")},
@@ -190,6 +198,7 @@ func TestNormalizeProbeParsesDurationFieldsRobustly(t *testing.T) {
 		{name: "negative infinity", formatDuration: `"-Inf"`, streamDuration: ``, code: ErrorInvalidProbe},
 		{name: "negative", formatDuration: `"-1"`, streamDuration: ``, code: ErrorInvalidProbe},
 		{name: "zero", formatDuration: `"0"`, streamDuration: ``, code: ErrorInvalidProbe},
+		{name: "positive sub-nanosecond rounds to zero", formatDuration: `0.0000000004`, streamDuration: ``, code: ErrorInvalidProbe},
 		{name: "malformed", formatDuration: `"one"`, streamDuration: ``, code: ErrorInvalidProbe},
 		{name: "overflow", formatDuration: `"999999999999999999999"`, streamDuration: ``, code: ErrorInvalidProbe},
 	}
@@ -209,6 +218,35 @@ func TestNormalizeProbeParsesDurationFieldsRobustly(t *testing.T) {
 			if inspection.Duration != tt.want {
 				t.Fatalf("Duration = %s, want %s", inspection.Duration, tt.want)
 			}
+		})
+	}
+}
+
+func TestNormalizeProbeRejectsContradictoryOptionalAudioDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		format  string
+		streams string
+	}{
+		{
+			name:    "MP4 AAC duration contradicts format and video",
+			format:  "mov,mp4,m4a,3gp,3g2,mj2",
+			streams: video("h264", 1920, 1080, "2.5") + "," + audio("aac", "3"),
+		},
+		{
+			name:    "WebM Opus duration contradicts format and video",
+			format:  "matroska,webm",
+			streams: video("vp9", 1920, 1080, "2.5") + "," + audio("opus", "3"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := NormalizeProbe(probe(tt.format, tt.streams, "2.5"), 1234, maxProbeBytes)
+			assertAdapterError(t, err, ErrorInvalidProbe)
 		})
 	}
 }

@@ -61,7 +61,7 @@ Classification and allowlisting use content-derived container and codec metadata
 
 - Images: JPEG, PNG, and WebP.
 - Animated image: GIF.
-- Audio: MP3; WAV with PCM; FLAC; Ogg with Vorbis or Opus; M4A with AAC.
+- Audio: MP3; WAV with `pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`, or `pcm_f64le`; FLAC; Ogg with Vorbis or Opus; M4A with AAC.
 - Video: MP4 with H.264 and optional AAC; WebM with VP9 and optional Opus.
 - Every other container or codec combination is outside the MVP and fails closed.
 
@@ -107,6 +107,15 @@ Classification and allowlisting use content-derived container and codec metadata
     - Rollback boundary: revert this work-unit commit to remove the parser, its tests, the `MaxTasks` semantic correction, and this evidence without changing MEDIA-01 validation behavior.
     - Commit evidence: parent `9a1a18d`; Conventional Commit subject `feat(media): normalize ffprobe metadata`. The resulting hash is reported from Git after commit because a commit cannot embed its own identity.
     - Authored change size: the final pre-commit diff contains 675 inserted and 15 deleted lines across five files, or 690 authored changed lines. The approximately 400-line heuristic remains advisory; this cohesive parser, contract correction, exhaustive tests, and evidence unit is reported honestly rather than code-golfed.
+    - Independent verification findings: accepted MP4/WebM inspections ignored contradictory present AAC/Opus stream durations; positive durations below half a nanosecond could normalize to zero while returning success; the WAV allowlist accepted any nonempty `pcm_` prefix; and attachment plus arbitrary unknown stream rejection lacked explicit proof.
+    - Approved WAV refinement: the exact MVP set is `pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`, and `pcm_f64le`. Prefix-based or other PCM codec names remain unsupported unless separately approved.
+    - Correction RED: after adding the regressions first, `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` failed in three independent areas: contradictory optional AAC and Opus duration cases returned nil errors, the positive sub-nanosecond duration returned nil, and `pcm_not_a_codec` returned nil; `internal/media` passed in `1.010s`.
+    - Correction GREEN: after reconciling every present accepted duration source, rejecting rounded-zero durations, and closing the WAV codec set, the same focused command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.010s`. The approved-matrix success cases continue to pass `media.Validate`, while GIF remains the documented intentionally incomplete exception.
+    - Correction coverage: table-driven regressions cover contradictory optional AAC and Opus duration, positive sub-nanosecond duration, all six approved WAV codecs, fake `pcm_not_a_codec`, attachment streams, and arbitrary unknown stream types.
+    - Correction boundary: this follow-up changes only pure normalization, its tests, and this tracker. It does not add command execution, real media tools, process containment, or any remote operation.
+    - Correction verification: the final focused race command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.011s`; the full backend race suite returned `ok` for `internal/access` in `1.010s` and for `internal/media` plus `internal/platform/mediaexec` in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
+    - Correction commit evidence: parent `7555d25`; Conventional Commit subject `fix(media): close probe normalization gaps`. The resulting hash is reported from Git after commit because a commit cannot embed its own identity.
+    - Delivery status: no `size:exception` is claimed for MEDIA-02A, and the approximately 400-line delivery decision remains unresolved pending maintainer review of the cumulative slice.
   - [ ] **MEDIA-02B — Controlled commands, bounded capture, and complete decode**
     - Own shell-free argument construction, bounded stdout/stderr capture, temporary staging and cleanup, separate all-frame GIF metadata, complete ffmpeg decoding, timeout behavior, and deterministic helper-process tests without real media fixtures.
   - [ ] **MEDIA-02C — Linux cgroup v2 containment**
@@ -160,7 +169,8 @@ Classification and allowlisting use content-derived container and codec metadata
 - The maintainer accepted `size:exception` for the cohesive 778-line MEDIA-01 slice after independent verification; subsequent slices remain subject to the approximately 400-line review budget and `stacked-to-main` strategy.
 - The maintainer authorized `backend/internal/platform/mediaexec`, a closed MVP container/codec matrix, a 64-task cgroup limit, and fail-closed cgroup v2 delegation as a Linux deployment prerequisite for MEDIA-02.
 - MEDIA-02A remains pure and adds no domain port because command execution has not been introduced; MEDIA-02B will define the useful execution boundary against an actual caller.
+- MEDIA-02A correction closes the independent duration, rounded-zero, exact-WAV-allowlist, and unsupported-stream proof findings without changing its pure-parser boundary. No MEDIA-02A size exception or approximately 400-line decision has been made.
 
 ## Next step
 
-Implement MEDIA-02B as the next bounded work unit: controlled command construction, bounded capture, temporary staging, separate all-frame GIF metadata, and complete decode with deterministic helper processes. Do not add cgroup containment or real media fixtures in that slice.
+After independent review of the MEDIA-02A correction and a separate delivery-size decision, implement MEDIA-02B as the next bounded work unit: controlled command construction, bounded capture, temporary staging, separate all-frame GIF metadata, and complete decode with deterministic helper processes. Do not add cgroup containment or real media fixtures in that slice.
