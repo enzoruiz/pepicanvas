@@ -146,6 +146,12 @@ Classification and allowlisting use content-derived container and codec metadata
     - Next step: MEDIA-02C supplies the production cgroup-v2 Runner, delegated containment, descendant termination, and task/memory/CPU enforcement as a separate `stacked-to-main` slice.
   - [ ] **MEDIA-02C — Linux cgroup v2 containment**
     - Own delegated cgroup setup and cleanup, 64-task process/thread enforcement, memory and CPU limits, descendant termination, and fail-closed unsupported-environment behavior.
+    - Atomic launch: use Linux `syscall.SysProcAttr.UseCgroupFD` and `CgroupFD` so `clone3(CLONE_INTO_CGROUP)` places the child in its command cgroup before it can fork. Unsupported kernels, seccomp profiles, controllers, delegation, or `cgroup.kill` fail closed; post-start attachment is forbidden.
+    - CPU policy: cap aggregate bandwidth at one CPU, monitor inspection-parent `cpu.stat` against one shared 30-CPU-second budget, and apply a conservative shared wall-time backstop. This may reject an idle or throttled command early but never grants a fresh CPU budget per tool invocation.
+    - [ ] **MEDIA-02C1 — Contained execution result contract**
+      - Extend the Runner boundary with inspection-scoped execution lifecycle and fixed safe failure classifications; adapt orchestration and tests without implementing Linux cgroup mutation.
+    - [ ] **MEDIA-02C2 — Linux cgroup v2 runner**
+      - Implement delegated controller validation, per-inspection and per-command groups, atomic launch, memory/swap/task/CPU enforcement, recursive kill, process-group fallback, direct reaping, empty-group verification, cleanup, and opt-in real-cgroup tests.
 - [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
   - Route: integration work with external binaries and curated fixtures; keep generated or binary evidence outside review scope unless explicitly authorized.
   - Acceptance: pinned valid and adversarial fixtures prove content-derived classification, truncation rejection, all-frame GIF validation, complete decode, cleanup, and safe failures against exact tool versions.
@@ -183,7 +189,7 @@ Classification and allowlisting use content-derived container and codec metadata
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Active branch: `feat/te-005-mediaexec-runner`; MEDIA-01 began on `feat/te-005-media-inspection`, which remains part of the recorded branch history.
+- Active branch: `feat/te-005-mediaexec-containment`; earlier slices remain recorded on `feat/te-005-media-inspection`, `feat/te-005-mediaexec-adapter`, and `feat/te-005-mediaexec-runner`.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
@@ -200,4 +206,4 @@ Classification and allowlisting use content-derived container and codec metadata
 
 ## Next step
 
-Create the MEDIA-02C branch and implement a production cgroup-v2 Runner with delegated task, memory, CPU, descendant-termination, and cleanup enforcement. Do not add real media fixtures in that slice.
+Implement MEDIA-02C1 test-first: define the inspection-scoped contained execution/result contract and adapt safe error mapping before adding Linux cgroup mutation. Do not add real media fixtures.
