@@ -195,6 +195,27 @@ func TestInspectCommandsAreIsolatedFromRunnerMutation(t *testing.T) {
 	}
 }
 
+func TestInspectOmitsUnsupportedFFprobeNoStdinOption(t *testing.T) {
+	t.Parallel()
+
+	config := testConfig(t)
+	adapter, err := New(config, runnerFunc(func(_ context.Context, command Command, stdout, _ io.Writer) error {
+		if command.Path == config.FFprobePath {
+			if contains(command.Args, "-nostdin") {
+				t.Fatalf("ffprobe arguments contain unsupported -nostdin option: %v", command.Args)
+			}
+			_, _ = io.WriteString(stdout, imageProbe())
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Inspect(context.Background(), strings.NewReader("x")); err != nil {
+		t.Fatalf("Inspect() error = %v, want nil", err)
+	}
+}
+
 func TestInspectStagesPrivatelyAndAlwaysCleansUp(t *testing.T) {
 	t.Parallel()
 

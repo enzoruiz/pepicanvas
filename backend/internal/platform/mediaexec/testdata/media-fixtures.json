@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "deterministic_generation_intent": "Generate two byte-identical, metadata-stripped, bitexact, single-threaded, bounded fixtures from fixed lavfi sources; generated media remains disposable and is never checked in.",
+  "tools": {
+    "ffmpeg_path": "/usr/bin/ffmpeg",
+    "ffmpeg_first_line": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "ffprobe_path": "/usr/bin/ffprobe",
+    "ffprobe_first_line": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
+  },
+  "fixtures": [
+    {
+      "id": "jpeg-misnamed-mp3",
+      "filename": "still.mp3",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "color=c=red:s=32x24:r=1", "-frames:v", "1", "-map_metadata", "-1", "-threads", "1", "-c:v", "mjpeg", "-flags:v", "+bitexact", "-pix_fmt", "yuvj420p", "-f", "image2"],
+      "sha256": "66d10c5b22d20b054397de60b38256251da18af7ca9844c026abaee2fe959d5b",
+      "kind": "image", "container": "jpeg", "video_codec": "mjpeg", "width": 32, "height": 24, "stream_count": 1
+    },
+    {
+      "id": "png",
+      "filename": "still.png",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "color=c=green:s=32x24:r=1", "-frames:v", "1", "-map_metadata", "-1", "-threads", "1", "-c:v", "png", "-flags:v", "+bitexact", "-f", "image2"],
+      "sha256": "5ff6acd23d947320b6e6501f035aaa29a0c6a64437818e389266cd0ea1dbf81a",
+      "kind": "image", "container": "png", "video_codec": "png", "width": 32, "height": 24, "stream_count": 1
+    },
+    {
+      "id": "webp",
+      "filename": "still.webp",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "color=c=blue:s=32x24:r=1", "-frames:v", "1", "-map_metadata", "-1", "-threads", "1", "-c:v", "libwebp", "-lossless", "1", "-flags:v", "+bitexact", "-f", "image2"],
+      "sha256": "adb4d0e1fc9bf166d6d623209d323f71fd08ff1f08fc046a5ef7da49577127e8",
+      "kind": "image", "container": "webp", "video_codec": "webp", "width": 32, "height": 24, "stream_count": 1
+    },
+    {
+      "id": "animated-gif",
+      "filename": "animated.gif",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=3:d=1", "-map_metadata", "-1", "-threads", "1", "-c:v", "gif", "-flags:v", "+bitexact", "-f", "gif"],
+      "sha256": "6f7b2c8543ed1c67d2768e744972c9073372ab6a4dc53baf251a47dc38d89535",
+      "kind": "gif", "container": "gif", "video_codec": "gif", "width": 32, "height": 24, "duration_ns": 1000000000, "frame_count": 3, "stream_count": 1
+    },
+    {
+      "id": "mp3-misnamed-png",
+      "filename": "tone.png",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "libmp3lame", "-b:a", "64k", "-write_xing", "0", "-flags:a", "+bitexact", "-f", "mp3"],
+      "sha256": "f84a1c72d4c1cce83e2484c78faa2619d2c8cf2b49f958f2dea51f46b08342cd",
+      "kind": "audio", "container": "mp3", "audio_codec": "mp3", "duration_ns": 1032000000, "stream_count": 1
+    },
+    {
+      "id": "wav-pcm-s16le",
+      "filename": "tone.wav",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "pcm_s16le", "-flags:a", "+bitexact", "-f", "wav"],
+      "sha256": "b6199e8b6cee70dedbc6ebb2b790abf22418989a0b8ca5fbe7360153597d6ce8",
+      "kind": "audio", "container": "wav", "audio_codec": "pcm_s16le", "duration_ns": 1000000000, "stream_count": 1
+    },
+    {
+      "id": "flac",
+      "filename": "tone.flac",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "flac", "-compression_level", "5", "-flags:a", "+bitexact", "-f", "flac"],
+      "sha256": "fc15f61dcbc1bb8d5c1829a2cca66a86c158af83c601e56efe08dd567e31ca79",
+      "kind": "audio", "container": "flac", "audio_codec": "flac", "duration_ns": 1000000000, "stream_count": 1
+    },
+    {
+      "id": "ogg-vorbis",
+      "filename": "tone-vorbis.ogg",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "libvorbis", "-q:a", "4", "-flags:a", "+bitexact", "-serial_offset", "0", "-fflags", "+bitexact", "-f", "ogg"],
+      "sha256": "18691b46a0e2b5643f6110f968d9b964c73101758c81c966bd8f26b83d138900",
+      "kind": "audio", "container": "ogg", "audio_codec": "vorbis", "duration_ns": 1000000000, "stream_count": 1
+    },
+    {
+      "id": "ogg-opus",
+      "filename": "tone-opus.ogg",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "libopus", "-b:a", "64k", "-application", "audio", "-frame_duration", "20", "-flags:a", "+bitexact", "-serial_offset", "0", "-fflags", "+bitexact", "-f", "ogg"],
+      "sha256": "78b9d83c522a5fd15b6a1899fa1a69b3954acd256361c486745d9ca7a327926f",
+      "kind": "audio", "container": "ogg", "audio_codec": "opus", "duration_ns": 1006500000, "stream_count": 1
+    },
+    {
+      "id": "m4a-aac",
+      "filename": "tone.m4a",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "aac", "-b:a", "64k", "-flags:a", "+bitexact", "-movflags", "+faststart", "-f", "ipod"],
+      "sha256": "ea502b85fa4b54ded68271352505820319f5e3e84ae96376bc97a7eba10e5da8",
+      "kind": "audio", "container": "iso_base_media", "audio_codec": "aac", "duration_ns": 1000000000, "stream_count": 1
+    },
+    {
+      "id": "mp4-h264-aac",
+      "filename": "clip.mp4",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-fflags", "+bitexact", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=4:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1", "-threads", "1", "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p", "-flags:v", "+bitexact", "-c:a", "aac", "-b:a", "64k", "-flags:a", "+bitexact", "-movflags", "+faststart", "-shortest", "-f", "mp4"],
+      "sha256": "bcd3289fac416fbbf867a67535f5b20d084cb0a1cddfbe55c15aa29a7088e572",
+      "kind": "video", "container": "iso_base_media", "video_codec": "h264", "audio_codec": "aac", "width": 32, "height": 24, "duration_ns": 1000000000, "stream_count": 2
+    },
+    {
+      "id": "webm-vp9-opus",
+      "filename": "clip.webm",
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=4:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1", "-threads", "1", "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "0", "-row-mt", "0", "-tile-columns", "0", "-frame-parallel", "0", "-lag-in-frames", "0", "-flags:v", "+bitexact", "-c:a", "libopus", "-b:a", "64k", "-application", "audio", "-frame_duration", "20", "-flags:a", "+bitexact", "-shortest", "-fflags", "+bitexact", "-f", "webm"],
+      "sha256": "e420363ff1aa6afc2144a6562a835e84fcb2f247f8141d2d3b391f0d48dc774e",
+      "kind": "video", "container": "webm", "video_codec": "vp9", "audio_codec": "opus", "width": 32, "height": 24, "duration_ns": 1008000000, "stream_count": 2
+    }
+  ]
+}

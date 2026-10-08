@@ -192,10 +192,41 @@ Classification and allowlisting use content-derived container and codec metadata
       - Final independent verification: the complete `2cfc398..af3c0e5` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race suites, 50 repeated termination-precedence runs, `go vet`, Darwin cross-compilation, default integration skip, diff checks, clean status, localevents rejection, descriptor-bound root operations, deterministic result precedence, and ordered kill/reap/cleanup evidence were confirmed.
       - Residual deployment evidence: the opt-in disposable-cgroup harness was not executed because no delegated root was authorized. Atomic placement, real pseudo-file permissions, recursive descendant kill, populated transitions, and cleanup remain deployment-kernel evidence; the current harness also does not induce real memory, pids, CPU-bandwidth, CPU-time, OOM, or task-limit events.
       - Delivery decision: the maintainer accepted `size:exception` for the independently verified 1,906-line C2 security range because splitting enforcement from its deterministic containment proof and corrections would weaken reviewability; MEDIA-03 remains a separate slice.
-- [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
+- [x] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
   - Route: integration work with external binaries and curated fixtures; keep generated or binary evidence outside review scope unless explicitly authorized.
   - Acceptance: pinned valid and adversarial fixtures prove content-derived classification, truncation rejection, all-frame GIF validation, complete decode, cleanup, and safe failures against exact tool versions.
   - Checks: skippable real-tool integration tests, fixture integrity verification, complete backend race suite, and durable redacted evidence.
+  - Tool pin: the opt-in suite requires configured paths `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` and exact first lines `ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers` and `ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers`. Any path, manifest, execution, or first-line mismatch fails with a test-only diagnostic.
+  - Fixture policy: `testdata/media-fixtures.json` is text-only. Each fixture is generated twice under `t.TempDir()` through direct `exec.CommandContext` argument vectors, fixed lavfi sources, stripped metadata, bitexact output flags, one encoder thread, fixed dimensions/rates/durations, and a 20-second generation timeout. Byte-for-byte SHA-256 equality is required before the checked-in manifest hash is trusted; no generated binary is retained or committed.
+  - Fixture matrix and manifest evidence:
+
+    | Identity | Expected content identity | Expected shape | SHA-256 |
+    |---|---|---|---|
+    | `jpeg-misnamed-mp3` (`still.mp3`) | image / JPEG / MJPEG | 32x24, 1 stream | `66d10c5b22d20b054397de60b38256251da18af7ca9844c026abaee2fe959d5b` |
+    | `png` | image / PNG | 32x24, 1 stream | `5ff6acd23d947320b6e6501f035aaa29a0c6a64437818e389266cd0ea1dbf81a` |
+    | `webp` | image / WebP | 32x24, 1 stream | `adb4d0e1fc9bf166d6d623209d323f71fd08ff1f08fc046a5ef7da49577127e8` |
+    | `animated-gif` | GIF / GIF | 32x24, 1.000 s, 3 frames, 1 stream | `6f7b2c8543ed1c67d2768e744972c9073372ab6a4dc53baf251a47dc38d89535` |
+    | `mp3-misnamed-png` (`tone.png`) | audio / MP3 | 1.032 s, 1 stream | `f84a1c72d4c1cce83e2484c78faa2619d2c8cf2b49f958f2dea51f46b08342cd` |
+    | `wav-pcm-s16le` | audio / WAV / `pcm_s16le` | 1.000 s, 1 stream | `b6199e8b6cee70dedbc6ebb2b790abf22418989a0b8ca5fbe7360153597d6ce8` |
+    | `flac` | audio / FLAC | 1.000 s, 1 stream | `fc15f61dcbc1bb8d5c1829a2cca66a86c158af83c601e56efe08dd567e31ca79` |
+    | `ogg-vorbis` | audio / Ogg / Vorbis | 1.000 s, 1 stream | `18691b46a0e2b5643f6110f968d9b964c73101758c81c966bd8f26b83d138900` |
+    | `ogg-opus` | audio / Ogg / Opus | 1.0065 s, 1 stream | `78b9d83c522a5fd15b6a1899fa1a69b3954acd256361c486745d9ca7a327926f` |
+    | `m4a-aac` | audio / ISO base media / AAC | 1.000 s, 1 stream | `ea502b85fa4b54ded68271352505820319f5e3e84ae96376bc97a7eba10e5da8` |
+    | `mp4-h264-aac` | video / MP4 / H.264 + AAC | 32x24, 1.000 s, 2 streams | `bcd3289fac416fbbf867a67535f5b20d084cb0a1cddfbe55c15aa29a7088e572` |
+    | `webm-vp9-opus` | video / WebM / VP9 + Opus | 32x24, 1.008 s, 2 streams | `e420363ff1aa6afc2144a6562a835e84fcb2f247f8141d2d3b391f0d48dc774e` |
+
+  - Pipeline proof: every valid fixture enters the production `Adapter` through a test-only direct-process C1 `Runner`, then follows production probe, `NormalizeProbe`, domain `Validate`, GIF all-frame merge where applicable, and complete `ffmpeg` decode. The runner never instantiates or mutates a cgroup. Captured production metadata is checked again through `NormalizeProbe` solely to compare manifest container/codecs, not through an alternate parser or acceptance algorithm.
+  - Adversarial proof: the two deliberately misleading names classify from bytes; representative truncated JPEG, GIF, MP3, and MP4 inputs reject; a fixed three-quarter MP4 truncation reaches metadata acceptance and then fails complete decode. Every rejection remains a fixed typed public error, excludes paths, arguments, stderr, raw metadata, and fixture bytes, and leaves the adapter staging root empty. Success paths also prove removal of each observed staging directory.
+  - RED generation evidence: the first opt-in run completed in package time `1.148s` and failed all placeholder manifest hashes; it also proved that Ogg Vorbis, Ogg Opus, and WebM were initially not reproducible because bitexact muxer flags had been placed only in input scope. Moving those flags to output scope made both generated copies byte-identical.
+  - RED production evidence: after installing the generated hashes, the opt-in run completed in package time `1.484s` and every valid probe failed before normalization. Pinned `ffprobe` reported `Failed to set value '-protocol_whitelist' for option 'nostdin': Option not found`, proving the existing ffprobe argument slice was not executable against the pinned tool.
+  - GREEN: the smallest allowed-surface production correction removes the unsupported `-nostdin` token only when the adapter dispatches its configured ffprobe executable; ffmpeg retains `-nostdin`. A focused regression proves the runner never receives that ffprobe token. The complete opt-in suite then passed in package time `3.198s`.
+  - REFACTOR and repeatability: manifest validation, phase-specific diagnostics, direct Runner lifecycle, safe-error checks, and cleanup assertions were centralized without changing production acceptance. The required second opt-in run passed in package time `3.077s` and `3.35s` wall time with all twelve hashes stable.
+  - Final verification: default focused race execution with the opt-in variable unset passed in package time `2.059s` and `2.46s` wall time; the explicit short-mode opt-in check skipped before tool use and passed in package time `0.001s` and `0.59s` wall time; the full backend race suite passed (`internal/access` `1.012s`, `internal/media` `1.011s`, `internal/platform/mediaexec` `2.052s`) in `2.33s` wall time; `go vet ./...` produced no diagnostics in `0.20s`; and `git diff --check` produced no output.
+  - Exclusions: no network, package installation, remote operation, push, pull request, cgroup construction or mutation, dependency change, checked-in media binary, persistence, quota, upload transport, transcoding, playback, or allowlist/limit expansion.
+  - Rollback boundary: revert the MEDIA-03 work-unit commit to remove the opt-in suite, text manifest, ffprobe dispatch correction and regression, and this tracker evidence while preserving the completed domain, normalization, adapter lifecycle, and cgroup containment work.
+  - Commit boundary: parent `c57c43e`; Conventional Commit subject `test(media): verify pinned real-tool fixtures`. The resulting hash is reported after commit because a commit cannot embed its own identity.
+  - Authored change size: 620 inserted and 3 deleted lines across five files, or 623 authored changed lines. The approximately 400-line heuristic remains advisory; the cohesive fixture matrix, manifest, real-tool harness, narrow compatibility fix, regression, and evidence are reported without claiming an exception.
+  - Next step: MEDIA-04 pins the same toolchain and invokes this opt-in suite in CI, then reconciles final TE-005 workflow and hosted evidence without changing the MEDIA-03 acceptance matrix.
 - [ ] **MEDIA-04 — CI/toolchain pin and complete verification**
   - Route: CI and reproducibility work; reassess the final workflow boundary before implementation.
   - Acceptance: exact `ffprobe`/`ffmpeg` versions and fixture hashes are pinned, CI runs the required media suite, and all TE-005 evidence is reconciled without weakening existing checks.
@@ -229,7 +260,7 @@ Classification and allowlisting use content-derived container and codec metadata
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Active branch: `feat/te-005-mediaexec-containment`; earlier slices remain recorded on `feat/te-005-media-inspection`, `feat/te-005-mediaexec-adapter`, and `feat/te-005-mediaexec-runner`.
+- Active branch: `feat/te-005-media-fixtures`; earlier slices remain recorded on `feat/te-005-media-inspection`, `feat/te-005-mediaexec-adapter`, `feat/te-005-mediaexec-runner`, and `feat/te-005-mediaexec-containment`.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
@@ -247,7 +278,8 @@ Classification and allowlisting use content-derived container and codec metadata
 - The maintainer accepted `size:exception` for the verified 791-line MEDIA-02C1 work unit; MEDIA-02C2 remains independently bounded and reviewed.
 - MEDIA-02C2 implements the production Linux cgroup-v2 Runner against that lifecycle, with build-tagged unsupported-platform behavior and an opt-in disposable-delegation harness; no real media tool was executed.
 - The maintainer accepted `size:exception` for the final verified 1,906-line MEDIA-02C2 range; real-tool fixtures remain isolated to MEDIA-03.
+- MEDIA-03 proves the complete existing pipeline against twelve reproducibly generated fixtures using the exact locally pinned tools, fixes the pinned ffprobe incompatibility without broadening policy, and checks in only source, tests, text manifest data, and tracker evidence.
 
 ## Next step
 
-Implement MEDIA-03 with pinned real-tool versions, curated fixture hashes, and opt-in fixture evidence while preserving the completed containment boundary.
+Implement MEDIA-04 by pinning the verified MEDIA-03 toolchain in CI and reconciling final TE-005 workflow evidence without weakening containment or fixture integrity checks.
