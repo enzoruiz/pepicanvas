@@ -92,8 +92,12 @@ type probeStream struct {
 
 // NormalizeProbe parses bounded ffprobe JSON and enforces the closed MVP
 // container/codec matrix. inputBytes comes from the trusted staging caller.
-// GIF output is intentionally incomplete until a later all-frame probe supplies
-// one verified dimension per frame; that case returns ErrorFrameMetadataRequired.
+// Successful non-GIF normalization proves structural coherence, not acceptance:
+// the result may exceed configured byte, dimension, duration, or stream limits.
+// Callers MUST pass the inspection to media.Validate with their selected limits
+// before accepting it. GIF output is intentionally incomplete until a later
+// all-frame probe supplies one verified dimension per frame; that case returns
+// ErrorFrameMetadataRequired.
 func NormalizeProbe(data []byte, inputBytes, maxJSONBytes int64) (media.Inspection, normalizedFormat, error) {
 	if inputBytes <= 0 || maxJSONBytes <= 0 || len(data) == 0 {
 		return media.Inspection{}, normalizedFormat{}, newError(ErrorInvalidProbe)

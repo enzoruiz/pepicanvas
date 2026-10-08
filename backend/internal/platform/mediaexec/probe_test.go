@@ -78,6 +78,59 @@ func TestNormalizeProbeAcceptsApprovedMatrix(t *testing.T) {
 	}
 }
 
+func TestNormalizeProbeDefersConfiguredLimitAcceptanceToDomainValidation(t *testing.T) {
+	t.Parallel()
+
+	limits := media.DefaultLimits()
+	tests := []struct {
+		name       string
+		input      []byte
+		inputBytes int64
+		code       media.RejectionCode
+	}{
+		{
+			name:       "image input exceeds default byte limit",
+			input:      probe("png_pipe", video("png", 800, 600, ""), ""),
+			inputBytes: limits.MaxImageBytes + 1,
+			code:       media.RejectionInputTooLarge,
+		},
+		{
+			name:       "image dimensions exceed default limit",
+			input:      probe("png_pipe", video("png", limits.MaxWidth+1, 1, ""), ""),
+			inputBytes: 1,
+			code:       media.RejectionDimensionsExceeded,
+		},
+		{
+			name:       "audio duration exceeds default limit",
+			input:      probe("mp3", audio("mp3", "601"), "601"),
+			inputBytes: 1,
+			code:       media.RejectionDurationExceeded,
+		},
+		{
+			name:       "video duration exceeds default limit",
+			input:      probe("matroska,webm", video("vp9", 1920, 1080, "601"), "601"),
+			inputBytes: 1,
+			code:       media.RejectionDurationExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspection, _, err := NormalizeProbe(tt.input, tt.inputBytes, maxProbeBytes)
+			if err != nil {
+				t.Fatalf("NormalizeProbe() error = %v, want nil", err)
+			}
+
+			err = media.Validate(inspection, limits)
+			var rejection *media.Rejection
+			if !errors.As(err, &rejection) || rejection.Code() != tt.code {
+				t.Fatalf("media.Validate() error = %v, want rejection %q", err, tt.code)
+			}
+		})
+	}
+}
+
 func TestNormalizeProbeMakesGIFFrameMetadataRequirementExplicit(t *testing.T) {
 	t.Parallel()
 

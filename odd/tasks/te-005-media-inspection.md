@@ -116,6 +116,10 @@ Classification and allowlisting use content-derived container and codec metadata
     - Correction verification: the final focused race command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.011s`; the full backend race suite returned `ok` for `internal/access` in `1.010s` and for `internal/media` plus `internal/platform/mediaexec` in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
     - Correction commit evidence: parent `7555d25`; Conventional Commit subject `fix(media): close probe normalization gaps`. The resulting hash is reported from Git after commit because a commit cannot embed its own identity.
     - Delivery status: no `size:exception` is claimed for MEDIA-02A, and the approximately 400-line delivery decision remains unresolved pending maintainer review of the cumulative slice.
+    - Contract clarification: `NormalizeProbe` establishes structurally coherent metadata and enforces the closed container/codec matrix; successful non-GIF output is not domain acceptance. Every caller must pass that inspection to `media.Validate` with its selected limits, which may intentionally differ from `DefaultLimits`.
+    - Verifier warning disposition: the warning that every successful non-GIF normalization must satisfy `media.Validate(DefaultLimits())` was rejected because it conflated pure normalization with configurable domain acceptance. Applying defaults inside the parser would silently override approved caller-specific limits.
+    - Clarification proof: focused table-driven cases normalize structurally valid over-default-limit image input, image dimensions, audio duration, and video duration, then prove that `media.Validate(DefaultLimits())` rejects each inspection. `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` returned `ok` for both packages in `1.010s`; `cd backend && go test -race -count=1 ./...` returned `ok` for `internal/access` in `1.012s`, `internal/media` in `1.011s`, and `internal/platform/mediaexec` in `1.013s`; `cd backend && go vet ./...` produced no output.
+    - Cumulative MEDIA-02A size: `git diff --numstat 9a1a18d..HEAD` records 807 insertions and 16 deletions across five files, or 823 authored changed lines. No `size:exception` decision has been made.
   - [ ] **MEDIA-02B — Controlled commands, bounded capture, and complete decode**
     - Own shell-free argument construction, bounded stdout/stderr capture, temporary staging and cleanup, separate all-frame GIF metadata, complete ffmpeg decoding, timeout behavior, and deterministic helper-process tests without real media fixtures.
   - [ ] **MEDIA-02C — Linux cgroup v2 containment**
@@ -157,7 +161,7 @@ Classification and allowlisting use content-derived container and codec metadata
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Branch: `feat/te-005-media-inspection`.
+- Active branch: `feat/te-005-mediaexec-adapter`; MEDIA-01 began on `feat/te-005-media-inspection`, which remains part of the recorded branch history.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
