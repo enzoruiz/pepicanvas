@@ -76,6 +76,8 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
   - Follow-up progression: this is verification-only work for already-correct production behavior, so no production RED is claimed. The first focused run exposed only test-fixture interference between custom axis and pixel limits; after each ceiling received independent limits, the focused race test passed.
   - Follow-up verification: `cd backend && go test -race -count=1 ./internal/media` returned `ok github.com/enzoruiz/pepicanvas/backend/internal/media 1.012s`; `cd backend && go test -race -count=1 ./...` returned `ok` for `internal/access` and `internal/media`, each in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
   - Follow-up rollback boundary: revert the test-strengthening work-unit commit to remove only these independent proof cases and their tracker evidence; production behavior remains unchanged.
+  - Follow-up commit: `365e687` (`test(media): strengthen inspection boundary coverage`).
+  - Independent verification: the complete `351c3f4..365e687` range passed with no CRITICAL, WARNING, or SUGGESTION findings; focused and full race tests, `go vet`, and `git diff --check` passed, and production files were unchanged by the follow-up.
 - [ ] **MEDIA-02 — Controlled ffprobe, full ffmpeg decode adapter, and process containment**
   - Route: security-sensitive adapter work; reassess risk before implementation under `ask-on-risk`.
   - Acceptance: shell-free controlled arguments, full decode, timeout, bounded capture, descendant termination, temporary isolation and cleanup, and enforceable process, memory, and CPU containment.
@@ -124,7 +126,8 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
 - The cohesive domain-and-tests work unit exceeds the advisory 400-line review budget. It cannot be split without separating behavior from its tests, so remote delivery requires an explicit size-risk decision rather than code compression.
 - MEDIA-01 completed in `296bf1b` with 687 inserted lines and all required local checks passing.
 - The bounded verification follow-up changes tests and this tracker only; no production file or behavior changed.
+- The maintainer accepted `size:exception` for the cohesive 778-line MEDIA-01 slice after independent verification; subsequent slices remain subject to the approximately 400-line review budget and `stacked-to-main` strategy.
 
 ## Next step
 
-Stop before MEDIA-02 and perform its `ask-on-risk` process-containment assessment before any adapter or fixture work.
+Assess the MEDIA-02 process-containment boundary and derive its bounded implementation surface before any adapter or fixture work.
