@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 )
@@ -37,11 +39,25 @@ var _ media.Inspector = (*Adapter)(nil)
 
 // New validates trusted configuration and fails closed without a Runner.
 func New(config Config, runner Runner) (*Adapter, error) {
-	if runner == nil || !validAbsolutePath(config.FFprobePath) || !validAbsolutePath(config.FFmpegPath) ||
-		!validTempRoot(config.TempRoot) || config.Limits.Validate() != nil ||
+	if nilRunner(runner) || config.Limits.Validate() != nil ||
 		config.Limits.MaxCapturedOutputBytes > maxCapturedOutputBytes {
 		return nil, newError(ErrorConfiguration)
 	}
+	ffprobe, ok := canonicalExecutable(config.FFprobePath)
+	if !ok {
+		return nil, newError(ErrorConfiguration)
+	}
+	ffmpeg, ok := canonicalExecutable(config.FFmpegPath)
+	if !ok {
+		return nil, newError(ErrorConfiguration)
+	}
+	tempRoot, ok := canonicalTempRoot(config.TempRoot)
+	if !ok {
+		return nil, newError(ErrorConfiguration)
+	}
+	config.FFprobePath = ffprobe
+	config.FFmpegPath = ffmpeg
+	config.TempRoot = tempRoot
 	return &Adapter{config: config, runner: runner}, nil
 }
 
@@ -139,21 +155,21 @@ func copyBounded(ctx context.Context, destination io.Writer, source io.Reader, l
 		if err := ctx.Err(); err != nil {
 			return 0, newError(ErrorTimeout)
 		}
-		readBuffer := buffer
 		remaining := limit - written
-		if remaining < int64(len(buffer)) {
-			readBuffer = buffer[:remaining+1]
-		}
+		readBuffer := buffer[:boundedReadCapacity(limit, written, len(buffer))]
 		count, readErr := source.Read(readBuffer)
+		if count < 0 || count > len(readBuffer) {
+			return 0, newError(ErrorStagingFailed)
+		}
 		if count > 0 {
-			outputCount, writeErr := destination.Write(readBuffer[:count])
-			written += int64(outputCount)
-			if writeErr != nil || outputCount != count {
-				return 0, newError(ErrorStagingFailed)
-			}
-			if written > limit {
+			if int64(count) > remaining {
 				return 0, newError(ErrorInputTooLarge)
 			}
+			outputCount, writeErr := destination.Write(readBuffer[:count])
+			if writeErr != nil || outputCount != count || outputCount < 0 {
+				return 0, newError(ErrorStagingFailed)
+			}
+			written += int64(outputCount)
 		}
 		if readErr == io.EOF {
 			return written, nil
@@ -165,6 +181,14 @@ func copyBounded(ctx context.Context, destination io.Writer, source io.Reader, l
 			continue
 		}
 	}
+}
+
+func boundedReadCapacity(limit, written int64, capacity int) int {
+	remaining := limit - written
+	if remaining >= int64(capacity) {
+		return capacity
+	}
+	return int(remaining) + 1
 }
 
 func (adapter *Adapter) run(ctx context.Context, budget *captureBudget, command Command) ([]byte, error) {
@@ -193,16 +217,46 @@ func safeNormalizationError(err error) error {
 	return newError(ErrorInvalidProbe)
 }
 
-func validAbsolutePath(path string) bool {
-	return filepath.IsAbs(path) && filepath.Clean(path) == path && path != string(filepath.Separator)
-}
-
-func validTempRoot(root string) bool {
-	if !validAbsolutePath(root) {
+func nilRunner(runner Runner) bool {
+	if runner == nil {
+		return true
+	}
+	value := reflect.ValueOf(runner)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
 		return false
 	}
-	info, err := os.Lstat(root)
-	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+func canonicalExecutable(path string) (string, bool) {
+	canonical, ok := canonicalPath(path)
+	if !ok {
+		return "", false
+	}
+	info, err := os.Stat(canonical)
+	return canonical, err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func canonicalTempRoot(root string) (string, bool) {
+	canonical, ok := canonicalPath(root)
+	if !ok || canonical == string(filepath.Separator) {
+		return "", false
+	}
+	info, err := os.Stat(canonical)
+	return canonical, err == nil && info.IsDir()
+}
+
+func canonicalPath(path string) (string, bool) {
+	if strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", false
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil || !filepath.IsAbs(canonical) {
+		return "", false
+	}
+	return canonical, true
 }
 
 func greatestInputLimit(limits media.Limits) int64 {

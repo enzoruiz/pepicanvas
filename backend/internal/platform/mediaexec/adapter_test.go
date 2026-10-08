@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,18 @@ func (run runnerFunc) Run(ctx context.Context, command Command, stdout, stderr i
 	return run(ctx, command, stdout, stderr)
 }
 
+type pointerRunner struct{}
+
+func (*pointerRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+
+type mapRunner map[string]string
+
+func (mapRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+
+type sliceRunner []string
+
+func (sliceRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+
 func TestNewAdapterFailsClosedForInvalidConfigurationOrMissingRunner(t *testing.T) {
 	t.Parallel()
 
@@ -32,9 +45,23 @@ func TestNewAdapterFailsClosedForInvalidConfigurationOrMissingRunner(t *testing.
 		runner Runner
 	}{
 		{name: "missing runner", runner: nil},
+		{name: "typed nil pointer runner", runner: (*pointerRunner)(nil)},
+		{name: "typed nil function runner", runner: runnerFunc(nil)},
+		{name: "typed nil map runner", runner: mapRunner(nil)},
+		{name: "typed nil slice runner", runner: sliceRunner(nil)},
 		{name: "relative ffprobe", mutate: func(c *Config) { c.FFprobePath = "ffprobe" }, runner: runnerFunc(noopRun)},
 		{name: "relative ffmpeg", mutate: func(c *Config) { c.FFmpegPath = "ffmpeg" }, runner: runnerFunc(noopRun)},
+		{name: "NUL ffprobe", mutate: func(c *Config) { c.FFprobePath += "\x00suffix" }, runner: runnerFunc(noopRun)},
+		{name: "missing ffprobe", mutate: func(c *Config) { c.FFprobePath = filepath.Join(c.TempRoot, "missing") }, runner: runnerFunc(noopRun)},
+		{name: "directory ffprobe", mutate: func(c *Config) { c.FFprobePath = c.TempRoot }, runner: runnerFunc(noopRun)},
+		{name: "non-executable ffprobe", mutate: func(c *Config) { c.FFprobePath = createStub(t, c.TempRoot, "not-executable", 0o600) }, runner: runnerFunc(noopRun)},
+		{name: "missing ffmpeg", mutate: func(c *Config) { c.FFmpegPath = filepath.Join(c.TempRoot, "missing") }, runner: runnerFunc(noopRun)},
+		{name: "directory ffmpeg", mutate: func(c *Config) { c.FFmpegPath = c.TempRoot }, runner: runnerFunc(noopRun)},
+		{name: "non-executable ffmpeg", mutate: func(c *Config) { c.FFmpegPath = createStub(t, c.TempRoot, "not-executable-ffmpeg", 0o600) }, runner: runnerFunc(noopRun)},
 		{name: "relative temp root", mutate: func(c *Config) { c.TempRoot = "tmp" }, runner: runnerFunc(noopRun)},
+		{name: "NUL temp root", mutate: func(c *Config) { c.TempRoot += "\x00suffix" }, runner: runnerFunc(noopRun)},
+		{name: "missing temp root", mutate: func(c *Config) { c.TempRoot = filepath.Join(c.TempRoot, "missing") }, runner: runnerFunc(noopRun)},
+		{name: "file temp root", mutate: func(c *Config) { c.TempRoot = c.FFprobePath }, runner: runnerFunc(noopRun)},
 		{name: "root temp directory", mutate: func(c *Config) { c.TempRoot = string(filepath.Separator) }, runner: runnerFunc(noopRun)},
 		{name: "zero output budget", mutate: func(c *Config) { c.Limits.MaxCapturedOutputBytes = 0 }, runner: runnerFunc(noopRun)},
 		{name: "excessive output budget", mutate: func(c *Config) { c.Limits.MaxCapturedOutputBytes = maxCapturedOutputBytes + 1 }, runner: runnerFunc(noopRun)},
@@ -49,6 +76,102 @@ func TestNewAdapterFailsClosedForInvalidConfigurationOrMissingRunner(t *testing.
 			_, err := New(config, tt.runner)
 			assertAdapterError(t, err, ErrorConfiguration)
 		})
+	}
+}
+
+func TestNewAdapterCanonicalizesTrustedPaths(t *testing.T) {
+	t.Parallel()
+
+	config := testConfig(t)
+	links := t.TempDir()
+	probeLink := filepath.Join(links, "ffprobe")
+	ffmpegLink := filepath.Join(links, "ffmpeg")
+	rootLink := filepath.Join(links, "root")
+	for link, target := range map[string]string{
+		probeLink:  config.FFprobePath,
+		ffmpegLink: config.FFmpegPath,
+		rootLink:   config.TempRoot,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config.FFprobePath = probeLink
+	config.FFmpegPath = ffmpegLink
+	config.TempRoot = rootLink
+
+	adapter, err := New(config, runnerFunc(noopRun))
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	if adapter.config.FFprobePath == probeLink || adapter.config.FFmpegPath == ffmpegLink || adapter.config.TempRoot == rootLink {
+		t.Fatalf("canonical config = %#v, still contains symlink paths", adapter.config)
+	}
+	want := testConfigPaths(t, config.FFprobePath, config.FFmpegPath, config.TempRoot)
+	if adapter.config.FFprobePath != want.FFprobePath || adapter.config.FFmpegPath != want.FFmpegPath || adapter.config.TempRoot != want.TempRoot {
+		t.Fatalf("canonical paths = %q, %q, %q; want %q, %q, %q", adapter.config.FFprobePath, adapter.config.FFmpegPath, adapter.config.TempRoot, want.FFprobePath, want.FFmpegPath, want.TempRoot)
+	}
+}
+
+func TestBoundedReadCapacityAvoidsLimitOverflow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		limit    int64
+		written  int64
+		capacity int
+		want     int
+	}{
+		{name: "maximum limit starts with full buffer", limit: math.MaxInt64, capacity: 32 * 1024, want: 32 * 1024},
+		{name: "maximum limit near boundary includes probe byte", limit: math.MaxInt64, written: math.MaxInt64 - 7, capacity: 32 * 1024, want: 8},
+		{name: "maximum limit at boundary probes one byte", limit: math.MaxInt64, written: math.MaxInt64, capacity: 32 * 1024, want: 1},
+		{name: "small limit includes probe byte", limit: 7, capacity: 32 * 1024, want: 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := boundedReadCapacity(tt.limit, tt.written, tt.capacity); got != tt.want {
+				t.Fatalf("boundedReadCapacity(%d, %d, %d) = %d, want %d", tt.limit, tt.written, tt.capacity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInspectCommandsAreIsolatedFromRunnerMutation(t *testing.T) {
+	t.Parallel()
+
+	config := testConfig(t)
+	inspection := 0
+	var secondInspection []Command
+	adapter, err := New(config, runnerFunc(func(_ context.Context, command Command, stdout, _ io.Writer) error {
+		if inspection == 0 {
+			command.Args[0] = "mutated-argument"
+			command.Env[0] = "MUTATED=1"
+		} else {
+			secondInspection = append(secondInspection, command)
+		}
+		if command.Path == config.FFprobePath {
+			_, _ = io.WriteString(stdout, imageProbe())
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Inspect(context.Background(), strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	inspection++
+	if _, err := adapter.Inspect(context.Background(), strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondInspection) != 2 {
+		t.Fatalf("second inspection commands = %d, want 2", len(secondInspection))
+	}
+	for _, command := range secondInspection {
+		if command.Args[0] != "-hide_banner" || command.Env[0] != "HOME="+command.Dir {
+			t.Fatalf("later command retained mutation: %#v", command)
+		}
 	}
 }
 
@@ -345,7 +468,42 @@ func helperProcess() {
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	limits := media.DefaultLimits()
-	return Config{FFprobePath: "/trusted/ffprobe", FFmpegPath: "/trusted/ffmpeg", TempRoot: t.TempDir(), Limits: limits}
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return Config{
+		FFprobePath: createStub(t, root, "ffprobe", 0o700),
+		FFmpegPath:  createStub(t, root, "ffmpeg", 0o700),
+		TempRoot:    staging,
+		Limits:      limits,
+	}
+}
+
+func createStub(t *testing.T, root, name string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.WriteFile(path, []byte("controlled test stub"), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func testConfigPaths(t *testing.T, paths ...string) Config {
+	t.Helper()
+	canonical := make([]string, len(paths))
+	for index, path := range paths {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonical[index] = resolved
+	}
+	return Config{FFprobePath: canonical[0], FFmpegPath: canonical[1], TempRoot: canonical[2]}
 }
 
 func noopRun(context.Context, Command, io.Writer, io.Writer) error { return nil }
