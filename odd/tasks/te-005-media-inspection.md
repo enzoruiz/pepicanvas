@@ -160,6 +160,7 @@ Classification and allowlisting use content-derived container and codec metadata
       - Rollback boundary: revert this work-unit commit to restore the MEDIA-02B one-shot test Runner and remove only the contained lifecycle/result contract, its mappings, tests, and tracker evidence.
       - Commit boundary: `4b17642` (`feat(media): define contained execution results`) on parent `d2da1be`.
       - Authored change size: the final diff contains 720 inserted and 71 deleted lines across seven files, or 791 authored changed lines. The approximately 400-line heuristic remains advisory; the actual cohesive contract and proof size is reported without claiming a size exception.
+      - Delivery decision: the maintainer accepted `size:exception` for the independently verified 791-line C1 contract because splitting its lifecycle vocabulary from the fail-closed matrix would weaken reviewability; MEDIA-02C2 remains a separate slice.
       - Runtime harness: existing test-only helper-process execution still proves deadline and aggregate output behavior; production remains free of process launch code.
       - Independent verification: the exact `d2da1be..4b17642` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race suites, `go vet`, `git diff --check`, clean status, lifecycle failure coverage, safe mappings, cleanup precedence, and absence of production `os/exec` were confirmed.
     - [ ] **MEDIA-02C2 — Linux cgroup v2 runner**
@@ -216,6 +217,7 @@ Classification and allowlisting use content-derived container and codec metadata
 - MEDIA-02A correction closes the independent duration, rounded-zero, exact-WAV-allowlist, and unsupported-stream proof findings without changing its pure-parser boundary. The maintainer accepted `size:exception` for the final verified 823-line slice because a smaller split would create non-deliverable cross-commit dependencies.
 - MEDIA-02B closes its typed-nil, canonical-path, staging-overflow, concurrent-capture, and command-isolation findings. The maintainer accepted `size:exception` for the final verified 1,212-line security unit because splitting before the hardening commit would retain known defects.
 - MEDIA-02C1 replaces the one-shot Runner error boundary with one inspection-scoped guarded execution and fixed fail-closed results while deliberately leaving Linux containment implementation to MEDIA-02C2.
+- The maintainer accepted `size:exception` for the verified 791-line MEDIA-02C1 work unit; MEDIA-02C2 remains independently bounded and reviewed.
 
 ## Next step
 
