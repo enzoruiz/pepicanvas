@@ -191,6 +191,7 @@ Classification and allowlisting use content-derived container and codec metadata
       - Final narrow correction commit boundary: `af3c0e5` (`fix(media): preserve termination failures`) on parent `94b8215`.
       - Final independent verification: the complete `2cfc398..af3c0e5` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race suites, 50 repeated termination-precedence runs, `go vet`, Darwin cross-compilation, default integration skip, diff checks, clean status, localevents rejection, descriptor-bound root operations, deterministic result precedence, and ordered kill/reap/cleanup evidence were confirmed.
       - Residual deployment evidence: the opt-in disposable-cgroup harness was not executed because no delegated root was authorized. Atomic placement, real pseudo-file permissions, recursive descendant kill, populated transitions, and cleanup remain deployment-kernel evidence; the current harness also does not induce real memory, pids, CPU-bandwidth, CPU-time, OOM, or task-limit events.
+      - Delivery decision: the maintainer accepted `size:exception` for the independently verified 1,906-line C2 security range because splitting enforcement from its deterministic containment proof and corrections would weaken reviewability; MEDIA-03 remains a separate slice.
 - [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
   - Route: integration work with external binaries and curated fixtures; keep generated or binary evidence outside review scope unless explicitly authorized.
   - Acceptance: pinned valid and adversarial fixtures prove content-derived classification, truncation rejection, all-frame GIF validation, complete decode, cleanup, and safe failures against exact tool versions.
@@ -245,6 +246,7 @@ Classification and allowlisting use content-derived container and codec metadata
 - MEDIA-02C1 replaces the one-shot Runner error boundary with one inspection-scoped guarded execution and fixed fail-closed results while deliberately leaving Linux containment implementation to MEDIA-02C2.
 - The maintainer accepted `size:exception` for the verified 791-line MEDIA-02C1 work unit; MEDIA-02C2 remains independently bounded and reviewed.
 - MEDIA-02C2 implements the production Linux cgroup-v2 Runner against that lifecycle, with build-tagged unsupported-platform behavior and an opt-in disposable-delegation harness; no real media tool was executed.
+- The maintainer accepted `size:exception` for the final verified 1,906-line MEDIA-02C2 range; real-tool fixtures remain isolated to MEDIA-03.
 
 ## Next step
 
