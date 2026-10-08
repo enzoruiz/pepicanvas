@@ -411,6 +411,42 @@ func TestLinuxRunPostReapPrecedenceIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestLinuxRunKillWriteFailuresRemainInternal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cancellation cannot mask failed termination", func(t *testing.T) {
+		fs := newFakeCgroupFS("/delegated")
+		process := &fakeProcess{block: true}
+		process.initialize()
+		ctx, cancel := context.WithCancel(context.Background())
+		execution := beginFakeExecutionContext(t, ctx, fs, &fakeLauncher{processes: []*fakeProcess{process}}, media.DefaultLimits())
+		fs.failWrite(filepath.Join(fs.ownedParent(), "cgroup.kill"), 2)
+
+		resultCh := make(chan Result, 1)
+		go func() { resultCh <- execution.Run(testCommand(), io.Discard, io.Discard) }()
+		<-process.started
+		cancel()
+
+		if result := <-resultCh; result.failureKind() != FailureInternal {
+			t.Fatalf("Run() = %#v, want internal failure instead of cancellation or success", result)
+		}
+	})
+
+	t.Run("CPU exhaustion cannot mask failed termination", func(t *testing.T) {
+		fs := newFakeCgroupFS("/delegated")
+		limits := media.DefaultLimits()
+		limits.MaxCPUTime = 10 * time.Microsecond
+		execution := beginFakeExecution(t, fs, &fakeLauncher{processes: []*fakeProcess{{block: true}}}, limits)
+		parent := fs.ownedParent()
+		fs.set(filepath.Join(parent, "cpu.stat"), "usage_usec 10\n")
+		fs.failWrite(filepath.Join(parent, "cgroup.kill"), 2)
+
+		if result := execution.Run(testCommand(), io.Discard, io.Discard); result.failureKind() != FailureInternal {
+			t.Fatalf("Run() = %#v, want internal failure instead of CPU limit or success", result)
+		}
+	})
+}
+
 func TestLinuxRunFailsClosedForDeadlineMalformedCountersAndAtomicLaunchFailure(t *testing.T) {
 	t.Parallel()
 
@@ -529,11 +565,14 @@ type fakeCgroupFS struct {
 	nextFD          int
 	onPause         func()
 	lastOwnedParent string
+	writeCalls      map[string]int
+	failWriteAt     map[string]int
 }
 
 func newFakeCgroupFS(root string) *fakeCgroupFS {
 	return &fakeCgroupFS{
 		root: root, dirs: map[string]bool{root: true}, omitOnCreate: map[string]bool{}, nextFD: 10,
+		writeCalls: map[string]int{}, failWriteAt: map[string]int{},
 		files: map[string]string{
 			filepath.Join(root, "cgroup.controllers"):     "cpu memory pids\n",
 			filepath.Join(root, "cgroup.subtree_control"): "cpu memory pids\n",
@@ -563,6 +602,11 @@ func (fs *fakeCgroupFS) WriteFile(path string, data []byte) error {
 	defer fs.mu.Unlock()
 	if _, ok := fs.files[path]; !ok {
 		return errors.New("missing")
+	}
+	fs.writeCalls[path]++
+	if fs.failWriteAt[path] == fs.writeCalls[path] {
+		fs.log = append(fs.log, "write "+path+" failed")
+		return errors.New("write failed")
 	}
 	fs.files[path] = string(data)
 	fs.log = append(fs.log, "write "+path+"="+string(data))
@@ -638,6 +682,11 @@ func (fs *fakeCgroupFS) Pause(context.Context, time.Duration) bool {
 	return true
 }
 func (fs *fakeCgroupFS) set(path, value string) { fs.mu.Lock(); fs.files[path] = value; fs.mu.Unlock() }
+func (fs *fakeCgroupFS) failWrite(path string, call int) {
+	fs.mu.Lock()
+	fs.failWriteAt[path] = call
+	fs.mu.Unlock()
+}
 func (fs *fakeCgroupFS) record(operation string) {
 	fs.mu.Lock()
 	fs.log = append(fs.log, operation)

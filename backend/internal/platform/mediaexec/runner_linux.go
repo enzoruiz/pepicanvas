@@ -576,6 +576,9 @@ classified:
 	if kind := execution.eventDelta(beforeMemory, beforeTasks); kind != 0 {
 		return FailedResult(kind)
 	}
+	if forced.failureKind() == FailureInternal {
+		return forced
+	}
 	if result := contextFailure(execution.ctx); result.valid() {
 		return result
 	}
