@@ -19,21 +19,41 @@ import (
 
 type runnerFunc func(context.Context, Command, io.Writer, io.Writer) error
 
-func (run runnerFunc) Run(ctx context.Context, command Command, stdout, stderr io.Writer) error {
-	return run(ctx, command, stdout, stderr)
+func (run runnerFunc) Begin(ctx context.Context, _ media.Limits) (Execution, Result) {
+	return &runnerExecution{ctx: ctx, run: run}, SuccessfulResult()
 }
+
+type runnerExecution struct {
+	ctx context.Context
+	run runnerFunc
+}
+
+func (execution *runnerExecution) Run(command Command, stdout, stderr io.Writer) Result {
+	if execution.run(execution.ctx, command, stdout, stderr) != nil {
+		return FailedResult(FailureToolExit)
+	}
+	return SuccessfulResult()
+}
+
+func (*runnerExecution) Close() Result { return SuccessfulResult() }
 
 type pointerRunner struct{}
 
-func (*pointerRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+func (*pointerRunner) Begin(context.Context, media.Limits) (Execution, Result) {
+	return nil, SuccessfulResult()
+}
 
 type mapRunner map[string]string
 
-func (mapRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+func (mapRunner) Begin(context.Context, media.Limits) (Execution, Result) {
+	return nil, SuccessfulResult()
+}
 
 type sliceRunner []string
 
-func (sliceRunner) Run(context.Context, Command, io.Writer, io.Writer) error { return nil }
+func (sliceRunner) Begin(context.Context, media.Limits) (Execution, Result) {
+	return nil, SuccessfulResult()
+}
 
 func TestNewAdapterFailsClosedForInvalidConfigurationOrMissingRunner(t *testing.T) {
 	t.Parallel()
@@ -446,13 +466,30 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("private reader detail") }
 
-func (runner processRunner) Run(ctx context.Context, _ Command, stdout, stderr io.Writer) error {
-	command := exec.CommandContext(ctx, os.Args[0], "-test.run=TestInspectHelperProcessTimeoutAndFloodingOutput")
-	command.Env = []string{"GO_WANT_MEDIAEXEC_HELPER=1", "MEDIAEXEC_HELPER_MODE=" + runner.mode}
+func (runner processRunner) Begin(ctx context.Context, _ media.Limits) (Execution, Result) {
+	return &processExecution{ctx: ctx, mode: runner.mode}, SuccessfulResult()
+}
+
+type processExecution struct {
+	ctx  context.Context
+	mode string
+}
+
+func (execution *processExecution) Run(_ Command, stdout, stderr io.Writer) Result {
+	command := exec.CommandContext(execution.ctx, os.Args[0], "-test.run=TestInspectHelperProcessTimeoutAndFloodingOutput")
+	command.Env = []string{"GO_WANT_MEDIAEXEC_HELPER=1", "MEDIAEXEC_HELPER_MODE=" + execution.mode}
 	command.Stdout = stdout
 	command.Stderr = stderr
-	return command.Run()
+	if err := command.Run(); err != nil {
+		if execution.ctx.Err() != nil {
+			return FailedResult(FailureTimeout)
+		}
+		return FailedResult(FailureToolExit)
+	}
+	return SuccessfulResult()
 }
+
+func (*processExecution) Close() Result { return SuccessfulResult() }
 
 func helperProcess() {
 	switch os.Getenv("MEDIAEXEC_HELPER_MODE") {

@@ -324,6 +324,14 @@ func TestAdapterErrorsAreTypedBoundedAndSafe(t *testing.T) {
 		{code: ErrorInvalidFrames, message: "GIF frame metadata is invalid"},
 		{code: ErrorValidation, message: "media inspection failed validation"},
 		{code: ErrorCleanupFailed, message: "media inspection cleanup failed"},
+		{code: ErrorContainmentUnavailable, message: "media containment is unavailable"},
+		{code: ErrorContainmentSetup, message: "media containment setup failed"},
+		{code: ErrorContainmentCleanup, message: "media containment cleanup failed"},
+		{code: ErrorCancelled, message: "media inspection was cancelled"},
+		{code: ErrorMemoryLimit, message: "media inspection exceeded its memory limit"},
+		{code: ErrorTaskLimit, message: "media inspection exceeded its task limit"},
+		{code: ErrorCPULimit, message: "media inspection exceeded its CPU limit"},
+		{code: ErrorExecutionFailed, message: "media inspection execution failed"},
 	}
 	unsafe := []string{"/private/input.mov", "stderr", "raw JSON", "h264", "secret"}
 
