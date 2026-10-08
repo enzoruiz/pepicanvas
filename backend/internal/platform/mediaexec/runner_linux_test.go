@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +32,148 @@ func TestNewCgroupRunnerRejectsUnsafeDelegatedRoots(t *testing.T) {
 	}
 }
 
+func TestLinuxMountValidationRequiresRecursiveCgroup2Events(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		root string
+		data string
+		want bool
+	}{
+		{name: "normal", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n", want: true},
+		{name: "memory localevents mount option", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw,memory_localevents - cgroup2 cgroup rw\n"},
+		{name: "pids localevents super option", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw,pids_localevents\n"},
+		{name: "both localevents options", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw,memory_localevents - cgroup2 cgroup rw,pids_localevents\n"},
+		{name: "malformed input", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw cgroup2\n"},
+		{name: "malformed escape", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup\\099 rw - cgroup2 cgroup rw\n"},
+		{name: "escaped mount point", root: "/sys/fs/cgroup/team space/job", data: "29 23 0:26 / /sys/fs/cgroup/team\\040space rw - cgroup2 cgroup rw\n", want: true},
+		{name: "non cgroup2", root: "/sys/fs/cgroup/team", data: "29 23 0:26 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n"},
+		{
+			name: "longest containing mount wins",
+			root: "/sys/fs/cgroup/team/job",
+			data: "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n" +
+				"30 29 0:27 / /sys/fs/cgroup/team rw - tmpfs tmpfs rw\n",
+		},
+		{
+			name: "longest cgroup2 mount wins",
+			root: "/sys/fs/cgroup/team/job",
+			data: "29 23 0:26 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n" +
+				"30 29 0:27 / /sys/fs/cgroup/team rw - cgroup2 cgroup rw\n",
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validCgroup2Mount(tt.root, []byte(tt.data)); got != tt.want {
+				t.Fatalf("validCgroup2Mount(%q) = %t, want %t", tt.root, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewCgroupRunnerUsesInjectedMountInfo(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "cgroup.kill"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	data := "29 23 0:26 / " + root + " rw - cgroup2 cgroup rw,memory_localevents\n"
+	runner, result := newCgroupRunner(root, linuxRunnerDeps{readMountInfo: func() ([]byte, error) {
+		called = true
+		return []byte(data), nil
+	}})
+	if !called || runner != nil || result.failureKind() != FailureContainmentSetup {
+		t.Fatalf("newCgroupRunner() = %#v, %#v, called=%t; want fail-closed injected mount rejection", runner, result, called)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := identityFromFileInfo(info)
+	if !ok {
+		t.Fatal("temporary delegated root has no stable identity")
+	}
+	major := ((identity.device >> 8) & 0xfff) | ((identity.device >> 32) & 0xfffff000)
+	minor := (identity.device & 0xff) | ((identity.device >> 12) & 0xffffff00)
+	device := strconv.FormatUint(major, 10) + ":" + strconv.FormatUint(minor, 10)
+	validData := "29 23 " + device + " / " + root + " rw - cgroup2 cgroup rw\n"
+	runner, result = newCgroupRunner(root, linuxRunnerDeps{readMountInfo: func() ([]byte, error) { return []byte(validData), nil }})
+	if runner == nil || !result.succeeded() {
+		t.Fatalf("newCgroupRunner() = %#v, %#v; want proven mount identity", runner, result)
+	}
+	mismatchData := "29 23 0:0 / " + root + " rw - cgroup2 cgroup rw\n"
+	runner, result = newCgroupRunner(root, linuxRunnerDeps{readMountInfo: func() ([]byte, error) { return []byte(mismatchData), nil }})
+	if runner != nil || result.failureKind() != FailureContainmentSetup {
+		t.Fatalf("newCgroupRunner() = %#v, %#v; want mount identity mismatch rejection", runner, result)
+	}
+}
+
+func TestOpenDelegatedRootCapabilitySurvivesPathReplacement(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	path := filepath.Join(base, "delegated")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := identityFromFileInfo(info)
+	if !ok {
+		t.Fatal("temporary delegated root has no stable identity")
+	}
+	root, err := openDelegatedRoot(path, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(base, "original")
+	if err := os.Rename(path, oldPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owned := filepath.Join(root.Path(), "owned")
+	if err := os.Mkdir(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(owned, "marker")
+	if err := os.WriteFile(marker, []byte("bound"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "bound" {
+		t.Fatalf("capability read = %q, %v", data, err)
+	}
+	directory, err := os.Open(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(oldPath, "owned", "marker")); err != nil {
+		t.Fatalf("capability operation did not target original directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "owned")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement directory was targeted: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(owned); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLinuxBeginValidatesDelegationAndConfiguresParentBeforeRun(t *testing.T) {
 	t.Parallel()
 
@@ -42,7 +186,6 @@ func TestLinuxBeginValidatesDelegationAndConfiguresParentBeforeRun(t *testing.T)
 
 	writes := fs.writeLog()
 	wantSuffixes := []string{
-		"/delegated/cgroup.subtree_control=+cpu +memory +pids",
 		"/pids.max=64",
 		"/memory.max=536870912",
 		"/memory.swap.max=0",
@@ -52,6 +195,12 @@ func TestLinuxBeginValidatesDelegationAndConfiguresParentBeforeRun(t *testing.T)
 	for _, want := range wantSuffixes {
 		if !containsSuffix(writes, want) {
 			t.Fatalf("writes = %#v, missing suffix %q", writes, want)
+		}
+	}
+	for _, write := range writes {
+		path := strings.SplitN(write, "=", 2)[0]
+		if filepath.Dir(path) == "/delegated" {
+			t.Fatalf("delegated root was mutated: %q", write)
 		}
 	}
 	if got := fs.firstMkdirIndex(); got < 0 || got > fs.firstLimitWriteIndex() {
@@ -205,8 +354,60 @@ func TestLinuxRunKillsBeforeReapAndRejectsConcurrentRun(t *testing.T) {
 	if result.failureKind() != FailureCancelled {
 		t.Fatalf("cancelled Run() = %#v, want cancellation", result)
 	}
-	if !fs.killBefore(process.waitObserved) {
-		t.Fatalf("operations = %#v, want cgroup.kill before reap", fs.operations())
+	if closeResult := execution.Close(); !closeResult.succeeded() {
+		t.Fatalf("Close() = %#v", closeResult)
+	}
+	operations := fs.operations()
+	parent := fs.lastOwnedParent
+	setupKill := indexNth(operations, "write "+filepath.Join(parent, "cgroup.kill")+"=1", 1)
+	start := indexContains(operations, "process start")
+	cancelKill := indexNth(operations, "write "+filepath.Join(parent, "cgroup.kill")+"=1", 2)
+	groupKill := indexContains(operations, "process-group fallback")
+	reap := indexContains(operations, "wait/reap")
+	closeKill := indexNth(operations, "write "+filepath.Join(parent, "cgroup.kill")+"=1", 3)
+	populated := indexContains(operations, "read "+filepath.Join(parent, "cgroup.events"))
+	childRemoval := indexContains(operations, "remove "+filepath.Join(parent, "command-1"))
+	parentRemoval := indexContains(operations, "remove "+parent)
+	rootClose := indexContains(operations, "close root")
+	if countExact(operations, "close root") != 1 || !(setupKill < start && start < cancelKill && cancelKill < groupKill && groupKill < reap && reap < closeKill && closeKill < populated && populated < childRemoval && childRemoval < parentRemoval && parentRemoval < rootClose) {
+		t.Fatalf("operations = %#v, want setup kill < start < cancellation kill < process-group fallback < reap < close kill < populated < child removal < parent removal < root close", operations)
+	}
+}
+
+func TestLinuxRunPostReapPrecedenceIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		after  map[string]string
+		cancel bool
+		want   FailureKind
+	}{
+		{name: "memory before context", after: map[string]string{"memory.events": "max 1\noom 0\noom_kill 0\n"}, cancel: true, want: FailureMemoryLimit},
+		{name: "tasks before context", after: map[string]string{"pids.events": "max 1\n"}, cancel: true, want: FailureTaskLimit},
+		{name: "context before CPU and exit", after: map[string]string{"cpu.stat": "usage_usec 30000000\n"}, cancel: true, want: FailureCancelled},
+		{name: "CPU before process exit", after: map[string]string{"cpu.stat": "usage_usec 30000000\n"}, want: FailureCPULimit},
+		{name: "context before process exit", cancel: true, want: FailureCancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := newFakeCgroupFS("/delegated")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			launcher := &fakeLauncher{processes: []*fakeProcess{{result: processResult{exited: true}}}}
+			launcher.afterStart = func(parent string) {
+				for name, value := range tt.after {
+					fs.set(filepath.Join(parent, name), value)
+				}
+				if tt.cancel {
+					cancel()
+				}
+			}
+			execution := beginFakeExecutionContext(t, ctx, fs, launcher, media.DefaultLimits())
+			if result := execution.Run(testCommand(), io.Discard, io.Discard); result.failureKind() != tt.want {
+				t.Fatalf("Run() = %#v, want %v", result, tt.want)
+			}
+		})
 	}
 }
 
@@ -301,6 +502,7 @@ func beginFakeExecution(t *testing.T, fs *fakeCgroupFS, launcher *fakeLauncher, 
 
 func beginFakeExecutionContext(t *testing.T, ctx context.Context, fs *fakeCgroupFS, launcher *fakeLauncher, limits media.Limits) Execution {
 	t.Helper()
+	launcher.record = fs.record
 	runner := newLinuxRunner("/delegated", linuxRunnerDeps{
 		fs: fs, launcher: launcher, pollInterval: time.Millisecond, cleanupTimeout: 10 * time.Millisecond,
 		newTimer: newImmediateExecutionTimer,
@@ -326,6 +528,7 @@ type fakeCgroupFS struct {
 	log             []string
 	nextFD          int
 	onPause         func()
+	lastOwnedParent string
 }
 
 func newFakeCgroupFS(root string) *fakeCgroupFS {
@@ -333,7 +536,7 @@ func newFakeCgroupFS(root string) *fakeCgroupFS {
 		root: root, dirs: map[string]bool{root: true}, omitOnCreate: map[string]bool{}, nextFD: 10,
 		files: map[string]string{
 			filepath.Join(root, "cgroup.controllers"):     "cpu memory pids\n",
-			filepath.Join(root, "cgroup.subtree_control"): "",
+			filepath.Join(root, "cgroup.subtree_control"): "cpu memory pids\n",
 			filepath.Join(root, "cgroup.kill"):            "",
 			filepath.Join(root, "cgroup.type"):            "domain\n",
 		},
@@ -348,6 +551,7 @@ func newFakeCgroupFS(root string) *fakeCgroupFS {
 func (fs *fakeCgroupFS) ReadFile(path string) ([]byte, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+	fs.log = append(fs.log, "read "+path)
 	value, ok := fs.files[path]
 	if !ok {
 		return nil, errors.New("missing")
@@ -378,6 +582,9 @@ func (fs *fakeCgroupFS) Mkdir(path string) error {
 	}
 	fs.dirs[path] = true
 	fs.log = append(fs.log, "mkdir "+path)
+	if filepath.Dir(path) == fs.root {
+		fs.lastOwnedParent = path
+	}
 	for name, value := range fs.createdDefaults {
 		if !fs.omitOnCreate[name] {
 			fs.files[filepath.Join(path, name)] = value
@@ -392,7 +599,17 @@ func (fs *fakeCgroupFS) OpenDir(path string) (cgroupDir, error) {
 		return nil, errors.New("missing")
 	}
 	fs.nextFD++
-	return fakeDir{fd: fs.nextFD}, nil
+	return &fakeDir{fd: fs.nextFD}, nil
+}
+func (fs *fakeCgroupFS) OpenRoot(path string, _ fileIdentity) (cgroupRoot, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if path != fs.root || !fs.dirs[path] {
+		return nil, errors.New("missing")
+	}
+	fs.nextFD++
+	fs.log = append(fs.log, "open root")
+	return &fakeRoot{fakeDir: fakeDir{fd: fs.nextFD}, fs: fs, path: path}, nil
 }
 func (fs *fakeCgroupFS) Remove(path string) error {
 	fs.mu.Lock()
@@ -421,6 +638,11 @@ func (fs *fakeCgroupFS) Pause(context.Context, time.Duration) bool {
 	return true
 }
 func (fs *fakeCgroupFS) set(path, value string) { fs.mu.Lock(); fs.files[path] = value; fs.mu.Unlock() }
+func (fs *fakeCgroupFS) record(operation string) {
+	fs.mu.Lock()
+	fs.log = append(fs.log, operation)
+	fs.mu.Unlock()
+}
 func (fs *fakeCgroupFS) writeLog() []string {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -487,8 +709,20 @@ func (fs *fakeCgroupFS) killBefore(wait <-chan struct{}) bool {
 
 type fakeDir struct{ fd int }
 
-func (dir fakeDir) Fd() uintptr { return uintptr(dir.fd) }
-func (fakeDir) Close() error    { return nil }
+func (dir *fakeDir) Fd() uintptr { return uintptr(dir.fd) }
+func (*fakeDir) Close() error    { return nil }
+
+type fakeRoot struct {
+	fakeDir
+	fs   *fakeCgroupFS
+	path string
+}
+
+func (root *fakeRoot) Path() string { return root.path }
+func (root *fakeRoot) Close() error {
+	root.fs.record("close root")
+	return nil
+}
 
 type immediateExecutionTimer struct{ channel chan time.Time }
 
@@ -506,6 +740,7 @@ type fakeLauncher struct {
 	specs      []launchSpec
 	afterStart func(parent string)
 	failure    launchFailure
+	record     func(string)
 }
 
 func (launcher *fakeLauncher) Start(spec launchSpec, _, _ io.Writer) (startedProcess, launchFailure) {
@@ -521,6 +756,10 @@ func (launcher *fakeLauncher) Start(spec launchSpec, _, _ io.Writer) (startedPro
 	process := launcher.processes[0]
 	launcher.processes = launcher.processes[1:]
 	process.initialize()
+	process.record = launcher.record
+	if launcher.record != nil {
+		launcher.record("process start")
+	}
 	process.markStarted()
 	if launcher.afterStart != nil {
 		launcher.afterStart(filepath.Dir(spec.cgroupPath))
@@ -536,6 +775,7 @@ type fakeProcess struct {
 	waitObserved chan struct{}
 	once         sync.Once
 	startedOnce  sync.Once
+	record       func(string)
 }
 
 func (process *fakeProcess) initialize() {
@@ -550,10 +790,16 @@ func (process *fakeProcess) Wait() processResult {
 	if process.block {
 		<-process.release
 	}
+	if process.record != nil {
+		process.record("wait/reap")
+	}
 	close(process.waitObserved)
 	return process.result
 }
 func (process *fakeProcess) KillGroup() {
+	if process.record != nil {
+		process.record("process-group fallback")
+	}
 	if process.block {
 		select {
 		case <-process.release:
@@ -587,6 +833,29 @@ func indexContains(values []string, target string) int {
 		}
 	}
 	return -1
+}
+
+func indexNth(values []string, target string, occurrence int) int {
+	seen := 0
+	for index, value := range values {
+		if value == target {
+			seen++
+			if seen == occurrence {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func countExact(values []string, target string) int {
+	count := 0
+	for _, value := range values {
+		if value == target {
+			count++
+		}
+	}
+	return count
 }
 
 var _ = syscall.SysProcAttr{}

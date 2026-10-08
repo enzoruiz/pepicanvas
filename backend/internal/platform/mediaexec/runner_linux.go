@@ -31,33 +31,255 @@ var requiredControllers = []string{"cpu", "memory", "pids"}
 // NewCgroupRunner constructs the Linux production runner for one explicitly
 // delegated cgroup-v2 subtree. It never discovers or uses a global cgroup root.
 func NewCgroupRunner(root string) (Runner, Result) {
-	canonical, ok := canonicalDelegatedRoot(root)
+	return newCgroupRunner(root, linuxRunnerDeps{})
+}
+
+func newCgroupRunner(root string, deps linuxRunnerDeps) (Runner, Result) {
+	deps = completeLinuxRunnerDeps(deps)
+	canonical, ok := canonicalDelegatedRoot(root, deps.readMountInfo)
 	if !ok {
 		return nil, FailedResult(FailureContainmentSetup)
 	}
-	return newLinuxRunner(canonical, linuxRunnerDeps{}), SuccessfulResult()
+	return &linuxRunner{root: canonical, deps: deps}, SuccessfulResult()
 }
 
-func canonicalDelegatedRoot(root string) (string, bool) {
+type delegatedRoot struct {
+	path     string
+	identity fileIdentity
+}
+
+type fileIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+func canonicalDelegatedRoot(root string, readMountInfo func() ([]byte, error)) (delegatedRoot, bool) {
 	if strings.IndexByte(root, 0) >= 0 || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
-		return "", false
+		return delegatedRoot{}, false
 	}
 	canonical, err := filepath.EvalSymlinks(root)
 	if err != nil || !filepath.IsAbs(canonical) || canonical == string(filepath.Separator) || canonical == "/sys/fs/cgroup" {
-		return "", false
+		return delegatedRoot{}, false
 	}
 	info, err := os.Stat(canonical)
 	if err != nil || !info.IsDir() {
-		return "", false
+		return delegatedRoot{}, false
 	}
 	if _, err := os.Stat(filepath.Join(canonical, "cgroup.kill")); err != nil {
-		return "", false
+		return delegatedRoot{}, false
 	}
-	return canonical, true
+	identity, ok := identityFromFileInfo(info)
+	if !ok || readMountInfo == nil {
+		return delegatedRoot{}, false
+	}
+	mountInfo, err := readMountInfo()
+	mount, mountOK := cgroup2MountForRoot(canonical, mountInfo)
+	if err != nil || !mountOK || !mountDeviceMatches(identity.device, mount) {
+		return delegatedRoot{}, false
+	}
+	return delegatedRoot{path: canonical, identity: identity}, true
 }
 
+type cgroupMount struct {
+	point        string
+	filesystem   string
+	mountOptions map[string]bool
+	superOptions map[string]bool
+	major        uint64
+	minor        uint64
+}
+
+func validCgroup2Mount(root string, data []byte) bool {
+	_, ok := cgroup2MountForRoot(root, data)
+	return ok
+}
+
+func cgroup2MountForRoot(root string, data []byte) (cgroupMount, bool) {
+	mounts, ok := parseMountInfo(data)
+	if !ok {
+		return cgroupMount{}, false
+	}
+	var selected *cgroupMount
+	for index := range mounts {
+		mount := &mounts[index]
+		if !pathContains(mount.point, root) {
+			continue
+		}
+		if selected == nil || len(mount.point) > len(selected.point) {
+			selected = mount
+			continue
+		}
+		if len(mount.point) == len(selected.point) {
+			return cgroupMount{}, false
+		}
+	}
+	if selected == nil || selected.filesystem != "cgroup2" {
+		return cgroupMount{}, false
+	}
+	for _, option := range []string{"memory_localevents", "pids_localevents"} {
+		if selected.mountOptions[option] || selected.superOptions[option] {
+			return cgroupMount{}, false
+		}
+	}
+	return *selected, true
+}
+
+func parseMountInfo(data []byte) ([]cgroupMount, bool) {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return nil, false
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	mounts := make([]cgroupMount, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			return nil, false
+		}
+		mountID, mountIDErr := strconv.ParseUint(fields[0], 10, 64)
+		parentID, parentIDErr := strconv.ParseUint(fields[1], 10, 64)
+		device := strings.Split(fields[2], ":")
+		if mountIDErr != nil || parentIDErr != nil || mountID == 0 || parentID == 0 || len(device) != 2 {
+			return nil, false
+		}
+		major, majorErr := strconv.ParseUint(device[0], 10, 64)
+		minor, minorErr := strconv.ParseUint(device[1], 10, 64)
+		_, rootOK := decodeMountInfoPath(fields[3])
+		if majorErr != nil || minorErr != nil || !rootOK {
+			return nil, false
+		}
+		separator := -1
+		for index := 6; index < len(fields); index++ {
+			if fields[index] == "-" {
+				separator = index
+				break
+			}
+		}
+		if separator < 6 || separator+3 >= len(fields) {
+			return nil, false
+		}
+		point, ok := decodeMountInfoPath(fields[4])
+		if !ok || !filepath.IsAbs(point) || filepath.Clean(point) != point {
+			return nil, false
+		}
+		mounts = append(mounts, cgroupMount{
+			point:        point,
+			filesystem:   fields[separator+1],
+			mountOptions: optionSet(fields[5]),
+			superOptions: optionSet(fields[separator+3]),
+			major:        major,
+			minor:        minor,
+		})
+	}
+	return mounts, true
+}
+
+func mountDeviceMatches(device uint64, mount cgroupMount) bool {
+	major := ((device >> 8) & 0xfff) | ((device >> 32) & 0xfffff000)
+	minor := (device & 0xff) | ((device >> 12) & 0xffffff00)
+	return major == mount.major && minor == mount.minor
+}
+
+func decodeMountInfoPath(value string) (string, bool) {
+	var decoded strings.Builder
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' {
+			decoded.WriteByte(value[index])
+			continue
+		}
+		if index+3 >= len(value) {
+			return "", false
+		}
+		escape := value[index+1 : index+4]
+		switch escape {
+		case "040":
+			decoded.WriteByte(' ')
+		case "011":
+			decoded.WriteByte('\t')
+		case "012":
+			decoded.WriteByte('\n')
+		case "134":
+			decoded.WriteByte('\\')
+		default:
+			return "", false
+		}
+		index += 3
+	}
+	return decoded.String(), true
+}
+
+func optionSet(value string) map[string]bool {
+	options := make(map[string]bool)
+	for _, option := range strings.Split(value, ",") {
+		if option != "" {
+			options[option] = true
+		}
+	}
+	return options
+}
+
+func pathContains(parent, child string) bool {
+	return parent == string(filepath.Separator) || child == parent || strings.HasPrefix(child, parent+string(filepath.Separator))
+}
+
+func identityFromFileInfo(info os.FileInfo) (fileIdentity, bool) {
+	if info == nil {
+		return fileIdentity{}, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev == 0 || stat.Ino == 0 {
+		return fileIdentity{}, false
+	}
+	return fileIdentity{device: uint64(stat.Dev), inode: stat.Ino}, true
+}
+
+type osCgroupRoot struct {
+	file *os.File
+	path string
+}
+
+func openDelegatedRoot(path string, expected fileIdentity) (cgroupRoot, error) {
+	if expected == (fileIdentity{}) {
+		return nil, errors.New("missing delegated root identity")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (cgroupRoot, error) {
+		_ = file.Close()
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.IsDir() {
+		return fail(errors.New("invalid delegated root descriptor"))
+	}
+	actual, ok := identityFromFileInfo(info)
+	if !ok || actual != expected {
+		return fail(errors.New("delegated root identity changed"))
+	}
+	capability := "/proc/self/fd/" + strconv.FormatUint(uint64(file.Fd()), 10)
+	target, err := os.Readlink(capability)
+	if err != nil || filepath.Clean(target) != path {
+		return fail(errors.New("delegated root descriptor resolution changed"))
+	}
+	resolved, err := filepath.EvalSymlinks(capability)
+	if err != nil || resolved != path {
+		return fail(errors.New("delegated root capability cannot be proven"))
+	}
+	capabilityInfo, err := os.Stat(capability)
+	capabilityIdentity, identityOK := identityFromFileInfo(capabilityInfo)
+	if err != nil || !identityOK || capabilityIdentity != expected {
+		return fail(errors.New("delegated root capability identity changed"))
+	}
+	return &osCgroupRoot{file: file, path: capability}, nil
+}
+
+func (root *osCgroupRoot) Fd() uintptr  { return root.file.Fd() }
+func (root *osCgroupRoot) Path() string { return root.path }
+func (root *osCgroupRoot) Close() error { return root.file.Close() }
+
 type linuxRunner struct {
-	root string
+	root delegatedRoot
 	deps linuxRunnerDeps
 }
 
@@ -69,9 +291,15 @@ type linuxRunnerDeps struct {
 	name           func() (string, error)
 	newTimer       func(time.Duration) executionTimer
 	now            func() time.Time
+	readMountInfo  func() ([]byte, error)
 }
 
 func newLinuxRunner(root string, deps linuxRunnerDeps) *linuxRunner {
+	deps = completeLinuxRunnerDeps(deps)
+	return &linuxRunner{root: delegatedRoot{path: root}, deps: deps}
+}
+
+func completeLinuxRunnerDeps(deps linuxRunnerDeps) linuxRunnerDeps {
 	if deps.fs == nil {
 		deps.fs = osCgroupFS{}
 	}
@@ -93,7 +321,10 @@ func newLinuxRunner(root string, deps linuxRunnerDeps) *linuxRunner {
 	if deps.now == nil {
 		deps.now = time.Now
 	}
-	return &linuxRunner{root: root, deps: deps}
+	if deps.readMountInfo == nil {
+		deps.readMountInfo = func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") }
+	}
+	return deps
 }
 
 func (runner *linuxRunner) Begin(ctx context.Context, limits media.Limits) (Execution, Result) {
@@ -103,32 +334,52 @@ func (runner *linuxRunner) Begin(ctx context.Context, limits media.Limits) (Exec
 	if result := contextFailure(ctx); result.valid() {
 		return nil, result
 	}
-	if !runner.deps.fs.Exists(filepath.Join(runner.root, "cgroup.kill")) {
+	root, err := runner.deps.fs.OpenRoot(runner.root.path, runner.root.identity)
+	if err != nil {
 		return nil, FailedResult(FailureContainmentUnavailable)
 	}
-	cgroupType, err := runner.deps.fs.ReadFile(filepath.Join(runner.root, "cgroup.type"))
+	rootPath := root.Path()
+	closeRoot := func(result Result) (Execution, Result) {
+		if root.Close() != nil {
+			return nil, FailedResult(FailureContainmentCleanup)
+		}
+		return nil, result
+	}
+	if runner.root.identity != (fileIdentity{}) {
+		mountInfo, readErr := runner.deps.readMountInfo()
+		mount, mountOK := cgroup2MountForRoot(runner.root.path, mountInfo)
+		if readErr != nil || !mountOK || !mountDeviceMatches(runner.root.identity.device, mount) {
+			return closeRoot(FailedResult(FailureContainmentUnavailable))
+		}
+	}
+	if !runner.deps.fs.Exists(filepath.Join(rootPath, "cgroup.kill")) {
+		return closeRoot(FailedResult(FailureContainmentUnavailable))
+	}
+	cgroupType, err := runner.deps.fs.ReadFile(filepath.Join(rootPath, "cgroup.type"))
 	if err != nil || strings.TrimSpace(string(cgroupType)) != "domain" {
-		return nil, FailedResult(FailureContainmentUnavailable)
+		return closeRoot(FailedResult(FailureContainmentUnavailable))
 	}
-	controllers, err := runner.deps.fs.ReadFile(filepath.Join(runner.root, "cgroup.controllers"))
+	controllers, err := runner.deps.fs.ReadFile(filepath.Join(rootPath, "cgroup.controllers"))
 	if err != nil || !containsControllers(controllers, requiredControllers) {
-		return nil, FailedResult(FailureContainmentUnavailable)
+		return closeRoot(FailedResult(FailureContainmentUnavailable))
 	}
-	subtree := filepath.Join(runner.root, "cgroup.subtree_control")
-	if _, err := runner.deps.fs.ReadFile(subtree); err != nil || runner.deps.fs.WriteFile(subtree, []byte("+cpu +memory +pids")) != nil {
-		return nil, FailedResult(FailureContainmentUnavailable)
+	subtree, err := runner.deps.fs.ReadFile(filepath.Join(rootPath, "cgroup.subtree_control"))
+	if err != nil || !containsControllers(subtree, requiredControllers) {
+		return closeRoot(FailedResult(FailureContainmentUnavailable))
 	}
 	name, err := runner.deps.name()
 	if err != nil || name == "" || filepath.Base(name) != name {
-		return nil, FailedResult(FailureContainmentSetup)
+		return closeRoot(FailedResult(FailureContainmentSetup))
 	}
-	parent := filepath.Join(runner.root, name)
+	parent := filepath.Join(rootPath, name)
 	if err := runner.deps.fs.Mkdir(parent); err != nil {
-		return nil, FailedResult(FailureContainmentSetup)
+		return closeRoot(FailedResult(FailureContainmentSetup))
 	}
-	execution := &linuxExecution{ctx: ctx, limits: limits, parent: parent, deps: runner.deps}
+	execution := &linuxExecution{ctx: ctx, limits: limits, root: root, parent: parent, deps: runner.deps}
 	if result := execution.configure(); !result.succeeded() {
-		if runner.deps.fs.Remove(parent) != nil {
+		removeErr := runner.deps.fs.Remove(parent)
+		closeErr := root.Close()
+		if removeErr != nil || closeErr != nil {
 			return nil, FailedResult(FailureContainmentCleanup)
 		}
 		return nil, result
@@ -169,6 +420,7 @@ type linuxExecution struct {
 	running  bool
 	closed   bool
 	active   startedProcess
+	root     cgroupRoot
 }
 
 func (execution *linuxExecution) configure() Result {
@@ -324,8 +576,8 @@ classified:
 	if kind := execution.eventDelta(beforeMemory, beforeTasks); kind != 0 {
 		return FailedResult(kind)
 	}
-	if forced.valid() {
-		return forced
+	if result := contextFailure(execution.ctx); result.valid() {
+		return result
 	}
 	usage, err := execution.cpuUsage()
 	if err != nil || usage < execution.baseline {
@@ -333,6 +585,9 @@ classified:
 	}
 	if usage-execution.baseline >= uint64(execution.limits.MaxCPUTime/time.Microsecond) {
 		return FailedResult(FailureCPULimit)
+	}
+	if forced.valid() {
+		return forced
 	}
 	if outcome.internal {
 		return FailedResult(FailureInternal)
@@ -446,6 +701,9 @@ func (execution *linuxExecution) Close() Result {
 	if err := execution.deps.fs.Remove(execution.parent); err != nil {
 		failed = true
 	}
+	if execution.root == nil || execution.root.Close() != nil {
+		failed = true
+	}
 	if failed {
 		return FailedResult(FailureContainmentCleanup)
 	}
@@ -476,6 +734,7 @@ type cgroupFS interface {
 	Exists(string) bool
 	Mkdir(string) error
 	OpenDir(string) (cgroupDir, error)
+	OpenRoot(string, fileIdentity) (cgroupRoot, error)
 	Remove(string) error
 	Pause(context.Context, time.Duration) bool
 }
@@ -483,6 +742,11 @@ type cgroupFS interface {
 type cgroupDir interface {
 	Fd() uintptr
 	Close() error
+}
+
+type cgroupRoot interface {
+	cgroupDir
+	Path() string
 }
 
 type executionTimer interface {
@@ -505,7 +769,24 @@ func (osCgroupFS) WriteFile(path string, data []byte) error { return os.WriteFil
 func (osCgroupFS) Exists(path string) bool                  { _, err := os.Stat(path); return err == nil }
 func (osCgroupFS) Mkdir(path string) error                  { return os.Mkdir(path, 0o700) }
 func (osCgroupFS) OpenDir(path string) (cgroupDir, error)   { return os.Open(path) }
-func (osCgroupFS) Remove(path string) error                 { return os.Remove(path) }
+func (osCgroupFS) OpenRoot(path string, identity fileIdentity) (cgroupRoot, error) {
+	root, err := openDelegatedRoot(path, identity)
+	if err != nil {
+		return nil, err
+	}
+	osRoot, ok := root.(*osCgroupRoot)
+	if !ok {
+		_ = root.Close()
+		return nil, errors.New("invalid delegated root capability")
+	}
+	var filesystem syscall.Statfs_t
+	if err := syscall.Fstatfs(int(osRoot.file.Fd()), &filesystem); err != nil || uint64(filesystem.Type) != 0x63677270 {
+		_ = root.Close()
+		return nil, errors.New("delegated root is not cgroup2")
+	}
+	return root, nil
+}
+func (osCgroupFS) Remove(path string) error { return os.Remove(path) }
 func (osCgroupFS) Pause(ctx context.Context, duration time.Duration) bool {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
