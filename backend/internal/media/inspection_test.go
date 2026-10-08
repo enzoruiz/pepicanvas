@@ -31,8 +31,8 @@ func TestDefaultLimitsMatchApprovedMVPMatrix(t *testing.T) {
 	if limits.InspectionTimeout != 30*time.Second || limits.MaxCapturedOutputBytes != mebibyte {
 		t.Fatalf("inspection limits = %s/%d bytes, want 30s/%d bytes", limits.InspectionTimeout, limits.MaxCapturedOutputBytes, mebibyte)
 	}
-	if limits.MaxProcesses != 8 || limits.MaxMemoryBytes != 512*mebibyte || limits.MaxCPUTime != 30*time.Second {
-		t.Fatalf("process limits = %d/%d bytes/%s, want 8/%d bytes/30s", limits.MaxProcesses, limits.MaxMemoryBytes, limits.MaxCPUTime, 512*mebibyte)
+	if limits.MaxTasks != 64 || limits.MaxMemoryBytes != 512*mebibyte || limits.MaxCPUTime != 30*time.Second {
+		t.Fatalf("process limits = %d tasks/%d bytes/%s, want 64 tasks/%d bytes/30s", limits.MaxTasks, limits.MaxMemoryBytes, limits.MaxCPUTime, 512*mebibyte)
 	}
 	if err := limits.Validate(); err != nil {
 		t.Fatalf("DefaultLimits().Validate() error = %v, want nil", err)
@@ -60,7 +60,7 @@ func TestLimitsValidateRejectsNonPositiveConfiguration(t *testing.T) {
 		{name: "streams", mutate: func(l *Limits) { l.MaxStreams = -1 }},
 		{name: "inspection timeout", mutate: func(l *Limits) { l.InspectionTimeout = 0 }},
 		{name: "captured output", mutate: func(l *Limits) { l.MaxCapturedOutputBytes = -1 }},
-		{name: "processes", mutate: func(l *Limits) { l.MaxProcesses = 0 }},
+		{name: "tasks", mutate: func(l *Limits) { l.MaxTasks = 0 }},
 		{name: "memory", mutate: func(l *Limits) { l.MaxMemoryBytes = -1 }},
 		{name: "CPU time", mutate: func(l *Limits) { l.MaxCPUTime = 0 }},
 	}

@@ -22,7 +22,7 @@ type Limits struct {
 	MaxStreams             int
 	InspectionTimeout      time.Duration
 	MaxCapturedOutputBytes int64
-	MaxProcesses           int
+	MaxTasks               int // Linux cgroup processes and threads.
 	MaxMemoryBytes         int64
 	MaxCPUTime             time.Duration
 }
@@ -45,7 +45,7 @@ func DefaultLimits() Limits {
 		MaxStreams:             8,
 		InspectionTimeout:      30 * time.Second,
 		MaxCapturedOutputBytes: mebibyte,
-		MaxProcesses:           8,
+		MaxTasks:               64,
 		MaxMemoryBytes:         512 * mebibyte,
 		MaxCPUTime:             30 * time.Second,
 	}
@@ -59,7 +59,7 @@ func (limits Limits) Validate() error {
 		limits.MaxGIFDuration <= 0 || limits.MaxAudioDuration <= 0 || limits.MaxVideoDuration <= 0 ||
 		limits.MaxGIFFrames <= 0 || limits.MaxStreams <= 0 ||
 		limits.InspectionTimeout <= 0 || limits.MaxCapturedOutputBytes <= 0 ||
-		limits.MaxProcesses <= 0 || limits.MaxMemoryBytes <= 0 || limits.MaxCPUTime <= 0 {
+		limits.MaxTasks <= 0 || limits.MaxMemoryBytes <= 0 || limits.MaxCPUTime <= 0 {
 		return newRejection(RejectionInvalidLimits)
 	}
 	return nil
