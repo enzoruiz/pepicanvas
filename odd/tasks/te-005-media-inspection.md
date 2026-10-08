@@ -121,8 +121,21 @@ Classification and allowlisting use content-derived container and codec metadata
     - Clarification proof: focused table-driven cases normalize structurally valid over-default-limit image input, image dimensions, audio duration, and video duration, then prove that `media.Validate(DefaultLimits())` rejects each inspection. `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` returned `ok` for both packages in `1.010s`; `cd backend && go test -race -count=1 ./...` returned `ok` for `internal/access` in `1.012s`, `internal/media` in `1.011s`, and `internal/platform/mediaexec` in `1.013s`; `cd backend && go vet ./...` produced no output.
     - Cumulative MEDIA-02A size: `git diff --numstat 9a1a18d..001c808` records 807 insertions and 16 deletions across five files, or 823 authored changed lines.
     - Final independent verification: the complete `9a1a18d..001c808` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race tests, `go vet`, `git diff --check`, branch identity, and clean status passed. The verifier found no honest normalization/classification split that would remain independently deliverable with tests paired to behavior.
-  - [ ] **MEDIA-02B — Controlled commands, bounded capture, and complete decode**
+  - [x] **MEDIA-02B — Controlled commands, bounded capture, and complete decode**
     - Own shell-free argument construction, bounded stdout/stderr capture, temporary staging and cleanup, separate all-frame GIF metadata, complete ffmpeg decoding, timeout behavior, and deterministic helper-process tests without real media fixtures.
+    - Exact scope: add the domain `Inspector` port and a `mediaexec.Adapter` configured only with trusted absolute executable/temp paths and approved limits; inject a narrow `Runner`; stage one bounded reader privately; construct fixed metadata, GIF-frame, and complete-decode command tokens; share one deadline and aggregate output budget; normalize, merge GIF frames, validate, decode completely, clean up, and return only fixed typed safe errors.
+    - Execution boundary: production contains no `os/exec` runner. Construction without an injected runner fails closed; only tests use the trusted Go helper-process pattern. MEDIA-02C owns the production cgroup-v2 runner.
+    - RED: after tests were added first, `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` failed to compile because `Command`, `Config`, `Runner`, and the new adapter/capture/frame symbols were undefined; `internal/media` passed in `1.013s`.
+    - GREEN: after the smallest complete implementation and correction of test assertions, the same focused command returned `ok` for `internal/platform/mediaexec` in `2.037s` and `internal/media` in `1.015s`.
+    - REFACTOR: staging cleanup was centralized around a preserved directory path, and regressions proved cleanup after overflow/reader failure plus rejection after failed complete decode. The focused race command returned `ok` for `internal/platform/mediaexec` in `2.041s` and `internal/media` in `1.010s`.
+    - Deterministic coverage: exact token order and no shell/interpolation; fixed private environment and working directory; 0700 directory/0600 O_EXCL file staging; overflow and cleanup; shared stdout/stderr and cross-command capture budget; image/audio/video/GIF orchestration; every GIF frame and count mismatch; validation before decode; one shared deadline; helper-process timeout/output flood; complete-decode failure; and bounded safe errors.
+    - Final pre-commit verification: focused race tests passed for `internal/platform/mediaexec` in `2.041s` and `internal/media` in `1.010s`; the full backend race suite passed for `internal/access` in `1.012s`, `internal/media` in `1.011s`, and `internal/platform/mediaexec` in `2.040s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
+    - Runtime harness: the test-only runner executes the trusted Go test binary to prove context timeout and concurrent stdout/stderr flooding without invoking real `ffprobe` or `ffmpeg`.
+    - Exclusions: no production `os/exec`, cgroup implementation, descendant/resource containment claim, real media fixture or tool execution, dependency installation, network, persistence, quota, upload transport, playback, or remote operation.
+    - Commit boundary: parent `c5ea79d`; Conventional Commit subject `feat(media): orchestrate controlled media inspection`. The resulting hash is reported after commit because a commit cannot embed its own identity.
+    - Size forecast and actual: forecast 850–1,050 authored changed lines for this cohesive adapter-and-tests slice. The pre-tracker implementation contains 934 inserted lines across eleven files; the final cumulative diff contains 950 insertions and 3 deletions across twelve files, or 953 authored changed lines. The approximately 400-line heuristic remains advisory, and no size exception is claimed in this implementation step.
+    - Rollback boundary: revert the MEDIA-02B work-unit commit to remove the domain port, orchestration adapter, command/capture/frame helpers, deterministic tests, and this evidence while preserving MEDIA-02A normalization.
+    - Next step: MEDIA-02C supplies the production cgroup-v2 Runner, delegated containment, descendant termination, and task/memory/CPU enforcement; stop after this verified local commit for a separate size decision.
   - [ ] **MEDIA-02C — Linux cgroup v2 containment**
     - Own delegated cgroup setup and cleanup, 64-task process/thread enforcement, memory and CPU limits, descendant termination, and fail-closed unsupported-environment behavior.
 - [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
@@ -162,7 +175,7 @@ Classification and allowlisting use content-derived container and codec metadata
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Active branch: `feat/te-005-mediaexec-adapter`; MEDIA-01 began on `feat/te-005-media-inspection`, which remains part of the recorded branch history.
+- Active branch: `feat/te-005-mediaexec-runner`; MEDIA-01 began on `feat/te-005-media-inspection`, which remains part of the recorded branch history.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
@@ -178,4 +191,4 @@ Classification and allowlisting use content-derived container and codec metadata
 
 ## Next step
 
-Create the MEDIA-02B branch and implement the next bounded work unit: controlled command construction, bounded capture, temporary staging, separate all-frame GIF metadata, and complete decode with deterministic helper processes. Do not add cgroup containment or real media fixtures in that slice.
+Pause for a separate MEDIA-02B size decision. After that decision, implement MEDIA-02C as a separate bounded work unit: a production cgroup-v2 Runner with delegated task, memory, CPU, descendant-termination, and cleanup enforcement. Do not add real media fixtures in that slice.
