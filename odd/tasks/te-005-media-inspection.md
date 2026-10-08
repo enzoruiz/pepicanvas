@@ -158,9 +158,10 @@ Classification and allowlisting use content-derived container and codec metadata
       - Final verification: the focused race command passed for `internal/platform/mediaexec` in `2.055s` and `internal/media` in `1.011s`; the full backend race suite passed for `internal/access` in `1.012s`, `internal/media` in `1.010s`, and `internal/platform/mediaexec` in `2.055s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
       - Exclusions: no production `os/exec`, Linux build tags, cgroup filesystem mutation, real media tools or fixtures, dependency changes, network access, descendant-control claim, or remote operation.
       - Rollback boundary: revert this work-unit commit to restore the MEDIA-02B one-shot test Runner and remove only the contained lifecycle/result contract, its mappings, tests, and tracker evidence.
-      - Commit boundary: parent `d2da1be`; Conventional Commit subject `feat(media): define contained execution results`. The resulting hash is reported after commit because a commit cannot embed its own identity.
+      - Commit boundary: `4b17642` (`feat(media): define contained execution results`) on parent `d2da1be`.
       - Authored change size: the final diff contains 720 inserted and 71 deleted lines across seven files, or 791 authored changed lines. The approximately 400-line heuristic remains advisory; the actual cohesive contract and proof size is reported without claiming a size exception.
       - Runtime harness: existing test-only helper-process execution still proves deadline and aggregate output behavior; production remains free of process launch code.
+      - Independent verification: the exact `d2da1be..4b17642` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race suites, `go vet`, `git diff --check`, clean status, lifecycle failure coverage, safe mappings, cleanup precedence, and absence of production `os/exec` were confirmed.
     - [ ] **MEDIA-02C2 — Linux cgroup v2 runner**
       - Next step: implement delegated controller validation, per-inspection and per-command groups, atomic launch, memory/swap/task/CPU enforcement, recursive kill, process-group fallback, direct reaping, empty-group verification, cleanup, and opt-in real-cgroup tests against the C1 contract.
 - [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
