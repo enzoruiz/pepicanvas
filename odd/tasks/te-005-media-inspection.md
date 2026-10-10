@@ -26,9 +26,9 @@ Uploaded media is untrusted input. File names, extensions, declared content type
 
 ## Authorized scope
 
-- Work only in `odd/tasks/te-005-media-inspection.md` and the approved `backend/internal/media` files.
+- Work only in `odd/tasks/te-005-media-inspection.md`, the approved `backend/internal/media` files, and the MEDIA-02 platform adapter under `backend/internal/platform/mediaexec`.
 - Use Go standard library only and follow established repository package and table-test conventions.
-- Implement and commit MEDIA-01 only in the first `stacked-to-main` slice.
+- Implement and commit one bounded MEDIA work unit per `stacked-to-main` slice.
 - Perform local verification and local commits only; do not push, open a pull request, or perform other remote operations.
 
 ## Secure provisional MVP limit matrix
@@ -49,11 +49,21 @@ These values are secure MVP defaults configurable through the domain contract. T
 | Stream count | 8 | All supported kinds |
 | Inspection timeout | 30 s | MEDIA-02 process containment |
 | Captured tool output | 1 MiB | MEDIA-02 process containment |
-| Process count | 8 | MEDIA-02 process containment |
+| Linux task count | 64 | MEDIA-02 cgroup v2 process/thread containment |
 | Memory | 512 MiB | MEDIA-02 process containment |
 | CPU time | 30 s | MEDIA-02 process containment |
 
 The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294,400-pixel cap. This permits both horizontal and vertical 4K-equivalent bounds without orientation bias while rejecting oversized square or extreme-axis inputs.
+
+## Supported MVP media matrix
+
+Classification and allowlisting use content-derived container and codec metadata, never file names, extensions, or client-declared MIME types.
+
+- Images: JPEG, PNG, and WebP.
+- Animated image: GIF.
+- Audio: MP3; WAV with `pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`, or `pcm_f64le`; FLAC; Ogg with Vorbis or Opus; M4A with AAC.
+- Video: MP4 with H.264 and optional AAC; WebM with VP9 and optional Opus.
+- Every other container or codec combination is outside the MVP and fails closed.
 
 ## Stable tasks
 
@@ -79,9 +89,42 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
   - Follow-up commit: `365e687` (`test(media): strengthen inspection boundary coverage`).
   - Independent verification: the complete `351c3f4..365e687` range passed with no CRITICAL, WARNING, or SUGGESTION findings; focused and full race tests, `go vet`, and `git diff --check` passed, and production files were unchanged by the follow-up.
 - [ ] **MEDIA-02 — Controlled ffprobe, full ffmpeg decode adapter, and process containment**
-  - Route: security-sensitive adapter work; reassess risk before implementation under `ask-on-risk`.
-  - Acceptance: shell-free controlled arguments, full decode, timeout, bounded capture, descendant termination, temporary isolation and cleanup, and enforceable process, memory, and CPU containment.
+  - Route: delegated security-sensitive adapter work split into three `stacked-to-main` work units: pure tool normalization, command/capture and complete decode, then Linux containment.
+  - Acceptance: shell-free controlled arguments, content-derived allowlist enforcement, full decode, timeout, bounded capture, descendant termination, temporary isolation and cleanup, and enforceable Linux cgroup v2 task, memory, and CPU containment.
+  - Platform decision: cgroup v2 delegation is a deployment prerequisite; unsupported or non-delegated environments fail closed rather than silently degrading resource guarantees.
+  - Isolation boundary: the domain owns the inspection port and normalized contract; `internal/platform/mediaexec` owns staging, commands, parsing, classification, containment, cleanup, and failure redaction.
   - Checks: focused adapter tests, adversarial timeout/output/process tests, complete backend race suite, and containment evidence.
+  - [x] **MEDIA-02A — Pure ffprobe normalization and closed allowlist**
+    - Acceptance: bounded JSON parsing normalizes trusted input size, stream count, dimensions, duration, and available GIF frame count; the approved content-derived matrix is closed; malformed, unknown, contradictory, mixed, duplicate-primary, unsupported-stream, and disallowed combinations fail closed through fixed typed adapter errors.
+    - GIF boundary: ffprobe metadata alone returns `frame_metadata_required` with an intentionally domain-invalid partial inspection. It never claims final GIF acceptance because MEDIA-02B owns separate all-frame metadata and complete decode.
+    - Domain decision: `MaxProcesses: 8` is replaced by `MaxTasks: 64` because cgroup v2 `pids.max` accounts for Linux processes and threads. No inspection port is added before an execution adapter exists; a parser-only interface would add indirection without a domain consumer.
+    - Exclusions: no command construction, `os/exec`, subprocess, stderr capture, temporary directory, cgroup, persistence, network, real media fixture, or real `ffprobe`/`ffmpeg` execution.
+    - RED: `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` failed to compile. The media tests reported undefined `Limits.MaxTasks`; the adapter tests reported undefined production symbols beginning with `container`, `containerJPEG`, and `ErrorCode`.
+    - GREEN: after the smallest complete parser and limit implementation, the same command returned `ok` for `internal/platform/mediaexec` in `1.010s` and `internal/media` in `1.011s`.
+    - REFACTOR: image demuxer normalization was centralized, incompatible image duration and audio dimensions were rejected explicitly, and internal naming was clarified; the same focused command remained green with `internal/platform/mediaexec` in `1.013s` and `internal/media` in `1.010s`.
+    - Final pre-commit verification: the focused race command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.014s`; the full backend race suite returned `ok` for `internal/access`, `internal/media`, and `internal/platform/mediaexec`, each in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
+    - Runtime harness: N/A; this is deliberately a pure parser work unit and does not execute external tools.
+    - Rollback boundary: revert this work-unit commit to remove the parser, its tests, the `MaxTasks` semantic correction, and this evidence without changing MEDIA-01 validation behavior.
+    - Commit evidence: parent `9a1a18d`; Conventional Commit subject `feat(media): normalize ffprobe metadata`. The resulting hash is reported from Git after commit because a commit cannot embed its own identity.
+    - Authored change size: the final pre-commit diff contains 675 inserted and 15 deleted lines across five files, or 690 authored changed lines. The approximately 400-line heuristic remains advisory; this cohesive parser, contract correction, exhaustive tests, and evidence unit is reported honestly rather than code-golfed.
+    - Independent verification findings: accepted MP4/WebM inspections ignored contradictory present AAC/Opus stream durations; positive durations below half a nanosecond could normalize to zero while returning success; the WAV allowlist accepted any nonempty `pcm_` prefix; and attachment plus arbitrary unknown stream rejection lacked explicit proof.
+    - Approved WAV refinement: the exact MVP set is `pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`, and `pcm_f64le`. Prefix-based or other PCM codec names remain unsupported unless separately approved.
+    - Correction RED: after adding the regressions first, `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` failed in three independent areas: contradictory optional AAC and Opus duration cases returned nil errors, the positive sub-nanosecond duration returned nil, and `pcm_not_a_codec` returned nil; `internal/media` passed in `1.010s`.
+    - Correction GREEN: after reconciling every present accepted duration source, rejecting rounded-zero durations, and closing the WAV codec set, the same focused command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.010s`. The approved-matrix success cases continue to pass `media.Validate`, while GIF remains the documented intentionally incomplete exception.
+    - Correction coverage: table-driven regressions cover contradictory optional AAC and Opus duration, positive sub-nanosecond duration, all six approved WAV codecs, fake `pcm_not_a_codec`, attachment streams, and arbitrary unknown stream types.
+    - Correction boundary: this follow-up changes only pure normalization, its tests, and this tracker. It does not add command execution, real media tools, process containment, or any remote operation.
+    - Correction verification: the final focused race command returned `ok` for `internal/platform/mediaexec` and `internal/media`, each in `1.011s`; the full backend race suite returned `ok` for `internal/access` in `1.010s` and for `internal/media` plus `internal/platform/mediaexec` in `1.012s`; `cd backend && go vet ./...` and `git diff --check` produced no output.
+    - Correction commit evidence: parent `7555d25`; Conventional Commit subject `fix(media): close probe normalization gaps`. The resulting hash is reported from Git after commit because a commit cannot embed its own identity.
+    - Delivery status: after final independent verification, the maintainer accepted `size:exception` for the cohesive MEDIA-02A slice. MEDIA-02B and MEDIA-02C remain separate `stacked-to-main` slices subject to the approximately 400-line review budget.
+    - Contract clarification: `NormalizeProbe` establishes structurally coherent metadata and enforces the closed container/codec matrix; successful non-GIF output is not domain acceptance. Every caller must pass that inspection to `media.Validate` with its selected limits, which may intentionally differ from `DefaultLimits`.
+    - Verifier warning disposition: the warning that every successful non-GIF normalization must satisfy `media.Validate(DefaultLimits())` was rejected because it conflated pure normalization with configurable domain acceptance. Applying defaults inside the parser would silently override approved caller-specific limits.
+    - Clarification proof: focused table-driven cases normalize structurally valid over-default-limit image input, image dimensions, audio duration, and video duration, then prove that `media.Validate(DefaultLimits())` rejects each inspection. `cd backend && go test -race -count=1 ./internal/platform/mediaexec ./internal/media` returned `ok` for both packages in `1.010s`; `cd backend && go test -race -count=1 ./...` returned `ok` for `internal/access` in `1.012s`, `internal/media` in `1.011s`, and `internal/platform/mediaexec` in `1.013s`; `cd backend && go vet ./...` produced no output.
+    - Cumulative MEDIA-02A size: `git diff --numstat 9a1a18d..001c808` records 807 insertions and 16 deletions across five files, or 823 authored changed lines.
+    - Final independent verification: the complete `9a1a18d..001c808` range passed with no CRITICAL, WARNING, or SUGGESTION findings. Focused and full race tests, `go vet`, `git diff --check`, branch identity, and clean status passed. The verifier found no honest normalization/classification split that would remain independently deliverable with tests paired to behavior.
+  - [ ] **MEDIA-02B — Controlled commands, bounded capture, and complete decode**
+    - Own shell-free argument construction, bounded stdout/stderr capture, temporary staging and cleanup, separate all-frame GIF metadata, complete ffmpeg decoding, timeout behavior, and deterministic helper-process tests without real media fixtures.
+  - [ ] **MEDIA-02C — Linux cgroup v2 containment**
+    - Own delegated cgroup setup and cleanup, 64-task process/thread enforcement, memory and CPU limits, descendant termination, and fail-closed unsupported-environment behavior.
 - [ ] **MEDIA-03 — Pinned real-tool fixtures and integration evidence**
   - Route: integration work with external binaries and curated fixtures; keep generated or binary evidence outside review scope unless explicitly authorized.
   - Acceptance: pinned valid and adversarial fixtures prove content-derived classification, truncation rejection, all-frame GIF validation, complete decode, cleanup, and safe failures against exact tool versions.
@@ -109,15 +152,17 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
 - Review budget: approximately 400 authored changed lines per pull-request slice; the budget controls slicing, never code quality or test completeness.
 - Forecast: 900–1,300 authored changed lines across TE-005.
 - Slice 1: MEDIA-01 domain contract, tests, and this governing tracker; targets `main` when remote delivery is separately authorized.
-- Slice 2: MEDIA-02 controlled tool adapter and process containment; independently targets `main` after Slice 1 lands.
-- Slice 3: MEDIA-03 pinned fixtures and real-tool integration evidence; independently targets `main` after its prerequisite slices land.
-- Slice 4: MEDIA-04 CI/toolchain pin and final verification; independently targets `main` after the implementation and fixture slices land.
+- Slice 2: MEDIA-02A pure ffprobe normalization and closed allowlist enforcement; independently targets `main` after Slice 1 lands.
+- Slice 3: MEDIA-02B controlled commands, bounded capture, temporary-resource lifecycle, all-frame GIF metadata, complete decoding, and deterministic helper-process tests; independently targets `main` after Slice 2 lands.
+- Slice 4: MEDIA-02C Linux cgroup v2 containment, descendant termination, and resource enforcement; independently targets `main` after Slice 3 lands.
+- Slice 5: MEDIA-03 pinned fixtures and real-tool integration evidence; independently targets `main` after its prerequisite slices land.
+- Slice 6: MEDIA-04 CI/toolchain pin and final verification; independently targets `main` after the implementation and fixture slices land.
 - If a cohesive slice exceeds the review budget after one honest slicing pass, stop, report the overage, and request risk acceptance rather than compressing implementation or tests.
 
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Branch: `feat/te-005-media-inspection`.
+- Active branch: `feat/te-005-mediaexec-adapter`; MEDIA-01 began on `feat/te-005-media-inspection`, which remains part of the recorded branch history.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
@@ -127,7 +172,10 @@ The dimension limits intentionally combine a 3,840 px per-axis cap with an 8,294
 - MEDIA-01 completed in `296bf1b` with 687 inserted lines and all required local checks passing.
 - The bounded verification follow-up changes tests and this tracker only; no production file or behavior changed.
 - The maintainer accepted `size:exception` for the cohesive 778-line MEDIA-01 slice after independent verification; subsequent slices remain subject to the approximately 400-line review budget and `stacked-to-main` strategy.
+- The maintainer authorized `backend/internal/platform/mediaexec`, a closed MVP container/codec matrix, a 64-task cgroup limit, and fail-closed cgroup v2 delegation as a Linux deployment prerequisite for MEDIA-02.
+- MEDIA-02A remains pure and adds no domain port because command execution has not been introduced; MEDIA-02B will define the useful execution boundary against an actual caller.
+- MEDIA-02A correction closes the independent duration, rounded-zero, exact-WAV-allowlist, and unsupported-stream proof findings without changing its pure-parser boundary. The maintainer accepted `size:exception` for the final verified 823-line slice because a smaller split would create non-deliverable cross-commit dependencies.
 
 ## Next step
 
-Assess the MEDIA-02 process-containment boundary and derive its bounded implementation surface before any adapter or fixture work.
+Create the MEDIA-02B branch and implement the next bounded work unit: controlled command construction, bounded capture, temporary staging, separate all-frame GIF metadata, and complete decode with deterministic helper processes. Do not add cgroup containment or real media fixtures in that slice.
