@@ -198,6 +198,9 @@ func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *ca
 	if ctx.Err() != nil {
 		return nil, newError(ErrorTimeout)
 	}
+	if command.Path == adapter.config.FFprobePath {
+		command.Args = removeArgument(command.Args, "-nostdin")
+	}
 	capture := budget.command()
 	result := execution.Run(command, capture.stdout(), capture.stderr())
 	if budget.overflowed() {
@@ -210,6 +213,16 @@ func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *ca
 		return nil, newError(ErrorTimeout)
 	}
 	return capture.output(), nil
+}
+
+func removeArgument(arguments []string, target string) []string {
+	filtered := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		if argument != target {
+			filtered = append(filtered, argument)
+		}
+	}
+	return filtered
 }
 
 func beginExecution(raw Execution, result Result) (Execution, error) {
