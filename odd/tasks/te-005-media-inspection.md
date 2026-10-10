@@ -231,6 +231,19 @@ Classification and allowlisting use content-derived container and codec metadata
   - Route: CI and reproducibility work; reassess the final workflow boundary before implementation.
   - Acceptance: exact `ffprobe`/`ffmpeg` versions and fixture hashes are pinned, CI runs the required media suite, and all TE-005 evidence is reconciled without weakening existing checks.
   - Checks: local command parity, workflow structure validation, complete backend race suite, control-contract validation, and hosted evidence after separately authorized delivery.
+  - [x] Implementación y verificación local completadas.
+  - [ ] Evidencia alojada y entrega remota pendientes de autorización separada; no se observó ni se afirma una ejecución de GitHub Actions.
+  - Pin y cierre seguro: el trabajo `verify` usa explícitamente `ubuntu-24.04` y declara una sola vez `FFMPEG_DEBIAN_VERSION=7:6.1.1-3ubuntu5`. La instalación no interactiva solicita únicamente `ffmpeg=${FFMPEG_DEBIAN_VERSION}` con `--no-install-recommends`; APT falla si esa versión exacta no está disponible. Después se exige igualdad de `dpkg-query`, resolución exacta a `/usr/bin/ffmpeg` y `/usr/bin/ffprobe`, y coincidencia de ambas primeras líneas con las identidades de MEDIA-03.
+  - Conservación de controles: `go test -race ./...` permanece literal, independiente y con `PEPICANVAS_TEST_MEDIA_TOOLS` sin definir. Un paso separado ejecuta `PEPICANVAS_TEST_MEDIA_TOOLS=1 go test -race -count=1 -timeout=180s -run '^TestPinnedRealMediaFixtures$' -v ./internal/platform/mediaexec` desde `backend`. `./scripts/check-control-contract.sh` permanece sin cambios y los filtros conservan `.github/workflows/backend.yml` y `backend/**`, que incluye el manifiesto MEDIA-03.
+  - Validación estructural local: `python3 -c 'import yaml; print(yaml.__version__)'` informó `6.0.1`. Un script acotado ejecutado con `python3 - <<'PY'` leyó `.github/workflows/backend.yml` mediante `yaml.BaseLoader` y afirmó disparadores/rutas, `ubuntu-24.04`, el único pin de paquete, instalación exacta, rutas e identidades de herramientas, ausencia de descargas alternativas, suite predeterminada literal, suite opt-in literal y contrato de control sin cambios; resultado: `OK: backend workflow YAML parsed and semantic assertions passed`. El bloque de instalación extraído por el mismo parser pasó `bash -n`: `OK: install step passes bash -n`.
+  - Paridad de herramientas local: `dpkg-query -W -f='${Version}\n' ffmpeg` devolvió `7:6.1.1-3ubuntu5`; `/usr/bin/ffmpeg -version | sed -n '1p'` devolvió `ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers`; `/usr/bin/ffprobe -version | sed -n '1p'` devolvió `ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers`; `command -v` resolvió ambas herramientas bajo `/usr/bin`.
+  - Verificación Go local: `cd backend && env -u PEPICANVAS_TEST_MEDIA_TOOLS go test -race -count=1 ./internal/platform/mediaexec` pasó en `2.056s`. `cd backend && PEPICANVAS_TEST_MEDIA_TOOLS=1 go test -race -count=1 -timeout=180s -run '^TestPinnedRealMediaFixtures$' -v ./internal/platform/mediaexec` pasó dos veces, con tiempos de paquete `3.394s` y `3.157s`; las doce identidades y sus hashes MEDIA-03 permanecieron estables. `cd backend && env -u PEPICANVAS_TEST_MEDIA_TOOLS go test -race -count=1 ./...` pasó para `internal/access` en `1.010s`, `internal/media` en `1.011s` e `internal/platform/mediaexec` en `2.053s`. `cd backend && go vet ./...` no produjo diagnósticos.
+  - Verificación de repositorio local: `./scripts/check-control-contract.sh` devolvió `OK: contrato de controles válido`; `git diff --check` no produjo salida. La comprobación final de estado limpio y estadística de rango se registra después del commit local.
+  - Exclusiones: no se ejecutó APT ni GitHub Actions localmente; no hubo red, descarga, artefacto externo, contenedor flotante, mutación de cgroup, cambio de hash o matriz MEDIA-03, lógica de aceptación de CI en Go de producción, edición de `control-contract.yml`, remoto, push ni pull request.
+  - Límite de reversión: revertir el commit de MEDIA-04 elimina únicamente el pin y la suite opt-in del flujo backend junto con esta evidencia; conserva MEDIA-03, sus hashes, el comportamiento de producción, la suite race predeterminada y el contrato de control.
+  - Límite de commit: padre `5e45e24`; asunto Conventional Commit `ci(media): pin real-tool verification`. El hash resultante se informa después del commit porque un commit no puede incluir su propia identidad.
+  - Tamaño del cambio: 34 líneas insertadas y 3 eliminadas en dos archivos, o 37 líneas cambiadas de autoría. Este trabajo permanece por debajo del presupuesto orientativo de revisión y forma una sola unidad reversible de CI y evidencia.
+  - Resultado RDD: `disabled/unmanaged`; RDD global permanece desactivado, por lo que no se aplicó un flujo de recibos ni autoridad de revisión.
 
 ## Acceptance criteria
 
@@ -260,7 +273,7 @@ Classification and allowlisting use content-derived container and codec metadata
 ## Progress and evidence
 
 - Worktree: `/home/enzo/projects/pepicanvas-te-005`.
-- Active branch: `feat/te-005-media-fixtures`; earlier slices remain recorded on `feat/te-005-media-inspection`, `feat/te-005-mediaexec-adapter`, `feat/te-005-mediaexec-runner`, and `feat/te-005-mediaexec-containment`.
+- Active branch: `feat/te-005-media-ci`; earlier slices remain recorded on `feat/te-005-media-inspection`, `feat/te-005-mediaexec-adapter`, `feat/te-005-mediaexec-runner`, `feat/te-005-mediaexec-containment`, and `feat/te-005-media-fixtures`.
 - Initial worktree: clean at `351c3f4`.
 - Committed architecture evidence: `docs/stack.md` requires content-derived `ffprobe` inspection, complete `ffmpeg` decoding including every GIF frame, timeout-bound subprocesses, safe bounded failures, and release-pinned tool versions.
 - Existing committed evidence contains no stricter numeric media limit matrix, so the maintainer-approved provisional MVP defaults govern this change.
@@ -279,7 +292,8 @@ Classification and allowlisting use content-derived container and codec metadata
 - MEDIA-02C2 implements the production Linux cgroup-v2 Runner against that lifecycle, with build-tagged unsupported-platform behavior and an opt-in disposable-delegation harness; no real media tool was executed.
 - The maintainer accepted `size:exception` for the final verified 1,906-line MEDIA-02C2 range; real-tool fixtures remain isolated to MEDIA-03.
 - MEDIA-03 proves the complete existing pipeline against twelve reproducibly generated fixtures using the exact locally pinned tools, fixes the pinned ffprobe incompatibility without broadening policy, and checks in only source, tests, text manifest data, and tracker evidence.
+- MEDIA-04 local implementation pins Ubuntu 24.04 and Debian package `ffmpeg` `7:6.1.1-3ubuntu5`, preserves the default race and control-contract checks, and adds the focused opt-in real-tool suite. Local parity passed; hosted CI and remote delivery remain pending and unobserved.
 
 ## Next step
 
-Implement MEDIA-04 by pinning the verified MEDIA-03 toolchain in CI and reconciling final TE-005 workflow evidence without weakening containment or fixture integrity checks.
+Obtain separate authorization for remote delivery, then observe the hosted Ubuntu 24.04 workflow before closing MEDIA-04 and final TE-005 hosted evidence.
