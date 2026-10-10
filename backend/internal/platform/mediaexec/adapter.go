@@ -6,20 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 )
 
 const maxCapturedOutputBytes = int64(16 * 1024 * 1024)
-
-// Runner executes one shell-free command under the supplied context. A runner
-// must not return until both output streams reach EOF. MEDIA-02C supplies the
-// production implementation with cgroup-v2 containment.
-type Runner interface {
-	Run(context.Context, Command, io.Writer, io.Writer) error
-}
 
 // Config contains only deployment-trusted paths and fixed inspection limits.
 type Config struct {
@@ -39,7 +31,7 @@ var _ media.Inspector = (*Adapter)(nil)
 
 // New validates trusted configuration and fails closed without a Runner.
 func New(config Config, runner Runner) (*Adapter, error) {
-	if nilRunner(runner) || config.Limits.Validate() != nil ||
+	if nilInterface(runner) || config.Limits.Validate() != nil ||
 		config.Limits.MaxCapturedOutputBytes > maxCapturedOutputBytes {
 		return nil, newError(ErrorConfiguration)
 	}
@@ -65,11 +57,22 @@ func New(config Config, runner Runner) (*Adapter, error) {
 // reads; a Reader that can block indefinitely must be made cancelable by its
 // owner. One deadline and one output budget cover staging and every command.
 func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspection media.Inspection, resultErr error) {
+	ctx, cancel := context.WithTimeout(parent, adapter.config.Limits.InspectionTimeout)
+	defer cancel()
+	rawExecution, beginResult := adapter.runner.Begin(ctx, adapter.config.Limits)
+	execution, err := beginExecution(rawExecution, beginResult)
+	if err != nil {
+		return media.Inspection{}, err
+	}
+	defer func() {
+		if closeErr := resultError(execution.Close()); closeErr != nil {
+			inspection = media.Inspection{}
+			resultErr = closeErr
+		}
+	}()
 	if source == nil {
 		return media.Inspection{}, newError(ErrorStagingFailed)
 	}
-	ctx, cancel := context.WithTimeout(parent, adapter.config.Limits.InspectionTimeout)
-	defer cancel()
 
 	dir, input, inputBytes, err := adapter.stage(ctx, source)
 	if err != nil {
@@ -83,7 +86,7 @@ func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspe
 	}()
 
 	budget := newCaptureBudget(adapter.config.Limits.MaxCapturedOutputBytes)
-	metadata, err := adapter.run(ctx, budget, metadataCommand(adapter.config, dir, input))
+	metadata, err := adapter.run(ctx, execution, budget, metadataCommand(adapter.config, dir, input))
 	if err != nil {
 		return media.Inspection{}, err
 	}
@@ -93,7 +96,7 @@ func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspe
 		if !errors.As(err, &adapterError) || adapterError.Code() != ErrorFrameMetadataRequired {
 			return media.Inspection{}, safeNormalizationError(err)
 		}
-		frames, runErr := adapter.run(ctx, budget, frameCommand(adapter.config, dir, input))
+		frames, runErr := adapter.run(ctx, execution, budget, frameCommand(adapter.config, dir, input))
 		if runErr != nil {
 			return media.Inspection{}, runErr
 		}
@@ -105,7 +108,7 @@ func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspe
 	if err := media.Validate(inspection, adapter.config.Limits); err != nil {
 		return media.Inspection{}, newError(ErrorValidation)
 	}
-	if _, err := adapter.run(ctx, budget, decodeCommand(adapter.config, dir, input)); err != nil {
+	if _, err := adapter.run(ctx, execution, budget, decodeCommand(adapter.config, dir, input)); err != nil {
 		return media.Inspection{}, err
 	}
 	return inspection, nil
@@ -191,22 +194,72 @@ func boundedReadCapacity(limit, written int64, capacity int) int {
 	return int(remaining) + 1
 }
 
-func (adapter *Adapter) run(ctx context.Context, budget *captureBudget, command Command) ([]byte, error) {
+func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *captureBudget, command Command) ([]byte, error) {
 	if ctx.Err() != nil {
 		return nil, newError(ErrorTimeout)
 	}
 	capture := budget.command()
-	err := adapter.runner.Run(ctx, command, capture.stdout(), capture.stderr())
+	result := execution.Run(command, capture.stdout(), capture.stderr())
 	if budget.overflowed() {
 		return nil, newError(ErrorOutputOverflow)
+	}
+	if err := resultError(result); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, newError(ErrorTimeout)
 	}
-	if err != nil {
-		return nil, newError(ErrorCommandFailed)
-	}
 	return capture.output(), nil
+}
+
+func beginExecution(raw Execution, result Result) (Execution, error) {
+	if !result.valid() {
+		return nil, newError(ErrorExecutionFailed)
+	}
+	if result.succeeded() {
+		execution, ok := guardExecution(raw)
+		if !ok {
+			return nil, newError(ErrorExecutionFailed)
+		}
+		return execution, nil
+	}
+	if !nilInterface(raw) {
+		return nil, newError(ErrorExecutionFailed)
+	}
+	return nil, resultError(result)
+}
+
+func resultError(result Result) error {
+	if !result.valid() {
+		return newError(ErrorExecutionFailed)
+	}
+	if result.succeeded() {
+		return nil
+	}
+	switch result.failureKind() {
+	case FailureContainmentUnavailable:
+		return newError(ErrorContainmentUnavailable)
+	case FailureContainmentSetup:
+		return newError(ErrorContainmentSetup)
+	case FailureContainmentCleanup:
+		return newError(ErrorContainmentCleanup)
+	case FailureTimeout:
+		return newError(ErrorTimeout)
+	case FailureCancelled:
+		return newError(ErrorCancelled)
+	case FailureMemoryLimit:
+		return newError(ErrorMemoryLimit)
+	case FailureTaskLimit:
+		return newError(ErrorTaskLimit)
+	case FailureCPULimit:
+		return newError(ErrorCPULimit)
+	case FailureToolExit:
+		return newError(ErrorCommandFailed)
+	case FailureInternal:
+		return newError(ErrorExecutionFailed)
+	default:
+		return newError(ErrorExecutionFailed)
+	}
 }
 
 func safeNormalizationError(err error) error {
@@ -215,19 +268,6 @@ func safeNormalizationError(err error) error {
 		return newError(adapterError.Code())
 	}
 	return newError(ErrorInvalidProbe)
-}
-
-func nilRunner(runner Runner) bool {
-	if runner == nil {
-		return true
-	}
-	value := reflect.ValueOf(runner)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 func canonicalExecutable(path string) (string, bool) {
