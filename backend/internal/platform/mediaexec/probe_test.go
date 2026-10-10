@@ -315,6 +315,15 @@ func TestAdapterErrorsAreTypedBoundedAndSafe(t *testing.T) {
 		{code: ErrorProbeTooLarge, message: "media probe output exceeds the allowed size"},
 		{code: ErrorUnsupportedMedia, message: "media format is unsupported"},
 		{code: ErrorFrameMetadataRequired, message: "GIF frame metadata is required"},
+		{code: ErrorConfiguration, message: "media inspection configuration is invalid"},
+		{code: ErrorInputTooLarge, message: "media input exceeds the staging limit"},
+		{code: ErrorStagingFailed, message: "media input staging failed"},
+		{code: ErrorCommandFailed, message: "media inspection command failed"},
+		{code: ErrorTimeout, message: "media inspection timed out"},
+		{code: ErrorOutputOverflow, message: "media tool output exceeds the allowed size"},
+		{code: ErrorInvalidFrames, message: "GIF frame metadata is invalid"},
+		{code: ErrorValidation, message: "media inspection failed validation"},
+		{code: ErrorCleanupFailed, message: "media inspection cleanup failed"},
 	}
 	unsafe := []string{"/private/input.mov", "stderr", "raw JSON", "h264", "secret"}
 

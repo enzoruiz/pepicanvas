@@ -20,6 +20,15 @@ const (
 	ErrorProbeTooLarge         ErrorCode = "probe_too_large"
 	ErrorUnsupportedMedia      ErrorCode = "unsupported_media"
 	ErrorFrameMetadataRequired ErrorCode = "frame_metadata_required"
+	ErrorConfiguration         ErrorCode = "configuration_invalid"
+	ErrorInputTooLarge         ErrorCode = "input_too_large"
+	ErrorStagingFailed         ErrorCode = "staging_failed"
+	ErrorCommandFailed         ErrorCode = "command_failed"
+	ErrorTimeout               ErrorCode = "timeout"
+	ErrorOutputOverflow        ErrorCode = "output_overflow"
+	ErrorInvalidFrames         ErrorCode = "invalid_frames"
+	ErrorValidation            ErrorCode = "validation_failed"
+	ErrorCleanupFailed         ErrorCode = "cleanup_failed"
 )
 
 var errorMessages = map[ErrorCode]string{
@@ -27,6 +36,15 @@ var errorMessages = map[ErrorCode]string{
 	ErrorProbeTooLarge:         "media probe output exceeds the allowed size",
 	ErrorUnsupportedMedia:      "media format is unsupported",
 	ErrorFrameMetadataRequired: "GIF frame metadata is required",
+	ErrorConfiguration:         "media inspection configuration is invalid",
+	ErrorInputTooLarge:         "media input exceeds the staging limit",
+	ErrorStagingFailed:         "media input staging failed",
+	ErrorCommandFailed:         "media inspection command failed",
+	ErrorTimeout:               "media inspection timed out",
+	ErrorOutputOverflow:        "media tool output exceeds the allowed size",
+	ErrorInvalidFrames:         "GIF frame metadata is invalid",
+	ErrorValidation:            "media inspection failed validation",
+	ErrorCleanupFailed:         "media inspection cleanup failed",
 }
 
 // Error is a bounded adapter error that never includes tool or input details.
