@@ -68,6 +68,9 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - R3-001 correction RED: the focused scenario-version regression failed because `clientVersion` was unknown and the report did not contain `does not match client`.
   - R3-001 correction GREEN: each scenario now binds `clientVersion` to the selected client's declared version; changing only the client version makes the manifest `FAIL`. The focused regression passed in `1.013s`.
   - R3-001 verification: the focused race suites passed in `1.083s` and `1.014s`; the full race suite passed across all five packages; `go vet ./...` and `git diff --check` produced no output.
+  - Work-unit commits: `8a22533` (`feat(release): enforce client support evidence`) and bounded correction `898279d` (`fix(release): bind evidence to client version`).
+  - Native review: medium-risk lineage `review-214c343eafa07974` was approved and acknowledged for target `sha256:23316a77c301763d4534c04563675e3643776b35f3806334c4febe0c0ae42752`; review authority was burned after the exact acknowledgement.
+  - Non-blocking follow-ups: R3-002 notes that evidence time is not yet checked against the client's release date; R3-003 notes that a scheme-only evidence URI can pass the durable-location check. These warnings did not reopen the approved review and require a later work unit.
   - Authored change size: 1,186 inserted lines across six new files. This cohesive contract, strict decoder, classification proof, CLI boundary, tracker, and policy artifact exceed the advisory forecast without omitting tests or splitting the release contract unnaturally.
   - Rollback boundary: remove the six TE011-01 files listed in the handoff; existing backend packages and product behavior remain unchanged.
 - [ ] **TE011-02 — Frontend client and viewport guard**
@@ -113,4 +116,4 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 
 ## Next step
 
-Commit TE011-01 as the first `stacked-to-main` work unit, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, supported OBS OS/package matrix, and live resize recovery UX before starting TE011-02 through TE011-04. Only externally verified release metadata may populate a real release manifest.
+Address the recorded R3-002 and R3-003 follow-ups in a later work unit, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, supported OBS OS/package matrix, and live resize recovery UX before starting TE011-02 through TE011-04. Only externally verified release metadata may populate a real release manifest.
