@@ -88,8 +88,9 @@ func cliManifest(t *testing.T) map[string]any {
 		evidenceID := "evidence-" + id
 		value["scenarios"] = append(value["scenarios"].([]any), map[string]any{
 			"id": id, "clientFamily": client["family"], "clientSlot": client["slot"],
-			"viewport": map[string]any{"width": float64(1280), "height": float64(720)},
-			"evidence": []any{evidenceID},
+			"clientVersion": client["version"],
+			"viewport":      map[string]any{"width": float64(1280), "height": float64(720)},
+			"evidence":      []any{evidenceID},
 		})
 		value["evidence"] = append(value["evidence"].([]any), map[string]any{
 			"id": evidenceID, "releaseVersion": "1.0.0", "scenarioId": id,

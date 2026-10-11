@@ -177,6 +177,13 @@ func TestEvaluateManifest(t *testing.T) {
 			want: Fail, wantProblem: "scenario viewport",
 		},
 		{
+			name: "scenario client version mismatch",
+			mutate: func(manifest map[string]any) {
+				manifest["clients"].([]any)[0].(map[string]any)["version"] = "3.0.0-fixture"
+			},
+			want: Fail, wantProblem: "does not match client",
+		},
+		{
 			name: "missing evidence reference",
 			mutate: func(manifest map[string]any) {
 				manifest["scenarios"].([]any)[0].(map[string]any)["evidence"] = []any{}
@@ -344,8 +351,9 @@ func validManifest(t *testing.T) map[string]any {
 		evidenceID := "evidence-" + scenarioID
 		manifest["scenarios"] = append(manifest["scenarios"].([]any), map[string]any{
 			"id": scenarioID, "clientFamily": client["family"], "clientSlot": client["slot"],
-			"viewport": map[string]any{"width": float64(1280), "height": float64(720)},
-			"evidence": []any{evidenceID},
+			"clientVersion": client["version"],
+			"viewport":      map[string]any{"width": float64(1280), "height": float64(720)},
+			"evidence":      []any{evidenceID},
 		})
 		manifest["evidence"] = append(manifest["evidence"].([]any), map[string]any{
 			"id": evidenceID, "releaseVersion": "9.0.0-fixture", "scenarioId": scenarioID,

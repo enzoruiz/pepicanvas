@@ -83,11 +83,12 @@ type toolchain struct {
 }
 
 type scenario struct {
-	ID           string   `json:"id"`
-	ClientFamily string   `json:"clientFamily"`
-	ClientSlot   string   `json:"clientSlot"`
-	Viewport     viewport `json:"viewport"`
-	Evidence     []string `json:"evidence"`
+	ID            string   `json:"id"`
+	ClientFamily  string   `json:"clientFamily"`
+	ClientSlot    string   `json:"clientSlot"`
+	ClientVersion string   `json:"clientVersion"`
+	Viewport      viewport `json:"viewport"`
+	Evidence      []string `json:"evidence"`
 }
 
 type evidence struct {
@@ -413,10 +414,14 @@ func validateScenarios(values []scenario, clients map[string]client, minimum vie
 		}
 		seenIDs[value.ID] = true
 		key := value.ClientFamily + "/" + value.ClientSlot
-		if _, exists := clients[key]; !exists {
+		clientValue, exists := clients[key]
+		if !exists {
 			structural = append(structural, fmt.Sprintf("scenario %q targets unknown client %q", value.ID, key))
 		} else {
 			coverage[key]++
+			if value.ClientVersion != clientValue.Version {
+				structural = append(structural, fmt.Sprintf("scenario %q clientVersion does not match client %s", value.ID, key))
+			}
 		}
 		if value.Viewport.Width < minimum.Width || value.Viewport.Height < minimum.Height {
 			structural = append(structural, fmt.Sprintf("scenario viewport for %q is below policy minimum", value.ID))

@@ -65,6 +65,9 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - Runtime harness: `cd backend && go test -race -count=1 -run '^TestRun$' -v ./cmd/releasecheck` passed in `1.015s`, including the file-backed `PASS`, missing-evidence `INCONCLUSIVE`, and invalid-arguments cases. Fixtures are generated under `t.TempDir()` and contain explicitly synthetic client identities.
   - Policy artifact check: `python3 -m json.tool releases/client-support-policy.json >/dev/null` produced no output and exited successfully.
   - Scope boundary: no real-world client version was asserted, no network or external tool was used, and no browser, OBS, frontend, storage, CI, or release-pipeline behavior was added.
+  - R3-001 correction RED: the focused scenario-version regression failed because `clientVersion` was unknown and the report did not contain `does not match client`.
+  - R3-001 correction GREEN: each scenario now binds `clientVersion` to the selected client's declared version; changing only the client version makes the manifest `FAIL`. The focused regression passed in `1.013s`.
+  - R3-001 verification: the focused race suites passed in `1.083s` and `1.014s`; the full race suite passed across all five packages; `go vet ./...` and `git diff --check` produced no output.
   - Authored change size: 1,186 inserted lines across six new files. This cohesive contract, strict decoder, classification proof, CLI boundary, tracker, and policy artifact exceed the advisory forecast without omitting tests or splitting the release contract unnaturally.
   - Rollback boundary: remove the six TE011-01 files listed in the handoff; existing backend packages and product behavior remain unchanged.
 - [ ] **TE011-02 — Frontend client and viewport guard**
