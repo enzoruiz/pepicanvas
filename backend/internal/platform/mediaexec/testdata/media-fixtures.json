@@ -7,9 +7,7 @@
     "ffmpeg_debian_package": "ffmpeg",
     "ffmpeg_debian_version": "7:6.1.1-3ubuntu5",
     "ffprobe_path": "/usr/bin/ffprobe",
-    "ffprobe_first_line": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers",
-    "libopus_debian_package": "libopus0",
-    "libopus_debian_version": "1.4-1build1"
+    "ffprobe_first_line": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
   },
   "fixtures": [
     {
@@ -71,9 +69,9 @@
     {
       "id": "ogg-opus",
       "filename": "tone-opus.ogg",
-      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "libopus", "-b:a", "64k", "-application", "audio", "-frame_duration", "20", "-flags:a", "+bitexact", "-serial_offset", "0", "-fflags", "+bitexact", "-f", "ogg"],
-      "sha256": "78b9d83c522a5fd15b6a1899fa1a69b3954acd256361c486745d9ca7a327926f",
-      "kind": "audio", "container": "ogg", "audio_codec": "opus", "duration_ns": 1006500000, "stream_count": 1
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map_metadata", "-1", "-threads", "1", "-c:a", "opus", "-strict", "experimental", "-b:a", "64k", "-flags:a", "+bitexact", "-serial_offset", "0", "-fflags", "+bitexact", "-f", "ogg"],
+      "sha256": "7999a0cae506cbd3a5e38b8bcf6cbd935a188b908bab408d43e6bea0592913de",
+      "kind": "audio", "container": "ogg", "audio_codec": "opus", "duration_ns": 1002500000, "stream_count": 1
     },
     {
       "id": "m4a-aac",
@@ -92,9 +90,9 @@
     {
       "id": "webm-vp9-opus",
       "filename": "clip.webm",
-      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=4:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1", "-threads", "1", "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "0", "-row-mt", "0", "-tile-columns", "0", "-frame-parallel", "0", "-lag-in-frames", "0", "-flags:v", "+bitexact", "-c:a", "libopus", "-b:a", "64k", "-application", "audio", "-frame_duration", "20", "-flags:a", "+bitexact", "-shortest", "-fflags", "+bitexact", "-f", "webm"],
-      "sha256": "e420363ff1aa6afc2144a6562a835e84fcb2f247f8141d2d3b391f0d48dc774e",
-      "kind": "video", "container": "webm", "video_codec": "vp9", "audio_codec": "opus", "width": 32, "height": 24, "duration_ns": 1008000000, "stream_count": 2
+      "generation_args": ["-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=4:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1", "-threads", "1", "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "0", "-row-mt", "0", "-tile-columns", "0", "-frame-parallel", "0", "-lag-in-frames", "0", "-flags:v", "+bitexact", "-c:a", "opus", "-strict", "experimental", "-b:a", "64k", "-flags:a", "+bitexact", "-shortest", "-fflags", "+bitexact", "-f", "webm"],
+      "sha256": "2c4f08b483f7c670fb6316e135172fa5cf950cff329746e786fa47cfb413cbd2",
+      "kind": "video", "container": "webm", "video_codec": "vp9", "audio_codec": "opus", "width": 32, "height": 24, "duration_ns": 1004000000, "stream_count": 2
     }
   ]
 }
