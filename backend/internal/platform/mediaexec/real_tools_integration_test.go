@@ -26,6 +26,8 @@ const (
 	realFFprobePath    = "/usr/bin/ffprobe"
 	realFFmpegVersion  = "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers"
 	realFFprobeVersion = "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
+	ffmpegPackage      = "ffmpeg"
+	ffmpegPackageVer   = "7:6.1.1-3ubuntu5"
 )
 
 type fixtureManifest struct {
@@ -36,10 +38,12 @@ type fixtureManifest struct {
 }
 
 type fixtureTools struct {
-	FFmpegPath       string `json:"ffmpeg_path"`
-	FFmpegFirstLine  string `json:"ffmpeg_first_line"`
-	FFprobePath      string `json:"ffprobe_path"`
-	FFprobeFirstLine string `json:"ffprobe_first_line"`
+	FFmpegPath          string `json:"ffmpeg_path"`
+	FFmpegFirstLine     string `json:"ffmpeg_first_line"`
+	FFmpegDebianPackage string `json:"ffmpeg_debian_package"`
+	FFmpegDebianVersion string `json:"ffmpeg_debian_version"`
+	FFprobePath         string `json:"ffprobe_path"`
+	FFprobeFirstLine    string `json:"ffprobe_first_line"`
 }
 
 type fixtureManifestEntry struct {
@@ -67,8 +71,9 @@ func TestPinnedRealMediaFixtures(t *testing.T) {
 	}
 
 	manifest := loadFixtureManifest(t)
-	validatePinnedTools(t, manifest.Tools)
 	validateFixtureManifest(t, manifest)
+	validatePinnedToolManifest(t, manifest.Tools)
+	validatePinnedTools(t, manifest.Tools)
 
 	root := t.TempDir()
 	generatedRoot := filepath.Join(root, "generated")
@@ -91,7 +96,7 @@ func TestPinnedRealMediaFixtures(t *testing.T) {
 				t.Fatalf("fixture reproducibility failure: %s hashes differ: %s != %s", fixture.ID, firstHash, secondHash)
 			}
 			if firstHash != fixture.SHA256 {
-				t.Errorf("fixture manifest hash mismatch: %s generated %s, manifest %s", fixture.ID, firstHash, fixture.SHA256)
+				t.Errorf("fixture manifest hash mismatch: %s generated %s, manifest %s; pinned package: %s=%s", fixture.ID, firstHash, fixture.SHA256, manifest.Tools.FFmpegDebianPackage, manifest.Tools.FFmpegDebianVersion)
 			}
 			generated[fixture.ID] = first
 		})
@@ -183,6 +188,34 @@ func TestPinnedRealMediaFixtures(t *testing.T) {
 	})
 }
 
+func TestPinnedRealMediaFixtureManifest(t *testing.T) {
+	manifest := loadFixtureManifest(t)
+	validateFixtureManifest(t, manifest)
+	validatePinnedToolManifest(t, manifest.Tools)
+}
+
+func TestPinnedRealMediaFixtureManifestUsesNativeOpusEncoder(t *testing.T) {
+	manifest := loadFixtureManifest(t)
+	for _, id := range []string{"ogg-opus", "webm-vp9-opus"} {
+		fixture := fixtureByID(t, manifest, id)
+		t.Run(id, func(t *testing.T) {
+			args := fixture.GenerationArgs
+			hasNativeOpusEncoder := false
+			for index, arg := range args {
+				if strings.Contains(arg, "libopus") {
+					t.Fatalf("generation args mention external libopus encoder: %v", args)
+				}
+				if arg == "-c:a" && index+1 < len(args) && args[index+1] == "opus" {
+					hasNativeOpusEncoder = true
+				}
+			}
+			if !hasNativeOpusEncoder {
+				t.Fatalf("generation args do not select FFmpeg native opus encoder: %v", args)
+			}
+		})
+	}
+}
+
 func loadFixtureManifest(t *testing.T) fixtureManifest {
 	t.Helper()
 	path := filepath.Join("testdata", "media-fixtures.json")
@@ -230,11 +263,16 @@ func validateFixtureManifest(t *testing.T, manifest fixtureManifest) {
 	}
 }
 
-func validatePinnedTools(t *testing.T, tools fixtureTools) {
+func validatePinnedToolManifest(t *testing.T, tools fixtureTools) {
 	t.Helper()
-	if tools.FFmpegPath != realFFmpegPath || tools.FFprobePath != realFFprobePath || tools.FFmpegFirstLine != realFFmpegVersion || tools.FFprobeFirstLine != realFFprobeVersion {
+	if tools.FFmpegPath != realFFmpegPath || tools.FFprobePath != realFFprobePath || tools.FFmpegFirstLine != realFFmpegVersion || tools.FFprobeFirstLine != realFFprobeVersion ||
+		tools.FFmpegDebianPackage != ffmpegPackage || tools.FFmpegDebianVersion != ffmpegPackageVer {
 		t.Fatalf("test-only pinned tool manifest mismatch: got %#v", tools)
 	}
+}
+
+func validatePinnedTools(t *testing.T, tools fixtureTools) {
+	t.Helper()
 	for _, tool := range []struct{ path, want string }{{tools.FFmpegPath, tools.FFmpegFirstLine}, {tools.FFprobePath, tools.FFprobeFirstLine}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		output, err := exec.CommandContext(ctx, tool.path, "-version").Output()
@@ -246,6 +284,15 @@ func validatePinnedTools(t *testing.T, tools fixtureTools) {
 		if first != tool.want {
 			t.Fatalf("test-only pinned tool version mismatch for %s: got %q, want %q", tool.path, first, tool.want)
 		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	output, err := exec.CommandContext(ctx, "/usr/bin/dpkg-query", "-W", "-f=${Version}", tools.FFmpegDebianPackage).Output()
+	cancel()
+	if err != nil {
+		t.Fatalf("test-only pinned package identity failure for %s=%s: %v", tools.FFmpegDebianPackage, tools.FFmpegDebianVersion, err)
+	}
+	if string(output) != tools.FFmpegDebianVersion {
+		t.Fatalf("test-only pinned package version mismatch for %s: got %q, want %q", tools.FFmpegDebianPackage, string(output), tools.FFmpegDebianVersion)
 	}
 }
 

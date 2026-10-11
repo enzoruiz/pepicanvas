@@ -23,8 +23,10 @@ concurrency:
 jobs:
   verify:
     name: Verify backend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      FFMPEG_DEBIAN_VERSION: "7:6.1.1-3ubuntu5"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -35,9 +37,24 @@ jobs:
           go-version-file: backend/go.mod
           cache: false
 
+      - name: Install and verify pinned media tools
+        run: |
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "ffmpeg=${FFMPEG_DEBIAN_VERSION}"
+          test "$(dpkg-query -W -f='${Version}\n' ffmpeg)" = "${FFMPEG_DEBIAN_VERSION}"
+          test "$(command -v ffmpeg)" = "/usr/bin/ffmpeg"
+          test "$(command -v ffprobe)" = "/usr/bin/ffprobe"
+          tool_version="${FFMPEG_DEBIAN_VERSION#*:}"
+          test "$(/usr/bin/ffmpeg -version | sed -n '1p')" = "ffmpeg version ${tool_version} Copyright (c) 2000-2023 the FFmpeg developers"
+          test "$(/usr/bin/ffprobe -version | sed -n '1p')" = "ffprobe version ${tool_version} Copyright (c) 2007-2023 the FFmpeg developers"
+
       - name: Run backend race tests
         working-directory: backend
         run: go test -race ./...
+
+      - name: Run pinned real-media fixture tests
+        working-directory: backend
+        run: PEPICANVAS_TEST_MEDIA_TOOLS=1 go test -race -count=1 -timeout=180s -run '^TestPinnedRealMediaFixtures$' -v ./internal/platform/mediaexec
 
       - name: Validate control contract
         run: ./scripts/check-control-contract.sh
