@@ -4,8 +4,12 @@
   "tools": {
     "ffmpeg_path": "/usr/bin/ffmpeg",
     "ffmpeg_first_line": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "ffmpeg_debian_package": "ffmpeg",
+    "ffmpeg_debian_version": "7:6.1.1-3ubuntu5",
     "ffprobe_path": "/usr/bin/ffprobe",
-    "ffprobe_first_line": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
+    "ffprobe_first_line": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers",
+    "libopus_debian_package": "libopus0",
+    "libopus_debian_version": "1.4-1build1"
   },
   "fixtures": [
     {

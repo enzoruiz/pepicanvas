@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 10
     env:
       FFMPEG_DEBIAN_VERSION: "7:6.1.1-3ubuntu5"
+      LIBOPUS_DEBIAN_VERSION: "1.4-1build1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -40,8 +41,9 @@ jobs:
       - name: Install and verify pinned media tools
         run: |
           sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "ffmpeg=${FFMPEG_DEBIAN_VERSION}"
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "ffmpeg=${FFMPEG_DEBIAN_VERSION}" "libopus0=${LIBOPUS_DEBIAN_VERSION}"
           test "$(dpkg-query -W -f='${Version}\n' ffmpeg)" = "${FFMPEG_DEBIAN_VERSION}"
+          test "$(dpkg-query -W -f='${Version}\n' libopus0)" = "${LIBOPUS_DEBIAN_VERSION}"
           test "$(command -v ffmpeg)" = "/usr/bin/ffmpeg"
           test "$(command -v ffprobe)" = "/usr/bin/ffprobe"
           tool_version="${FFMPEG_DEBIAN_VERSION#*:}"
