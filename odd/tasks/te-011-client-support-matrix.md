@@ -67,7 +67,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - Final verification: `cd frontend && npm test -- --run` passed 2 tests; `npm run typecheck` and `npm run lint` exited successfully with no diagnostics; `npm run format:check` reported all matched files formatted; `npm run build` transformed 18 modules and emitted independent `dist/editor/index.html` and `dist/overlay/index.html` entries; `npm run playwright:list` loaded the configuration and reported `Total: 0 tests in 0 files`; root `git diff --check` produced no output.
   - Browser scope: Playwright projects configure branded `channel: 'chrome'` and `channel: 'msedge'`; no browser binary was installed or launched, no browser test exists yet, and exact Chrome/Edge execution remains TE011-03.
   - Scope boundary: no client/browser/device detection, viewport blocking, router, state, Tailwind, UI library, product UI, backend integration, or real-browser evidence was added. The overlay imports only React, React DOM, and its own shell.
-  - Work-unit identity: this commit, `feat(frontend): establish multipage foundation`; the immutable commit hash is reported in the handoff because a commit cannot contain its own hash.
+  - Work-unit identity: `0f31a42` (`feat(frontend): establish multipage foundation`).
+  - Native review: medium-risk lineage `review-1cb83499bcadd01f` approved and acknowledged target `sha256:6e6a1f651488a404625c6e5da2fb14bd787e6d46c9b33f1406a9ebd8478c5177`. R3-001 was informational and is resolved by advancing this next step to TE011-02.
   - Rollback boundary: revert the `frontend/**` project, the frontend-only root `.gitignore` entries, and this FND-01 tracker evidence; TE011-01 and all backend behavior remain unchanged.
 - [x] **TE011-01 — Release contract**
   - Build the strict release manifest validator, classification model, CLI boundary, contract policy artifact, and behavior tests.
@@ -140,4 +141,4 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 
 ## Next step
 
-Implement and verify FND-01 before TE011-02, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
+Implement and verify TE011-02 against the executable frontend foundation, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
