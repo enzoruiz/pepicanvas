@@ -25,11 +25,11 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - Adding Firefox, Safari, mobile, tablet, or smaller viewports to the supported matrix.
 - Choosing an evidence vendor, indefinite retention policy, or a universal OBS operating-system/package matrix.
 
-## Authorized local-only scope
+## Authorized implementation scope
 
-- Work only in this tracker, `backend/internal/releasecheck/**`, `backend/cmd/releasecheck/**`, and `releases/client-support-policy.json`.
-- Use the Go standard library only.
-- Perform local development, verification, and parent-owned work-unit commits only; do not access the network, install dependencies, push, or create pull requests.
+- Work only in this tracker, `backend/internal/releasecheck/**`, `backend/cmd/releasecheck/**`, `releases/client-support-policy.json`, the explicitly authorized `frontend/**` foundation, and the root `.gitignore` when generated frontend output requires it.
+- Keep the release validator on the Go standard library; use exact npm package versions and a committed lockfile for the frontend foundation.
+- Remote access is limited to current documentation through Context7 and public package downloads from `registry.npmjs.org` without credentials. Do not push or create pull requests.
 - Preserve all unrelated files and leave remote delivery actions to the parent.
 
 ## Constraints
@@ -54,6 +54,21 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 
 ## Stable tasks
 
+- [x] **FND-01 — Minimal executable frontend foundation**
+  - Create one React/TypeScript/Vite multipage project with independent `/editor/` and `/overlay/` HTML and mount boundaries, without implementing TE011-02 client detection or viewport behavior.
+  - Pin exact npm dependency versions in a committed lockfile and declare the npm toolchain used to generate it.
+  - Add deterministic TypeScript, production-build, Vitest DOM, ESLint, Prettier check, and Playwright configuration surfaces. Playwright must target branded `chrome` and `msedge` channels without downloading or claiming browser execution in this work unit.
+  - Preserve the architectural boundary that the OBS overlay loads no editor UI or Tailwind dependency.
+  - Route/trigger evidence: the maintainer explicitly authorized this separate prerequisite after repository mapping proved that TE011-02 had no executable frontend substrate.
+  - RED: after the tooling-bootstrap exception established Vitest, `cd frontend && npm test -- --run` failed both suites because `./EditorShell` and `./OverlayShell` did not exist; Vitest reported `2 failed` files and `no tests` executed.
+  - GREEN: after adding only the two semantic shells and independent mounts, `cd frontend && npm test -- --run` reported `2 passed` files and `2 passed` tests in 676 ms.
+  - REFACTOR: formatting and tooling configuration were normalized without introducing shared application abstractions; the focused shell run remained green with `2 passed` files and `2 passed` tests in 729 ms.
+  - Toolchain and dependencies: generated with Node `v24.16.0` and npm `11.13.0`; `package.json` and `package-lock.json` record exact direct dependency versions. TypeScript was pinned to `6.0.3` because `typescript-eslint@8.71.2` rejects TypeScript `7.0.2` through its `<6.1.0` peer boundary.
+  - Final verification: `cd frontend && npm test -- --run` passed 2 tests; `npm run typecheck` and `npm run lint` exited successfully with no diagnostics; `npm run format:check` reported all matched files formatted; `npm run build` transformed 18 modules and emitted independent `dist/editor/index.html` and `dist/overlay/index.html` entries; `npm run playwright:list` loaded the configuration and reported `Total: 0 tests in 0 files`; root `git diff --check` produced no output.
+  - Browser scope: Playwright projects configure branded `channel: 'chrome'` and `channel: 'msedge'`; no browser binary was installed or launched, no browser test exists yet, and exact Chrome/Edge execution remains TE011-03.
+  - Scope boundary: no client/browser/device detection, viewport blocking, router, state, Tailwind, UI library, product UI, backend integration, or real-browser evidence was added. The overlay imports only React, React DOM, and its own shell.
+  - Work-unit identity: this commit, `feat(frontend): establish multipage foundation`; the immutable commit hash is reported in the handoff because a commit cannot contain its own hash.
+  - Rollback boundary: revert the `frontend/**` project, the frontend-only root `.gitignore` entries, and this FND-01 tracker evidence; TE011-01 and all backend behavior remain unchanged.
 - [x] **TE011-01 — Release contract**
   - Build the strict release manifest validator, classification model, CLI boundary, contract policy artifact, and behavior tests.
   - Route/trigger evidence: issue #3 / TE-011 explicitly authorizes local implementation; this bounded standard-library work unit uses the injected `go-testing` and `work-unit-commits` workflows.
@@ -121,7 +136,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - [x] Selected `stacked-to-main` delivery after the review-budget forecast triggered `ask-on-risk`.
 - [x] Corrected R3-002 evidence chronology and R3-003 durable URI validation as a bounded follow-up work unit.
 - [x] Approved state-preserving automatic viewport recovery and verified that TE011-02 depends on a missing executable frontend foundation.
+- [x] Established and verified the independent editor and overlay frontend foundation required by TE011-02.
 
 ## Next step
 
-Create and approve a separate frontend-foundation work unit before TE011-02, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
+Implement and verify FND-01 before TE011-02, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
