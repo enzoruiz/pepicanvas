@@ -264,6 +264,52 @@ func TestEvaluateManifest(t *testing.T) {
 	}
 }
 
+func TestEvaluateEvidenceFollowUps(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(map[string]any)
+		wantProblem string
+	}{
+		{
+			name: "evidence predates exact client release",
+			mutate: func(manifest map[string]any) {
+				manifest["evidence"].([]any)[0].(map[string]any)["startedAt"] = "2000-02-01T23:59:59Z"
+			},
+			wantProblem: "must not precede client releaseDate",
+		},
+		{
+			name: "scheme-only evidence location",
+			mutate: func(manifest map[string]any) {
+				manifest["evidence"].([]any)[0].(map[string]any)["location"] = "s3:"
+			},
+			wantProblem: "durable absolute URI",
+		},
+		{
+			name: "evidence location without object path",
+			mutate: func(manifest map[string]any) {
+				manifest["evidence"].([]any)[0].(map[string]any)["location"] = "s3://release-evidence"
+			},
+			wantProblem: "durable absolute URI",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := validManifest(t)
+			tt.mutate(manifest)
+			data, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			report := Evaluate(data)
+			if report.Classification != Inconclusive || !containsProblem(report.Problems, tt.wantProblem) {
+				t.Fatalf("report = %#v, want INCONCLUSIVE containing %q", report, tt.wantProblem)
+			}
+		})
+	}
+}
+
 func TestEvaluateRejectsTrailingJSON(t *testing.T) {
 	data, err := json.Marshal(validManifest(t))
 	if err != nil {

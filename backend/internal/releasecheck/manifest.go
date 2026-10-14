@@ -245,6 +245,11 @@ func validate(value manifest) (structural, incomplete []string, observedFailure 
 	structural = append(structural, evidenceStructural...)
 	referenced := make(map[string]bool)
 	for _, scenarioValue := range value.Scenarios {
+		clientValue, hasClient := clients[scenarioValue.ClientFamily+"/"+scenarioValue.ClientSlot]
+		clientReleaseDate := ""
+		if hasClient {
+			clientReleaseDate = clientValue.ReleaseDate
+		}
 		for _, evidenceID := range scenarioValue.Evidence {
 			referenced[evidenceID] = true
 			evidenceValue, ok := evidenceByID[evidenceID]
@@ -252,7 +257,7 @@ func validate(value manifest) (structural, incomplete []string, observedFailure 
 				incomplete = append(incomplete, fmt.Sprintf("scenario %q references missing evidence %q", scenarioValue.ID, evidenceID))
 				continue
 			}
-			problems, failed := validateEvidence(evidenceValue, value.Release.Version, scenarioValue.ID)
+			problems, failed := validateEvidence(evidenceValue, value.Release.Version, scenarioValue.ID, clientReleaseDate)
 			incomplete = append(incomplete, problems...)
 			observedFailure = observedFailure || failed
 		}
@@ -456,7 +461,7 @@ func indexEvidence(values []evidence) (map[string]evidence, []string) {
 	return indexed, problems
 }
 
-func validateEvidence(value evidence, releaseVersion, scenarioID string) ([]string, bool) {
+func validateEvidence(value evidence, releaseVersion, scenarioID, clientReleaseDate string) ([]string, bool) {
 	var problems []string
 	if value.ReleaseVersion != releaseVersion {
 		problems = append(problems, fmt.Sprintf("evidence %q releaseVersion does not match the release", value.ID))
@@ -464,8 +469,7 @@ func validateEvidence(value evidence, releaseVersion, scenarioID string) ([]stri
 	if value.ScenarioID != scenarioID {
 		problems = append(problems, fmt.Sprintf("evidence %q scenarioId does not match scenario %q", value.ID, scenarioID))
 	}
-	location, err := url.Parse(value.Location)
-	if err != nil || location.Scheme == "" || location.Scheme == "file" {
+	if !isDurableEvidenceURI(value.Location) {
 		problems = append(problems, fmt.Sprintf("evidence %q location must be a durable absolute URI", value.ID))
 	}
 	if !sha256Pattern.MatchString(value.SHA256) {
@@ -481,6 +485,10 @@ func validateEvidence(value evidence, releaseVersion, scenarioID string) ([]stri
 	}
 	if completeErr != nil || (startErr == nil && completed.Before(started)) {
 		problems = append(problems, fmt.Sprintf("evidence %q completedAt must be RFC3339 and not precede startedAt", value.ID))
+	}
+	clientRelease, clientReleaseErr := time.Parse("2006-01-02", clientReleaseDate)
+	if startErr == nil && clientReleaseErr == nil && started.Before(clientRelease) {
+		problems = append(problems, fmt.Sprintf("evidence %q startedAt must not precede client releaseDate", value.ID))
 	}
 	if !isPolicyIdentifier(value.AccessPolicy) {
 		problems = append(problems, fmt.Sprintf("evidence %q accessPolicy must be an exact policy identifier", value.ID))
@@ -522,4 +530,10 @@ func isDate(value string) bool {
 func isPolicyIdentifier(value string) bool {
 	lower := strings.ToLower(value)
 	return identifier.MatchString(value) && lower != "default" && lower != "latest" && lower != "current"
+}
+
+func isDurableEvidenceURI(value string) bool {
+	location, err := url.Parse(value)
+	return err == nil && location.Scheme != "" && !strings.EqualFold(location.Scheme, "file") &&
+		location.Hostname() != "" && strings.Trim(location.EscapedPath(), "/") != ""
 }

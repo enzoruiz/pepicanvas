@@ -70,7 +70,12 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - R3-001 verification: the focused race suites passed in `1.083s` and `1.014s`; the full race suite passed across all five packages; `go vet ./...` and `git diff --check` produced no output.
   - Work-unit commits: `8a22533` (`feat(release): enforce client support evidence`) and bounded correction `898279d` (`fix(release): bind evidence to client version`).
   - Native review: medium-risk lineage `review-214c343eafa07974` was approved and acknowledged for target `sha256:23316a77c301763d4534c04563675e3643776b35f3806334c4febe0c0ae42752`; review authority was burned after the exact acknowledgement.
-  - Non-blocking follow-ups: R3-002 notes that evidence time is not yet checked against the client's release date; R3-003 notes that a scheme-only evidence URI can pass the durable-location check. These warnings did not reopen the approved review and require a later work unit.
+  - R3-002/R3-003 follow-up RED: before production edits, `cd backend && go test -race -count=1 -run '^TestEvaluateEvidenceFollowUps$' ./internal/releasecheck` failed all three focused cases. The first strict-contract attempt exposed `releasedAt` as unknown; a subsequent full-suite run showed that adding a second release-time field would also invalidate the existing CLI contract fixtures, so the correction was narrowed to the already-required exact client `releaseDate`.
+  - R3-002/R3-003 follow-up GREEN: evidence `startedAt` is now compared with the selected exact client's `releaseDate` boundary, while durable locations require a non-file absolute hierarchical URI with both a hostname and object path. Scheme-only and host-only values produce `INCONCLUSIVE`. The focused regression passed in `1.015s`.
+  - R3-002/R3-003 follow-up REFACTOR: durable URI validation was extracted into `isDurableEvidenceURI`, and client release-date lookup was hoisted outside each scenario's evidence loop. The focused regression remained green in `1.015s`.
+  - R3-002/R3-003 verification: the focused regression passed in `1.015s`; the required package race test passed in `1.088s`; the full race suite passed for `cmd/releasecheck` (`1.015s`), `internal/access` (`1.013s`), `internal/media` (`1.013s`), `internal/platform/mediaexec` (`2.056s`), and `internal/releasecheck` (`1.091s`). `go vet ./...` and `git diff --check` produced no output. No separate runtime harness was needed because both corrections are pure manifest validation paths and the full race suite exercised the existing file-backed CLI boundary.
+  - R3-002/R3-003 work-unit identity: `fix(release): validate evidence provenance` (this commit; the immutable hash is reported in the handoff).
+  - R3-002/R3-003 rollback boundary: revert the changes to `backend/internal/releasecheck/manifest.go`, `backend/internal/releasecheck/manifest_test.go`, and this tracker entry; the original TE011-01 contract and TE011-02 through TE011-04 remain otherwise unchanged.
   - Authored change size: 1,186 inserted lines across six new files. This cohesive contract, strict decoder, classification proof, CLI boundary, tracker, and policy artifact exceed the advisory forecast without omitting tests or splitting the release contract unnaturally.
   - Rollback boundary: remove the six TE011-01 files listed in the handoff; existing backend packages and product behavior remain unchanged.
 - [ ] **TE011-02 — Frontend client and viewport guard**
@@ -113,7 +118,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - [x] Refactored while green.
 - [x] Completed final verification and runtime harness.
 - [x] Selected `stacked-to-main` delivery after the review-budget forecast triggered `ask-on-risk`.
+- [x] Corrected R3-002 evidence chronology and R3-003 durable URI validation as a bounded follow-up work unit.
 
 ## Next step
 
-Address the recorded R3-002 and R3-003 follow-ups in a later work unit, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, supported OBS OS/package matrix, and live resize recovery UX before starting TE011-02 through TE011-04. Only externally verified release metadata may populate a real release manifest.
+Resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, supported OBS OS/package matrix, and live resize recovery UX before starting TE011-02 through TE011-04. Only externally verified release metadata may populate a real release manifest.
