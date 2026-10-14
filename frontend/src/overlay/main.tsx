@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { ClientSupportGuard } from "../client-support/ClientSupportGuard";
 import { OverlayShell } from "./OverlayShell";
 
 const overlayRoot = document.querySelector("#overlay-root");
@@ -11,6 +12,8 @@ if (!(overlayRoot instanceof HTMLElement)) {
 
 createRoot(overlayRoot).render(
   <StrictMode>
-    <OverlayShell />
+    <ClientSupportGuard>
+      <OverlayShell />
+    </ClientSupportGuard>
   </StrictMode>,
 );

@@ -94,11 +94,19 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - R3-002/R3-003 rollback boundary: revert the changes to `backend/internal/releasecheck/manifest.go`, `backend/internal/releasecheck/manifest_test.go`, and this tracker entry; the original TE011-01 contract and TE011-02 through TE011-04 remain otherwise unchanged.
   - Authored change size: 1,186 inserted lines across six new files. This cohesive contract, strict decoder, classification proof, CLI boundary, tracker, and policy artifact exceed the advisory forecast without omitting tests or splitting the release contract unnaturally.
   - Rollback boundary: remove the six TE011-01 files listed in the handoff; existing backend packages and product behavior remain unchanged.
-- [ ] **TE011-02 — Frontend client and viewport guard**
-  - Enforce supported desktop families, blocked mobile/tablet clients, minimum viewport behavior, and the approved live-resize recovery UX.
-  - Approved recovery behavior: preserve the mounted application state behind a blocking screen below 1280x720 and automatically resume when the viewport returns to the supported range.
-  - Blocker: the repository documents React/Vite editor and overlay entry points but has no executable frontend, package manifest, lockfile, mount boundary, or frontend test configuration. Implementing the guard now would silently create a frontend foundation outside this task.
-  - Route/trigger evidence: future frontend implementation after an explicit frontend-foundation work unit; no frontend edit surface is authorized in this work unit.
+- [x] **TE011-02 — Frontend client and viewport guard**
+  - Added a pure fail-closed classifier for desktop Google Chrome and Microsoft Edge, a testable browser/device/viewport snapshot adapter, and a shared React guard at both independent mount boundaries. Firefox, Safari, unrecognized Chromium derivatives, malformed or unknown identities, mobile devices, tablets, and viewports below 1280x720 are blocked.
+  - Approved recovery behavior: children remain mounted behind an inert, pointer-blocked, `aria-hidden` content layer while an accessible fixed blocking explanation is shown. A resize callback reclassifies the current snapshot and automatically exposes the same mounted child state when support is restored.
+  - RED: before production files existed, `cd frontend && npm test -- --run src/client-support` failed all three suites because `./clientSupport`, `./clientSnapshot`, and `./ClientSupportGuard` could not be resolved; Vitest reported `3 failed` files and `no tests` executed.
+  - GREEN: after the minimum classifier, snapshot adapter, guard, and mount wiring were added, the focused run exposed one remaining interaction defect: a synthetic click still changed hidden child state. Adding capture-level click suppression alongside native `inert` and pointer blocking produced `3 passed` files and `17 passed` tests in 731 ms.
+  - REFACTOR: type-safe assertions replaced unsafe asymmetric matcher assignments and Prettier normalized the new modules; `cd frontend && npm test -- --run src/client-support` remained green with `3 passed` files and `17 passed` tests in 690 ms.
+  - Behavior evidence: table-driven tests prove Chrome and Edge acceptance, the inclusive 1280x720 boundary, undersized viewport rejection, mobile and tablet rejection, iPad desktop-mode rejection, and Firefox, Safari, unknown Chromium derivative, malformed, and unknown identity rejection. React tests prove resize recovery, preserved child state, blocking semantics, accessible explanation, and exact resize-listener cleanup.
+  - Final verification: `cd frontend && npm test -- --run` passed `5` files and `19` tests in 722 ms; `npm run typecheck` and `npm run lint` exited successfully with no diagnostics; `npm run format:check` reported all matched files formatted; `npm run build` transformed 21 modules and emitted independent editor and overlay entries in 90 ms; `npm run playwright:list` loaded the configuration and reported `Total: 0 tests in 0 files`; root `git diff --check` produced no output.
+  - OBS identification limitation: browser APIs and user-agent signals do not positively identify OBS or its exact version. The overlay can run in a Chromium host accepted by this runtime guard, but exact OBS identity and compatibility remain external release-manifest evidence for TE011-03 and TE011-04.
+  - Scope boundary: no dependency, router, state library, Tailwind, UI library, backend integration, real client version, browser download, browser launch, or TE011-03/TE011-04 evidence was added. The overlay imports only the shared client-support guard and its own overlay shell; it does not import editor code.
+  - Runtime harness: the Vitest jsdom guard suite exercises resize subscription, rerendering, interaction suppression, state continuity, and cleanup. Real branded-browser execution is intentionally deferred to TE011-03.
+  - Work-unit identity: `feat(frontend): enforce client support guard` (single TE011-02 implementation, tests, mount wiring, and tracker commit).
+  - Rollback boundary: revert `frontend/src/client-support/**`, the guard wrappers in `frontend/src/editor/main.tsx` and `frontend/src/overlay/main.tsx`, and this TE011-02 tracker evidence. FND-01, TE011-01, and backend behavior remain unchanged.
 - [ ] **TE011-03 — Exact Chrome and Edge execution**
   - Select externally verified stable versions, obtain reproducible current/previous browser binaries, and execute the release scenarios against exact Chrome and Edge identities.
   - Route/trigger evidence: future browser automation and externally sourced release metadata; network access is not authorized in this work unit.
@@ -138,7 +146,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - [x] Corrected R3-002 evidence chronology and R3-003 durable URI validation as a bounded follow-up work unit.
 - [x] Approved state-preserving automatic viewport recovery and verified that TE011-02 depends on a missing executable frontend foundation.
 - [x] Established and verified the independent editor and overlay frontend foundation required by TE011-02.
+- [x] Implemented and verified the fail-closed runtime client and viewport guard at both frontend mount boundaries.
 
 ## Next step
 
-Implement and verify TE011-02 against the executable frontend foundation, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
+Resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before starting TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
