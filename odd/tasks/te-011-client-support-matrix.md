@@ -80,7 +80,9 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - Rollback boundary: remove the six TE011-01 files listed in the handoff; existing backend packages and product behavior remain unchanged.
 - [ ] **TE011-02 — Frontend client and viewport guard**
   - Enforce supported desktop families, blocked mobile/tablet clients, minimum viewport behavior, and the approved live-resize recovery UX.
-  - Route/trigger evidence: future frontend implementation; no frontend edit surface is authorized in this work unit.
+  - Approved recovery behavior: preserve the mounted application state behind a blocking screen below 1280x720 and automatically resume when the viewport returns to the supported range.
+  - Blocker: the repository documents React/Vite editor and overlay entry points but has no executable frontend, package manifest, lockfile, mount boundary, or frontend test configuration. Implementing the guard now would silently create a frontend foundation outside this task.
+  - Route/trigger evidence: future frontend implementation after an explicit frontend-foundation work unit; no frontend edit surface is authorized in this work unit.
 - [ ] **TE011-03 — Exact Chrome and Edge execution**
   - Select externally verified stable versions, obtain reproducible current/previous browser binaries, and execute the release scenarios against exact Chrome and Edge identities.
   - Route/trigger evidence: future browser automation and externally sourced release metadata; network access is not authorized in this work unit.
@@ -93,7 +95,6 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - Durable evidence store, authorized readers, access implementation, and retention duration.
 - Reproducible acquisition and preservation of previous Chrome and Edge stable binaries.
 - Supported OBS operating-system and package/distribution matrix.
-- Live resize recovery UX after a supported desktop viewport becomes smaller than 1280x720.
 
 ## Delivery strategy and forecast
 
@@ -119,7 +120,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - [x] Completed final verification and runtime harness.
 - [x] Selected `stacked-to-main` delivery after the review-budget forecast triggered `ask-on-risk`.
 - [x] Corrected R3-002 evidence chronology and R3-003 durable URI validation as a bounded follow-up work unit.
+- [x] Approved state-preserving automatic viewport recovery and verified that TE011-02 depends on a missing executable frontend foundation.
 
 ## Next step
 
-Resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, supported OBS OS/package matrix, and live resize recovery UX before starting TE011-02 through TE011-04. Only externally verified release metadata may populate a real release manifest.
+Create and approve a separate frontend-foundation work unit before TE011-02, then resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
