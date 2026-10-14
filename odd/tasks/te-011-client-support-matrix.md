@@ -105,7 +105,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - OBS identification limitation: browser APIs and user-agent signals do not positively identify OBS or its exact version. The overlay can run in a Chromium host accepted by this runtime guard, but exact OBS identity and compatibility remain external release-manifest evidence for TE011-03 and TE011-04.
   - Scope boundary: no dependency, router, state library, Tailwind, UI library, backend integration, real client version, browser download, browser launch, or TE011-03/TE011-04 evidence was added. The overlay imports only the shared client-support guard and its own overlay shell; it does not import editor code.
   - Runtime harness: the Vitest jsdom guard suite exercises resize subscription, rerendering, interaction suppression, state continuity, and cleanup. Real branded-browser execution is intentionally deferred to TE011-03.
-  - Work-unit identity: `feat(frontend): enforce client support guard` (single TE011-02 implementation, tests, mount wiring, and tracker commit).
+  - Work-unit identity: `c7d6360` (`feat(frontend): enforce client support guard`).
+  - Native review: medium-risk lineage `review-9bf291c99a47c34e` completed with no findings and acknowledged target `sha256:19d12a6d06c6394e73543577027486e7818b8fdb743ca07350edde2d59576348`.
   - Rollback boundary: revert `frontend/src/client-support/**`, the guard wrappers in `frontend/src/editor/main.tsx` and `frontend/src/overlay/main.tsx`, and this TE011-02 tracker evidence. FND-01, TE011-01, and backend behavior remain unchanged.
 - [ ] **TE011-03 — Exact Chrome and Edge execution**
   - Select externally verified stable versions, obtain reproducible current/previous browser binaries, and execute the release scenarios against exact Chrome and Edge identities.
