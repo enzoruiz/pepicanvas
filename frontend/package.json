@@ -13,8 +13,13 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "test": "vitest",
-    "lint": "eslint .",
-    "format:check": "prettier --check .",
+    "lint": "eslint . --ignore-pattern .cache/",
+    "format:check": "prettier --check . --ignore-path ../.gitignore",
+    "browser:cache": "node scripts/browser-cache.mjs --download",
+    "browser:cache:offline": "node scripts/browser-cache.mjs --offline",
+    "browser:matrix": "node scripts/browser-matrix-runner.mjs --download",
+    "browser:matrix:offline": "node scripts/browser-matrix-runner.mjs --offline",
+    "browser:matrix:test": "node --test scripts/browser-matrix.node-test.mjs",
     "playwright:list": "playwright test --list --pass-with-no-tests"
   },
   "dependencies": {

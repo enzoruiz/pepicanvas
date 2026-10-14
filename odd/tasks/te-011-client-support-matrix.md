@@ -27,9 +27,9 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 
 ## Authorized implementation scope
 
-- Work only in this tracker, `backend/internal/releasecheck/**`, `backend/cmd/releasecheck/**`, `releases/client-support-policy.json`, the explicitly authorized `frontend/**` foundation, and the root `.gitignore` when generated frontend output requires it.
+- Work only in this tracker, `backend/internal/releasecheck/**`, `backend/cmd/releasecheck/**`, `releases/client-support-policy.json`, the explicitly authorized browser matrix under `releases/`, `frontend/**`, and the root `.gitignore` when generated frontend output requires it.
 - Keep the release validator on the Go standard library; use exact npm package versions and a committed lockfile for the frontend foundation.
-- Remote access is limited to current documentation through Context7 and public package downloads from `registry.npmjs.org` without credentials. Do not push or create pull requests.
+- Remote access is limited to current documentation through Context7, public package downloads from `registry.npmjs.org`, official Chrome/Edge metadata endpoints, and the four explicitly selected browser artifacts from `storage.googleapis.com` and `packages.microsoft.com`, all without credentials. Do not push or create pull requests.
 - Preserve all unrelated files and leave remote delivery actions to the parent.
 
 ## Constraints
@@ -108,9 +108,24 @@ Labels such as "latest stable" are useful update instructions but are not reprod
   - Work-unit identity: `c7d6360` (`feat(frontend): enforce client support guard`).
   - Native review: medium-risk lineage `review-9bf291c99a47c34e` completed with no findings and acknowledged target `sha256:19d12a6d06c6394e73543577027486e7818b8fdb743ca07350edde2d59576348`.
   - Rollback boundary: revert `frontend/src/client-support/**`, the guard wrappers in `frontend/src/editor/main.tsx` and `frontend/src/overlay/main.tsx`, and this TE011-02 tracker evidence. FND-01, TE011-01, and backend behavior remain unchanged.
-- [ ] **TE011-03 — Exact Chrome and Edge execution**
-  - Select externally verified stable versions, obtain reproducible current/previous browser binaries, and execute the release scenarios against exact Chrome and Edge identities.
-  - Route/trigger evidence: future browser automation and externally sourced release metadata; network access is not authorized in this work unit.
+- [x] **TE011-03 — Exact Chrome and Edge execution**
+  - Added the strict Linux x64 matrix at `releases/client-browser-matrix.json` and standard-library Node acquisition, verification, extraction, and serial execution scripts. The scripts accept only the four authorized HTTPS archive URLs, reject matrix/slot/version/path drift, refuse redirects, write downloads through a temporary file and atomic rename, and verify size plus SHA-256 before every extraction.
+  - Selected official release metadata: Chrome `155.0.8059.79` served from `2026-10-13T20:44:51.420550Z` and Chrome `154.0.8037.92` served from `2026-09-29T18:30:29.983968Z`, sourced from the Chrome for Testing last-known-good and milestone feeds plus the previously verified official VersionHistory release endpoints. Edge `155.0.4283.45` was published `2026-10-08T18:26:00` and Edge `154.0.4258.62` was published `2026-10-05T16:45:00`, sourced from the Edge enterprise update API.
+  - Exact archives: Chrome current `https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.79/linux64/chrome-linux64.zip`; Chrome previous `https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip`; Edge current `https://packages.microsoft.com/repos/edge/pool/main/m/microsoft-edge-stable/microsoft-edge-stable_155.0.4283.45-1_amd64.deb`; Edge previous `https://packages.microsoft.com/repos/edge/pool/main/m/microsoft-edge-stable/microsoft-edge-stable_154.0.4258.62-1_amd64.deb`.
+  - Integrity identities: Chrome current was observed at `198413482` bytes with bootstrap SHA-256 `bcd9a79130d7e44d70f93be87042e9bcee7fe0f0b3898e06b8c9bed5fb619dcd`; Chrome previous was observed at `196202491` bytes with bootstrap SHA-256 `ff43322f335e436b2f4dcdfeeec5db032299e335a7e8c1c618b326e100ce8732`. Chrome for Testing did not publish hashes in the authorized feeds, so both are explicitly labeled `observed-bootstrap`, not official.
+  - Official Edge integrity identities: current `194372662` bytes and SHA-256 `35ac88189ed91b60cff446fb6020ca60513ce20f985010d3c5b996115e3ec4a4`; previous `192845122` bytes and SHA-256 `f425dea59f0a8bac00201685a070e947543c57d135c130ba73e0863cf2c506b1`. Both size and hash provenance are labeled `official`.
+  - Download/extraction observations: `/usr/bin/unzip` and `/usr/bin/dpkg-deb` were available. Chrome archives reported `Google Chrome for Testing` with the exact selected version after `unzip`; extracted Edge packages reported `Microsoft Edge <version> unknown` after `dpkg-deb --extract`. No package was installed and no ambient browser channel was used. The runner extracts one verified slot at a time, removes it after execution, and leaves only the four archives in `frontend/.cache/client-browsers/` (`781833757` bytes, `746M` observed after execution), keeping local cache below the authorized ceiling.
+  - RED: the focused Node run initially failed with `ERR_MODULE_NOT_FOUND` for `scripts/browser-matrix.mjs` (`1` failed test file). The first browser attempt failed all four projects because `executablePath` was incorrectly placed directly in Playwright `use`, causing Playwright to seek its absent ambient headless shell. A later full Vitest run exposed test-runner filename overlap (`2` failed suites despite `19` passing product tests), and the first cache probe correctly stopped before extraction when the `unzip --version` probe returned nonzero.
+  - GREEN: the strict matrix/schema/archive suite passed after implementation; `launchOptions.executablePath` then launched all four repository-cached binaries and all four real-browser scenarios passed. Runner-specific filenames isolated Node, Vitest, and Playwright suites, while the corrected `unzip -v` availability probe enabled local extraction.
+  - REFACTOR: Playwright configuration now obtains its projects through the strict matrix loader, execution is serial and slot-scoped to bound disk usage, extracted browser trees are removed after each project, and lint/format checks explicitly ignore the repository-local cache while remaining green. The final focused run passed `4` Node tests in `63.417888 ms`.
+  - Executed projects: `chrome-current` reported `155.0.8059.79` and passed in `2.0s`; `chrome-previous` reported `154.0.8037.92` and passed in `1.2s`; `edge-current` reported `155.0.4283.45` and passed in `3.2s`; `edge-previous` reported `154.0.4258.62` and passed in `3.0s`. Each scenario proved the exact browser version, unblocked editor at 1280x720, blocking at 1279x720, automatic recovery at 1280x720, and the independent overlay entry point.
+  - Offline proof: `npm run browser:matrix:offline` reverified all four cached sizes and hashes, extracted each browser locally, and passed all four slot-scoped Playwright projects without executing any network code. Observed project durations were `1.3s`, `1.6s`, `1.7s`, and `3.8s` in matrix order.
+  - Final verification: `npm run browser:matrix:test` passed `4/4`; `npm test -- --run` passed `5` files and `19` tests in `1.17s`; `npm run typecheck` and `npm run lint` exited without diagnostics; `npm run format:check` reported all matched files formatted; `npm run build` transformed `21` modules and completed in `272ms`; both the online-capable and explicit offline four-browser matrix runs passed; `git diff --check` produced no output.
+  - Client classifier result: all four exact headless branded user agents passed the existing fail-closed classifier, so no correction under `frontend/src/client-support/**` was justified or made. Unknown Chromium derivatives remain rejected.
+  - Scope boundary: no global browser installation, dependency or lockfile change, external navigation, durable evidence storage, OBS execution, release-gate integration, remote delivery, or client-guard weakening was included. Generated archives, extracted binaries, reports, and transient results remain ignored and uncommitted; TE011-04 retains durable evidence ownership.
+  - Rollback boundary: revert the exact browser matrix, `frontend/scripts/**`, `frontend/tests/browser/**`, Playwright/package script changes, the cache ignore entry, and this TE011-03 tracker evidence. TE011-01, TE011-02, backend behavior, and the runtime guard remain intact.
+  - Work-unit identity: one coherent `feat(frontend): execute exact browser support matrix` commit containing implementation, tests, matrix, and tracker evidence.
+  - Route/trigger evidence: the maintainer authorized downloading these four exact artifacts to an ignored local cache, calculating/verifying SHA-256, extracting without global installation or privileges, and executing the local Playwright matrix. No other remote destination was accessed.
 - [ ] **TE011-04 — OBS evidence and release gate**
   - Execute the approved OBS OS/package matrix, persist independently readable evidence, and wire the manifest classification into the release gate.
   - Route/trigger evidence: future OBS, durable storage, and release-pipeline implementation; none is authorized in this work unit.
@@ -118,7 +133,6 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 ## Unresolved decisions
 
 - Durable evidence store, authorized readers, access implementation, and retention duration.
-- Reproducible acquisition and preservation of previous Chrome and Edge stable binaries.
 - Supported OBS operating-system and package/distribution matrix.
 
 ## Delivery strategy and forecast
@@ -148,7 +162,8 @@ Labels such as "latest stable" are useful update instructions but are not reprod
 - [x] Approved state-preserving automatic viewport recovery and verified that TE011-02 depends on a missing executable frontend foundation.
 - [x] Established and verified the independent editor and overlay frontend foundation required by TE011-02.
 - [x] Implemented and verified the fail-closed runtime client and viewport guard at both frontend mount boundaries.
+- [x] Acquired, verified, and executed the exact current/previous Chrome and Edge matrix with a second offline proof.
 
 ## Next step
 
-Resolve the durable evidence store/readers/retention, reproducible previous-browser binaries, and supported OBS OS/package matrix before starting TE011-03 and TE011-04. Only externally verified release metadata may populate a real release manifest.
+Resolve durable evidence storage/readers/retention and the supported OBS OS/package matrix before TE011-04. Only externally verified release metadata may populate a real release manifest.

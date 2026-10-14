@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux",
+  "architecture": "x64",
+  "browsers": [
+    {
+      "slot": "chrome-current",
+      "family": "chrome",
+      "releaseTrack": "current",
+      "version": "155.0.8059.79",
+      "releasedAt": "2026-10-13T20:44:51.420550Z",
+      "platform": "linux",
+      "architecture": "x64",
+      "metadataSourceUrls": [
+        "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+        "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json"
+      ],
+      "archiveUrl": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.79/linux64/chrome-linux64.zip",
+      "archiveSize": 198413482,
+      "archiveSizeProvenance": "observed-bootstrap",
+      "archiveSha256": "bcd9a79130d7e44d70f93be87042e9bcee7fe0f0b3898e06b8c9bed5fb619dcd",
+      "hashProvenance": "observed-bootstrap",
+      "executableRelativePath": "chrome-linux64/chrome"
+    },
+    {
+      "slot": "chrome-previous",
+      "family": "chrome",
+      "releaseTrack": "previous",
+      "version": "154.0.8037.92",
+      "releasedAt": "2026-09-29T18:30:29.983968Z",
+      "platform": "linux",
+      "architecture": "x64",
+      "metadataSourceUrls": [
+        "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+        "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json"
+      ],
+      "archiveUrl": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip",
+      "archiveSize": 196202491,
+      "archiveSizeProvenance": "observed-bootstrap",
+      "archiveSha256": "ff43322f335e436b2f4dcdfeeec5db032299e335a7e8c1c618b326e100ce8732",
+      "hashProvenance": "observed-bootstrap",
+      "executableRelativePath": "chrome-linux64/chrome"
+    },
+    {
+      "slot": "edge-current",
+      "family": "edge",
+      "releaseTrack": "current",
+      "version": "155.0.4283.45",
+      "releasedAt": "2026-10-08T18:26:00",
+      "platform": "linux",
+      "architecture": "x64",
+      "metadataSourceUrls": [
+        "https://edgeupdates.microsoft.com/api/products?view=enterprise"
+      ],
+      "archiveUrl": "https://packages.microsoft.com/repos/edge/pool/main/m/microsoft-edge-stable/microsoft-edge-stable_155.0.4283.45-1_amd64.deb",
+      "archiveSize": 194372662,
+      "archiveSizeProvenance": "official",
+      "archiveSha256": "35ac88189ed91b60cff446fb6020ca60513ce20f985010d3c5b996115e3ec4a4",
+      "hashProvenance": "official",
+      "executableRelativePath": "opt/microsoft/msedge/msedge"
+    },
+    {
+      "slot": "edge-previous",
+      "family": "edge",
+      "releaseTrack": "previous",
+      "version": "154.0.4258.62",
+      "releasedAt": "2026-10-05T16:45:00",
+      "platform": "linux",
+      "architecture": "x64",
+      "metadataSourceUrls": [
+        "https://edgeupdates.microsoft.com/api/products?view=enterprise"
+      ],
+      "archiveUrl": "https://packages.microsoft.com/repos/edge/pool/main/m/microsoft-edge-stable/microsoft-edge-stable_154.0.4258.62-1_amd64.deb",
+      "archiveSize": 192845122,
+      "archiveSizeProvenance": "official",
+      "archiveSha256": "f425dea59f0a8bac00201685a070e947543c57d135c130ba73e0863cf2c506b1",
+      "hashProvenance": "official",
+      "executableRelativePath": "opt/microsoft/msedge/msedge"
+    }
+  ]
+}
