@@ -1,0 +1,117 @@
+{
+  "schemaVersion": "1",
+  "release": { "version": "0.0.0-template", "releaseDate": "2026-10-15" },
+  "policy": {
+    "minimumViewport": { "width": 1280, "height": 720 },
+    "mobile": "blocked",
+    "tablet": "blocked",
+    "firefox": "excluded",
+    "safari": "excluded"
+  },
+  "clients": [
+    {
+      "family": "chrome",
+      "slot": "current",
+      "version": "155.0.8059.79",
+      "releaseDate": "2026-10-13"
+    },
+    {
+      "family": "chrome",
+      "slot": "previous",
+      "version": "154.0.8037.92",
+      "releaseDate": "2026-09-29"
+    },
+    {
+      "family": "edge",
+      "slot": "current",
+      "version": "155.0.4283.45",
+      "releaseDate": "2026-10-08"
+    },
+    {
+      "family": "edge",
+      "slot": "previous",
+      "version": "154.0.4258.62",
+      "releaseDate": "2026-10-05"
+    },
+    {
+      "family": "obs",
+      "slot": "current",
+      "version": "32.2.2",
+      "releaseDate": "2026-08-14"
+    },
+    {
+      "family": "obs",
+      "slot": "previous",
+      "version": "32.2.1",
+      "releaseDate": "2026-07-24"
+    }
+  ],
+  "toolchain": {
+    "go": { "name": "go", "version": "1.27.2" },
+    "goModules": [],
+    "node": { "name": "node", "version": "24.16.0" },
+    "packageManager": { "name": "npm", "version": "11.13.0" },
+    "frontendDependencies": [
+      { "name": "react", "version": "19.3.0" },
+      { "name": "react-dom", "version": "19.3.0" }
+    ],
+    "postgresql": { "name": "postgresql", "version": "17.4" },
+    "s3CompatibleStorage": {
+      "name": "s3-compatible",
+      "version": "1.0.0-contract"
+    },
+    "ffmpeg": { "name": "ffmpeg", "version": "7.1.1" },
+    "ffprobe": { "name": "ffprobe", "version": "7.1.1" }
+  },
+  "scenarios": [
+    {
+      "id": "chrome-current",
+      "clientFamily": "chrome",
+      "clientSlot": "current",
+      "clientVersion": "155.0.8059.79",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    },
+    {
+      "id": "chrome-previous",
+      "clientFamily": "chrome",
+      "clientSlot": "previous",
+      "clientVersion": "154.0.8037.92",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    },
+    {
+      "id": "edge-current",
+      "clientFamily": "edge",
+      "clientSlot": "current",
+      "clientVersion": "155.0.4283.45",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    },
+    {
+      "id": "edge-previous",
+      "clientFamily": "edge",
+      "clientSlot": "previous",
+      "clientVersion": "154.0.4258.62",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    },
+    {
+      "id": "obs-browser-source-current",
+      "clientFamily": "obs",
+      "clientSlot": "current",
+      "clientVersion": "32.2.2",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    },
+    {
+      "id": "obs-browser-source-previous",
+      "clientFamily": "obs",
+      "clientSlot": "previous",
+      "clientVersion": "32.2.1",
+      "viewport": { "width": 1280, "height": 720 },
+      "evidence": []
+    }
+  ],
+  "evidence": []
+}

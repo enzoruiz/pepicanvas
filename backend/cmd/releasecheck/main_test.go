@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,27 @@ func TestRun(t *testing.T) {
 				t.Fatalf("output %q does not contain %q", combined, tt.wantOutput)
 			}
 		})
+	}
+}
+
+func TestReleaseTemplateBlocksBeforeHostedEvidence(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "releases", "client-support-release.template.json")
+	var output, errorOutput bytes.Buffer
+
+	code := run([]string{path}, &output, &errorOutput)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout: %s; stderr: %s", code, output.String(), errorOutput.String())
+	}
+	if !strings.HasPrefix(output.String(), "INCONCLUSIVE\n") {
+		t.Fatalf("output = %q, want INCONCLUSIVE", output.String())
+	}
+	for _, scenario := range []string{
+		"chrome-current", "chrome-previous", "edge-current", "edge-previous",
+		"obs-browser-source-current", "obs-browser-source-previous",
+	} {
+		if !strings.Contains(output.String(), fmt.Sprintf("scenario %q has no evidence reference", scenario)) {
+			t.Fatalf("output does not identify missing evidence for %q: %s", scenario, output.String())
+		}
 	}
 }
 

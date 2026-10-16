@@ -4,3 +4,5 @@ frontend/coverage/
 frontend/.cache/client-browsers/
 frontend/playwright-report/
 frontend/test-results/
+scripts/client-support/.cache/
+scripts/client-support/output/
