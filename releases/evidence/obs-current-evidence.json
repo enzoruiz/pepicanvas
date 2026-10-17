@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "slot": "obs-current",
+  "obsVersion": "32.2.2",
+  "releaseDate": "2026-08-14",
+  "installer": {
+    "url": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-Windows-x64-Installer.exe",
+    "size": 159809104,
+    "sha256": "c3a0b880adbe64dc4bcb68f93016916ab5b55ae43fd227115287bf80257d92dc"
+  },
+  "scenarioId": "obs-browser-source-current",
+  "result": "PASS",
+  "startedAt": "2026-10-17T19:14:07.652Z",
+  "completedAt": "2026-10-17T19:14:27.673Z",
+  "correlationId": "obs-current-00f51890-b689-4133-a640-e8d10e1d3ed1",
+  "runtime": {
+    "os": "windows",
+    "architecture": "x64",
+    "node": "24.16.0"
+  },
+  "outputs": [
+    {
+      "name": "obs-current-source-screenshot.png",
+      "sha256": "9a3b3d9e0ccb89da7344e80ed49068c9482dd110f64fcb0127a163b2c66214e0",
+      "size": 3693124
+    }
+  ]
+}

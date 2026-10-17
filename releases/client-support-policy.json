@@ -1,0 +1,48 @@
+{
+  "artifactType": "client-support-policy",
+  "schemaVersion": "1",
+  "releaseEvidence": false,
+  "requiredClientSlots": [
+    { "family": "chrome", "slot": "current" },
+    { "family": "chrome", "slot": "previous" },
+    { "family": "edge", "slot": "current" },
+    { "family": "edge", "slot": "previous" },
+    { "family": "obs", "slot": "current" },
+    { "family": "obs", "slot": "previous" }
+  ],
+  "viewport": {
+    "minimumWidth": 1280,
+    "minimumHeight": 720,
+    "mobile": "blocked",
+    "tablet": "blocked"
+  },
+  "supportExclusions": ["firefox", "safari"],
+  "requiredToolchainFields": [
+    "go",
+    "goModules",
+    "node",
+    "packageManager",
+    "frontendDependencies",
+    "postgresql",
+    "s3CompatibleStorage",
+    "ffmpeg",
+    "ffprobe"
+  ],
+  "requiredEvidenceFields": [
+    "releaseVersion",
+    "scenarioId",
+    "location",
+    "sha256",
+    "correlationId",
+    "startedAt",
+    "completedAt",
+    "result",
+    "accessPolicy",
+    "retentionPolicy"
+  ],
+  "classifications": {
+    "completePassingEvidence": "PASS",
+    "observedFailure": "FAIL",
+    "missingRequiredEvidence": "INCONCLUSIVE"
+  }
+}

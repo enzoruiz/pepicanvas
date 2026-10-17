@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "platform": "windows",
+  "architecture": "x64",
+  "releases": [
+    {
+      "slot": "obs-current",
+      "releaseTrack": "current",
+      "version": "32.2.2",
+      "tag": "32.2.2",
+      "publishedAt": "2026-08-14T22:43:31Z",
+      "platform": "windows",
+      "architecture": "x64",
+      "releaseUrl": "https://github.com/obsproject/obs-studio/releases/tag/32.2.2",
+      "releaseApiUrl": "https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2",
+      "assetApiUrl": "https://api.github.com/repos/obsproject/obs-studio/releases/assets/515013677",
+      "installerName": "OBS-Studio-32.2.2-Windows-x64-Installer.exe",
+      "installerUrl": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-Windows-x64-Installer.exe",
+      "installerSize": 159809104,
+      "installerSha256": "c3a0b880adbe64dc4bcb68f93016916ab5b55ae43fd227115287bf80257d92dc",
+      "hashProvenance": "official",
+      "sizeProvenance": "official"
+    },
+    {
+      "slot": "obs-previous",
+      "releaseTrack": "previous",
+      "version": "32.2.1",
+      "tag": "32.2.1",
+      "publishedAt": "2026-07-24T22:58:26Z",
+      "platform": "windows",
+      "architecture": "x64",
+      "releaseUrl": "https://github.com/obsproject/obs-studio/releases/tag/32.2.1",
+      "releaseApiUrl": "https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.1",
+      "assetApiUrl": "https://api.github.com/repos/obsproject/obs-studio/releases/assets/488910690",
+      "installerName": "OBS-Studio-32.2.1-Windows-x64-Installer.exe",
+      "installerUrl": "https://github.com/obsproject/obs-studio/releases/download/32.2.1/OBS-Studio-32.2.1-Windows-x64-Installer.exe",
+      "installerSize": 159828560,
+      "installerSha256": "bbb95e52b96ad9b7ccd5abd13121379d29774d6cc5fdbef82ffa249e8a24a289",
+      "hashProvenance": "official",
+      "sizeProvenance": "official"
+    }
+  ]
+}

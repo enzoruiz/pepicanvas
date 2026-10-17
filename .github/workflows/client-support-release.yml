@@ -1,0 +1,91 @@
+name: Client support release gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/client-support-release.yml"
+      - "backend/cmd/releasecheck/**"
+      - "backend/internal/releasecheck/**"
+      - "frontend/**"
+      - "releases/**"
+      - "scripts/client-support/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-support-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-obs:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: backend/go.mod
+          cache: false
+
+      - name: Install and build overlay
+        working-directory: frontend
+        timeout-minutes: 10
+        run: |
+          npm ci
+          npm run build
+
+      - name: Validate harness contracts
+        timeout-minutes: 2
+        run: node --test scripts/client-support/client-support.node-test.mjs
+
+      - name: Acquire exact OBS installers
+        timeout-minutes: 10
+        run: node scripts/client-support/obs-cache.mjs --download
+
+      - name: Execute current OBS Browser Source
+        timeout-minutes: 10
+        run: node scripts/client-support/obs-harness.mjs obs-current --offline scripts/client-support/output
+
+      - name: Execute previous OBS Browser Source
+        timeout-minutes: 10
+        run: node scripts/client-support/obs-harness.mjs obs-previous --offline scripts/client-support/output
+
+      - name: Validate bounded OBS evidence
+        timeout-minutes: 2
+        run: node scripts/client-support/validate-evidence.mjs scripts/client-support/output
+
+      - name: Prove release gate remains fail-closed before committed six-slot evidence
+        shell: pwsh
+        working-directory: backend
+        timeout-minutes: 2
+        run: |
+          go run ./cmd/releasecheck ../releases/client-support-release.template.json *> releasecheck-output.txt
+          $releasecheckExitCode = $LASTEXITCODE
+          if ($releasecheckExitCode -eq 0) { throw "Template unexpectedly passed the release gate" }
+          if (-not (Select-String -Quiet -Path releasecheck-output.txt -Pattern '^INCONCLUSIVE$')) {
+            Get-Content releasecheck-output.txt
+            throw "Release gate did not report INCONCLUSIVE"
+          }
+          Get-Content releasecheck-output.txt
+          exit 0
+
+      - name: Upload OBS evidence for maintainer retrieval
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x64-obs-evidence
+          path: scripts/client-support/output/
+          if-no-files-found: error
+          retention-days: 14

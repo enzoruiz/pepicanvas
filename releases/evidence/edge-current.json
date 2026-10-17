@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "slot": "edge-current",
+  "browserVersion": "155.0.4283.45",
+  "releaseDate": "2026-10-08",
+  "scenarioId": "edge-current",
+  "result": "PASS",
+  "startedAt": "2026-10-17T19:22:44.411Z",
+  "completedAt": "2026-10-17T19:22:47.110Z",
+  "correlationId": "edge-current-2237b7e5-b554-442a-a3a0-aff15c374c14",
+  "runtime": {
+    "os": "linux",
+    "architecture": "x64",
+    "node": "24.16.0",
+    "playwright": "1.64.0"
+  },
+  "outputs": [
+    {
+      "name": "edge-current-2237b7e5-b554-442a-a3a0-aff15c374c14-report.json",
+      "sha256": "c8c0f8f773584a55a75db9a82b36f62b8e7abed6a5b0ff4c3c19c66f7e50381b",
+      "size": 6073
+    }
+  ]
+}

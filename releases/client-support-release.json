@@ -1,0 +1,256 @@
+{
+  "schemaVersion": "1",
+  "release": {
+    "version": "0.1.0",
+    "releaseDate": "2026-10-17"
+  },
+  "policy": {
+    "minimumViewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "mobile": "blocked",
+    "tablet": "blocked",
+    "firefox": "excluded",
+    "safari": "excluded"
+  },
+  "clients": [
+    {
+      "family": "chrome",
+      "slot": "current",
+      "version": "155.0.8059.79",
+      "releaseDate": "2026-10-13"
+    },
+    {
+      "family": "chrome",
+      "slot": "previous",
+      "version": "154.0.8037.92",
+      "releaseDate": "2026-09-29"
+    },
+    {
+      "family": "edge",
+      "slot": "current",
+      "version": "155.0.4283.45",
+      "releaseDate": "2026-10-08"
+    },
+    {
+      "family": "edge",
+      "slot": "previous",
+      "version": "154.0.4258.62",
+      "releaseDate": "2026-10-05"
+    },
+    {
+      "family": "obs",
+      "slot": "current",
+      "version": "32.2.2",
+      "releaseDate": "2026-08-14"
+    },
+    {
+      "family": "obs",
+      "slot": "previous",
+      "version": "32.2.1",
+      "releaseDate": "2026-07-24"
+    }
+  ],
+  "toolchain": {
+    "go": {
+      "name": "go",
+      "version": "1.27.2"
+    },
+    "goModules": [],
+    "node": {
+      "name": "node",
+      "version": "24.16.0"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "11.13.0"
+    },
+    "frontendDependencies": [
+      {
+        "name": "react",
+        "version": "19.3.0"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.3.0"
+      }
+    ],
+    "postgresql": {
+      "name": "postgresql",
+      "version": "17.4"
+    },
+    "s3CompatibleStorage": {
+      "name": "s3-compatible",
+      "version": "1.0.0-contract"
+    },
+    "ffmpeg": {
+      "name": "ffmpeg",
+      "version": "7.1.1"
+    },
+    "ffprobe": {
+      "name": "ffprobe",
+      "version": "7.1.1"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "chrome-current",
+      "clientFamily": "chrome",
+      "clientSlot": "current",
+      "clientVersion": "155.0.8059.79",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-chrome-current"
+      ]
+    },
+    {
+      "id": "chrome-previous",
+      "clientFamily": "chrome",
+      "clientSlot": "previous",
+      "clientVersion": "154.0.8037.92",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-chrome-previous"
+      ]
+    },
+    {
+      "id": "edge-current",
+      "clientFamily": "edge",
+      "clientSlot": "current",
+      "clientVersion": "155.0.4283.45",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-edge-current"
+      ]
+    },
+    {
+      "id": "edge-previous",
+      "clientFamily": "edge",
+      "clientSlot": "previous",
+      "clientVersion": "154.0.4258.62",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-edge-previous"
+      ]
+    },
+    {
+      "id": "obs-browser-source-current",
+      "clientFamily": "obs",
+      "clientSlot": "current",
+      "clientVersion": "32.2.2",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-obs-browser-source-current"
+      ]
+    },
+    {
+      "id": "obs-browser-source-previous",
+      "clientFamily": "obs",
+      "clientSlot": "previous",
+      "clientVersion": "32.2.1",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "evidence": [
+        "evidence-obs-browser-source-previous"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "evidence-chrome-current",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "chrome-current",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/chrome-current.json",
+      "sha256": "463a784245e1b3ae22982b29d3a0df61bd5bb1f913600978acecd4882bb0ed7c",
+      "correlationId": "chrome-current-de5f6734-5471-4d7b-aab2-762f3817c070",
+      "startedAt": "2026-10-17T19:22:30.395Z",
+      "completedAt": "2026-10-17T19:22:32.134Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    },
+    {
+      "id": "evidence-chrome-previous",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "chrome-previous",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/chrome-previous.json",
+      "sha256": "1e9cd73e6097b0847dfaf41645893677eab580b9ae9ba61efae0a39691ae491a",
+      "correlationId": "chrome-previous-e457c467-15af-4a1e-bb86-6655e3fe9d53",
+      "startedAt": "2026-10-17T19:22:34.766Z",
+      "completedAt": "2026-10-17T19:22:36.353Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    },
+    {
+      "id": "evidence-edge-current",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "edge-current",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/edge-current.json",
+      "sha256": "949301ea93ff0c762bb72cf00be98ffa7bcde6a2728ef64b0881605b3f67806c",
+      "correlationId": "edge-current-2237b7e5-b554-442a-a3a0-aff15c374c14",
+      "startedAt": "2026-10-17T19:22:44.411Z",
+      "completedAt": "2026-10-17T19:22:47.110Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    },
+    {
+      "id": "evidence-edge-previous",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "edge-previous",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/edge-previous.json",
+      "sha256": "54a55cb74c3d03a1d38086cff1b03d928e6430a8ed371ccde7b18f45a50a89a3",
+      "correlationId": "edge-previous-9198b5cc-e8f4-476b-bfdc-4784ca2b82a6",
+      "startedAt": "2026-10-17T19:22:55.184Z",
+      "completedAt": "2026-10-17T19:22:56.886Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    },
+    {
+      "id": "evidence-obs-browser-source-current",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "obs-browser-source-current",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/obs-current-evidence.json",
+      "sha256": "f08157fe53cf133e39af29f370aa9790740701b002d85d98567f0a66f27a610e",
+      "correlationId": "obs-current-00f51890-b689-4133-a640-e8d10e1d3ed1",
+      "startedAt": "2026-10-17T19:14:07.652Z",
+      "completedAt": "2026-10-17T19:14:27.673Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    },
+    {
+      "id": "evidence-obs-browser-source-previous",
+      "releaseVersion": "0.1.0",
+      "scenarioId": "obs-browser-source-previous",
+      "location": "https://github.com/enzoruiz/pepicanvas/blob/72960180acda2da7bad807fcb290caae9a9b0e13/releases/evidence/obs-previous-evidence.json",
+      "sha256": "3cf2122e8cab1e1e25c829e4ebfbc5c25ba4a6f2146aea9537f03b31144f2103",
+      "correlationId": "obs-previous-c3e62c45-b2a7-4077-98d1-f90e45273bb8",
+      "startedAt": "2026-10-17T19:14:38.330Z",
+      "completedAt": "2026-10-17T19:14:51.827Z",
+      "result": "PASS",
+      "accessPolicy": "public-repository-readers-v1",
+      "retentionPolicy": "git-history-retained-v1"
+    }
+  ]
+}
