@@ -14,7 +14,11 @@ import {
   verifyInstaller,
 } from "./obs-matrix.mjs";
 import { loadObsEvidence, validateObsEvidence } from "./obs-evidence.mjs";
-import { executeObsSlot, waitForDiagnostic } from "./obs-harness.mjs";
+import {
+  buildOverlayRenderProbeInvocation,
+  executeObsSlot,
+  waitForDiagnostic,
+} from "./obs-harness.mjs";
 import { generateReleaseManifest } from "./release-manifest.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
@@ -402,6 +406,44 @@ test("diagnostic endpoint rejects oversized request bodies", async () => {
   } finally {
     await stopStaticServer(server.child);
   }
+});
+
+test("render probe transports the screenshot path only through inherited environment", () => {
+  const inheritedEnvironment = {
+    PATH: "/test/bin",
+    PRESERVED_VALUE: "preserved",
+  };
+  const screenshot = "C:\\probe path\\overlay & source's screenshot.png";
+  const invocation = buildOverlayRenderProbeInvocation(
+    screenshot,
+    inheritedEnvironment,
+  );
+
+  assert.equal(invocation.command, "powershell.exe");
+  assert.deepEqual(invocation.args.slice(0, 3), [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+  ]);
+  assert.equal(invocation.args.length, 4);
+  assert.doesNotMatch(invocation.args[3], /\$args/);
+  assert.ok(invocation.args[3].includes("$env:PEPICANVAS_OBS_SCREENSHOT_PATH"));
+  assert.ok(invocation.args[3].includes("$t -lt 184320"));
+  assert.ok(invocation.args[3].includes("$v -lt 25"));
+  assert.ok(
+    invocation.args.every((argument) => !argument.includes(screenshot)),
+  );
+  assert.deepEqual(invocation.options.env, {
+    ...inheritedEnvironment,
+    PEPICANVAS_OBS_SCREENSHOT_PATH: screenshot,
+  });
+  assert.equal(invocation.options.stdio, "ignore");
+  assert.equal(invocation.options.timeout, 30_000);
+  assert.equal(invocation.options.windowsHide, true);
+  assert.deepEqual(inheritedEnvironment, {
+    PATH: "/test/bin",
+    PRESERVED_VALUE: "preserved",
+  });
 });
 
 test("Linux reports Windows execution as pending without launching OBS", async () => {

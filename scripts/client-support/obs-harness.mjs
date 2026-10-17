@@ -28,23 +28,64 @@ async function waitForExit(processHandle) {
     await delay(250);
 }
 
-function assertOverlayRender(file) {
+export function buildOverlayRenderProbeInvocation(
+  file,
+  inheritedEnvironment = process.env,
+) {
+  if (typeof file !== "string" || file.length === 0)
+    throw new Error("overlay render probe requires a screenshot path");
   const script = [
-    "Add-Type -AssemblyName System.Drawing",
-    "$b=[Drawing.Bitmap]::FromFile($args[0])",
-    "if($b.Width -ne 1280 -or $b.Height -ne 720){$b.Dispose();exit 2}",
-    "$t=0;$v=0",
-    "for($y=0;$y -lt 720;$y+=2){for($x=0;$x -lt 1280;$x+=2){$a=$b.GetPixel($x,$y).A;if($a -eq 0){$t++}elseif($a -gt 127){$v++}}}",
-    "$b.Dispose()",
-    "if($t -lt 184320 -or $v -lt 25){exit 3}",
+    "$p=$env:PEPICANVAS_OBS_SCREENSHOT_PATH",
+    "if([string]::IsNullOrWhiteSpace($p)){exit 4}",
+    "$b=$null;$r=5",
+    "try{Add-Type -AssemblyName System.Drawing;$b=[Drawing.Bitmap]::FromFile($p);$r=0;if($b.Width -ne 1280 -or $b.Height -ne 720){$r=2}else{$t=0;$v=0;for($y=0;$y -lt 720;$y+=2){for($x=0;$x -lt 1280;$x+=2){$a=$b.GetPixel($x,$y).A;if($a -eq 0){$t++}elseif($a -gt 127){$v++}}};if($t -lt 184320 -or $v -lt 25){$r=3}}}catch{$r=5}finally{if($null -ne $b){$b.Dispose()}}",
+    "exit $r",
   ].join(";");
+  return {
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", script],
+    options: {
+      env: {
+        ...inheritedEnvironment,
+        PEPICANVAS_OBS_SCREENSHOT_PATH: file,
+      },
+      stdio: "ignore",
+      timeout: 30_000,
+      windowsHide: true,
+    },
+  };
+}
+
+function assertOverlayRender(file) {
+  const invocation = buildOverlayRenderProbeInvocation(file);
   const probe = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script, file],
-    { windowsHide: true },
+    invocation.command,
+    invocation.args,
+    invocation.options,
   );
-  if (probe.status !== 0)
-    throw new Error("overlay render is blank or missing its visible marker");
+  if (probe.error) {
+    const code = probe.error.code ?? "UNKNOWN";
+    const phase = ["EACCES", "ENOENT"].includes(code)
+      ? "launch failed"
+      : "execution failed";
+    throw new Error(`overlay render probe ${phase} (${code})`);
+  }
+  if (probe.status === null) {
+    throw new Error(
+      `overlay render probe returned no status${probe.signal ? ` (signal ${probe.signal})` : ""}`,
+    );
+  }
+  if (probe.status !== 0) {
+    const reasons = {
+      2: "unexpected screenshot dimensions",
+      3: "alpha thresholds not met",
+      4: "screenshot path environment missing",
+      5: "PowerShell image probe error",
+    };
+    throw new Error(
+      `overlay render probe failed with status ${probe.status}: ${reasons[probe.status] ?? "unknown probe failure"}`,
+    );
+  }
 }
 
 async function digest(file) {
