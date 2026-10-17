@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,7 +14,7 @@ import {
   verifyInstaller,
 } from "./obs-matrix.mjs";
 import { loadObsEvidence, validateObsEvidence } from "./obs-evidence.mjs";
-import { executeObsSlot } from "./obs-harness.mjs";
+import { executeObsSlot, waitForDiagnostic } from "./obs-harness.mjs";
 import { generateReleaseManifest } from "./release-manifest.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
@@ -25,6 +26,56 @@ const templatePath = path.join(
   repositoryRoot,
   "releases/client-support-release.template.json",
 );
+const diagnosticPath = "/__pepicanvas/obs-client-snapshot";
+
+async function availablePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = address.port;
+  await new Promise((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+  return port;
+}
+
+async function startStaticServer(root) {
+  const port = await availablePort();
+  const child = spawn(
+    process.execPath,
+    [path.join(import.meta.dirname, "static-server.mjs"), root, String(port)],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  const baseUrl = `http://127.0.0.1:${port}`;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (child.exitCode !== null)
+      throw new Error(`static server exited early: ${output}`);
+    try {
+      const response = await fetch(`${baseUrl}/overlay/`);
+      if (response.ok) return { baseUrl, child, output: () => output };
+    } catch {
+      // Readiness retries are bounded by the loop.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  child.kill();
+  throw new Error(`static server readiness timed out: ${output}`);
+}
+
+async function stopStaticServer(child) {
+  if (child.exitCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill();
+  await exited;
+}
 
 async function temporaryJSON(value) {
   const directory = await mkdtemp(
@@ -234,6 +285,123 @@ test("release generation binds strict committed browser evidence", async () => {
     manifest.evidence[0].location,
     new RegExp(`blob/${commit}/releases/evidence`),
   );
+});
+
+test("static server injects the diagnostic into the real overlay and logs a valid snapshot", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pepicanvas-static-test-"));
+  const overlayDirectory = path.join(root, "overlay");
+  await mkdir(overlayDirectory);
+  const assetsDirectory = path.join(root, "assets");
+  await mkdir(assetsDirectory);
+  await writeFile(
+    path.join(assetsDirectory, "app.js"),
+    "export const real = true;\n",
+  );
+  const outsideName = `${path.basename(root)}-outside.txt`;
+  await writeFile(path.join(root, "..", outsideName), "outside root\n");
+  const overlayHtml =
+    '<!doctype html><html><body><main id="real-overlay">Built overlay</main></body></html>';
+  await writeFile(path.join(overlayDirectory, "index.html"), overlayHtml);
+  const server = await startStaticServer(root);
+  try {
+    const response = await fetch(`${server.baseUrl}/overlay/`);
+    const servedHtml = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(servedHtml, /id="real-overlay">Built overlay/);
+    assert.match(servedHtml, /navigator\.userAgentData/);
+    assert.match(servedHtml, /window\.obsstudio/);
+    assert.equal(
+      servedHtml.replace(
+        /<script id="pepicanvas-obs-diagnostic">[\s\S]*?<\/script>/,
+        "",
+      ),
+      overlayHtml,
+    );
+    assert.equal(
+      await (await fetch(`${server.baseUrl}/assets/app.js`)).text(),
+      "export const real = true;\n",
+    );
+    assert.equal(
+      (await fetch(`${server.baseUrl}/%2e%2e/${outsideName}`)).status,
+      404,
+    );
+
+    const snapshot = {
+      navigatorUserAgent: "OBS Browser/1.0",
+      userAgentDataMobile: null,
+      maxTouchPoints: 0,
+      innerWidth: 1280,
+      innerHeight: 720,
+      obsIntegration: { exists: true, keys: ["getStatus", "pluginVersion"] },
+    };
+    const diagnosticReady = waitForDiagnostic(
+      `${server.baseUrl}${diagnosticPath}`,
+      server.child,
+    );
+    const report = await fetch(`${server.baseUrl}${diagnosticPath}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "Harness Test/1.0",
+      },
+      body: JSON.stringify(snapshot),
+    });
+    assert.equal(report.status, 204);
+    await diagnosticReady;
+    assert.match(
+      server.output(),
+      new RegExp(
+        `obs-client-snapshot ${JSON.stringify({ httpUserAgent: "Harness Test/1.0", ...snapshot }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+      ),
+    );
+  } finally {
+    await stopStaticServer(server.child);
+  }
+});
+
+test("diagnostic endpoint rejects malformed and unexpected payloads", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pepicanvas-static-test-"));
+  const overlayDirectory = path.join(root, "overlay");
+  await mkdir(overlayDirectory);
+  await writeFile(path.join(overlayDirectory, "index.html"), "<body></body>");
+  const server = await startStaticServer(root);
+  try {
+    const malformed = await fetch(`${server.baseUrl}${diagnosticPath}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    assert.equal(malformed.status, 400);
+
+    const unexpected = await fetch(`${server.baseUrl}${diagnosticPath}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ unexpected: true }),
+    });
+    assert.equal(unexpected.status, 400);
+    assert.doesNotMatch(server.output(), /obs-client-snapshot \{/);
+  } finally {
+    await stopStaticServer(server.child);
+  }
+});
+
+test("diagnostic endpoint rejects oversized request bodies", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pepicanvas-static-test-"));
+  const overlayDirectory = path.join(root, "overlay");
+  await mkdir(overlayDirectory);
+  await writeFile(path.join(overlayDirectory, "index.html"), "<body></body>");
+  const server = await startStaticServer(root);
+  try {
+    const response = await fetch(`${server.baseUrl}${diagnosticPath}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ navigatorUserAgent: "x".repeat(5_000) }),
+    });
+    assert.equal(response.status, 413);
+    assert.doesNotMatch(server.output(), /obs-client-snapshot \{/);
+  } finally {
+    await stopStaticServer(server.child);
+  }
 });
 
 test("Linux reports Windows execution as pending without launching OBS", async () => {

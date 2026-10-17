@@ -73,6 +73,21 @@ async function waitForHTTP(url, child) {
   throw new Error("overlay server readiness timed out");
 }
 
+export async function waitForDiagnostic(url, child) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (child.exitCode !== null)
+      throw new Error("overlay server exited before reporting client snapshot");
+    try {
+      const response = await fetch(url);
+      if (response.status === 200) return;
+    } catch {
+      // Diagnostic retries are bounded by the loop.
+    }
+    await delay(250);
+  }
+  throw new Error("OBS client snapshot timed out");
+}
+
 async function connectWithRetry(url, version, processHandle) {
   let lastError;
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -194,6 +209,10 @@ export async function executeObsSlot({ slot, offline = false, outputRoot }) {
       },
       sceneItemEnabled: true,
     });
+    await waitForDiagnostic(
+      `http://127.0.0.1:${overlayPort}/__pepicanvas/obs-client-snapshot`,
+      server,
+    );
     await delay(5_000);
     const screenshot = path.join(slotOutput, `${slot}-source-screenshot.png`);
     await websocket.request("SaveSourceScreenshot", {
