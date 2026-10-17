@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "slot": "chrome-previous",
+  "browserVersion": "154.0.8037.92",
+  "releaseDate": "2026-09-29",
+  "scenarioId": "chrome-previous",
+  "result": "PASS",
+  "startedAt": "2026-10-17T19:22:34.766Z",
+  "completedAt": "2026-10-17T19:22:36.353Z",
+  "correlationId": "chrome-previous-e457c467-15af-4a1e-bb86-6655e3fe9d53",
+  "runtime": {
+    "os": "linux",
+    "architecture": "x64",
+    "node": "24.16.0",
+    "playwright": "1.64.0"
+  },
+  "outputs": [
+    {
+      "name": "chrome-previous-e457c467-15af-4a1e-bb86-6655e3fe9d53-report.json",
+      "sha256": "7dbd9a62d28e4c4851eca5133afa76f441870c39a7c8e0a331baa08a2a7fe69e",
+      "size": 6069
+    }
+  ]
+}

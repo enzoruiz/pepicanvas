@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "slot": "chrome-current",
+  "browserVersion": "155.0.8059.79",
+  "releaseDate": "2026-10-13",
+  "scenarioId": "chrome-current",
+  "result": "PASS",
+  "startedAt": "2026-10-17T19:22:30.395Z",
+  "completedAt": "2026-10-17T19:22:32.134Z",
+  "correlationId": "chrome-current-de5f6734-5471-4d7b-aab2-762f3817c070",
+  "runtime": {
+    "os": "linux",
+    "architecture": "x64",
+    "node": "24.16.0",
+    "playwright": "1.64.0"
+  },
+  "outputs": [
+    {
+      "name": "chrome-current-de5f6734-5471-4d7b-aab2-762f3817c070-report.json",
+      "sha256": "00968c1b2c25d466f69dd1eb492af1a2f060d7d3e24a0a36d64ddb995bbd4180",
+      "size": 6073
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 /* global console, process */
 
 import { spawnSync } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,16 +11,132 @@ import {
   prepareExtractedBrowser,
 } from "./browser-cache.mjs";
 import { browserCachePaths, repositoryRoot } from "./browser-matrix.mjs";
+import { validateBrowserEvidence } from "../../scripts/client-support/release-manifest.mjs";
+
+function reportMetadata(reportName, reportBytes) {
+  return {
+    name: reportName,
+    sha256: createHash("sha256").update(reportBytes).digest("hex"),
+    size: reportBytes.length,
+  };
+}
+
+function assertPassingReport(reportBytes) {
+  let report;
+  try {
+    report = JSON.parse(reportBytes);
+  } catch (error) {
+    throw new Error(`Playwright report is not valid JSON: ${error.message}`, {
+      cause: error,
+    });
+  }
+  if (
+    report === null ||
+    typeof report !== "object" ||
+    !Number.isSafeInteger(report.stats?.expected) ||
+    report.stats.expected <= 0 ||
+    report.stats.unexpected !== 0 ||
+    report.stats.flaky !== 0
+  ) {
+    throw new Error("Playwright report does not prove a passing test run");
+  }
+}
+
+function assertAuthorizedRuntime(runtimeIdentity) {
+  if (
+    runtimeIdentity?.os !== "linux" ||
+    runtimeIdentity.architecture !== "x64"
+  ) {
+    throw new Error("browser evidence runtime must be Linux x64");
+  }
+}
+
+export function buildBrowserEvidence({
+  browser,
+  startedAt,
+  completedAt,
+  correlationId,
+  reportName,
+  reportBytes,
+  nodeVersion,
+  playwrightVersion,
+  runtimeIdentity,
+  manifest,
+}) {
+  assertAuthorizedRuntime(runtimeIdentity);
+  assertPassingReport(reportBytes);
+  const evidence = {
+    schemaVersion: 1,
+    slot: browser.slot,
+    browserVersion: browser.version,
+    releaseDate: browser.releasedAt.slice(0, 10),
+    scenarioId: browser.slot,
+    result: "PASS",
+    startedAt,
+    completedAt,
+    correlationId,
+    runtime: {
+      ...runtimeIdentity,
+      node: nodeVersion,
+      playwright: playwrightVersion,
+    },
+    outputs: [reportMetadata(reportName, reportBytes)],
+  };
+  if (manifest) validateBrowserEvidence(evidence, manifest);
+  return evidence;
+}
+
+export async function emitBrowserEvidence({
+  evidence,
+  evidenceDirectory,
+  manifest,
+  reportBytes,
+}) {
+  validateBrowserEvidence(evidence, manifest);
+  const expected = evidence.outputs[0];
+  const actual = reportMetadata(expected.name, reportBytes);
+  if (actual.size !== expected.size || actual.sha256 !== expected.sha256) {
+    throw new Error("Playwright report bytes do not match browser evidence");
+  }
+  await mkdir(evidenceDirectory, { recursive: true });
+  await writeFile(
+    path.join(evidenceDirectory, `${evidence.slot}.json`),
+    `${JSON.stringify(evidence, null, 2)}\n`,
+    { flag: "wx" },
+  );
+}
 
 async function main() {
   const [mode, ...rest] = process.argv.slice(2);
-  if (rest.length > 0 || !["--download", "--offline"].includes(mode)) {
+  const evidenceDirectory =
+    rest.length === 2 && rest[0] === "--evidence-dir"
+      ? path.resolve(rest[1])
+      : undefined;
+  if (
+    (!evidenceDirectory && rest.length > 0) ||
+    !["--download", "--offline"].includes(mode)
+  ) {
     throw new Error(
-      "usage: node scripts/browser-matrix-runner.mjs --download|--offline",
+      "usage: node scripts/browser-matrix-runner.mjs --download|--offline [--evidence-dir <directory>]",
     );
   }
 
   const frontendRoot = path.join(repositoryRoot, "frontend");
+  const manifest = JSON.parse(
+    await readFile(
+      path.join(
+        repositoryRoot,
+        "releases/client-support-release.template.json",
+      ),
+      "utf8",
+    ),
+  );
+  const playwrightPackage = JSON.parse(
+    await readFile(
+      path.join(frontendRoot, "node_modules/@playwright/test/package.json"),
+      "utf8",
+    ),
+  );
   const matrix = await prepareBrowserCache({ offline: mode === "--offline" });
   const extractedRoot = path.join(
     frontendRoot,
@@ -27,13 +144,24 @@ async function main() {
     "client-browsers",
     "extracted",
   );
+  const reportRoot = path.join(
+    frontendRoot,
+    "test-results",
+    "browser-evidence",
+  );
   await rm(extractedRoot, { force: true, recursive: true });
+  await rm(reportRoot, { force: true, recursive: true });
+  await mkdir(reportRoot, { recursive: true });
 
   for (const browser of matrix.browsers) {
     const paths = browserCachePaths(frontendRoot, browser);
     try {
       const { versionOutput } = await prepareExtractedBrowser(browser);
       console.log(`${browser.slot}: executing ${versionOutput}`);
+      const startedAt = new Date().toISOString();
+      const correlationId = `${browser.slot}-${randomUUID()}`;
+      const reportName = `${correlationId}-report.json`;
+      const reportPath = path.join(reportRoot, reportName);
       const result = spawnSync(
         process.execPath,
         [
@@ -47,8 +175,14 @@ async function main() {
           "test",
           "--project",
           browser.slot,
+          "--reporter",
+          "json",
         ],
-        { cwd: frontendRoot, stdio: "inherit" },
+        {
+          cwd: frontendRoot,
+          env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath },
+          stdio: "inherit",
+        },
       );
       if (result.error || result.status !== 0) {
         throw new Error(
@@ -56,6 +190,31 @@ async function main() {
             result.error ? `: ${result.error.message}` : ""
           }`,
         );
+      }
+      const completedAt = new Date().toISOString();
+      const reportBytes = await readFile(reportPath);
+      const evidence = buildBrowserEvidence({
+        browser,
+        startedAt,
+        completedAt,
+        correlationId,
+        reportName,
+        reportBytes,
+        nodeVersion: process.versions.node,
+        playwrightVersion: playwrightPackage.version,
+        runtimeIdentity: {
+          os: process.platform,
+          architecture: process.arch,
+        },
+        manifest,
+      });
+      if (evidenceDirectory) {
+        await emitBrowserEvidence({
+          evidence,
+          evidenceDirectory,
+          manifest,
+          reportBytes,
+        });
       }
     } finally {
       await rm(paths.extractionPath, { force: true, recursive: true });

@@ -22,7 +22,7 @@ function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function validateBrowserEvidence(value, manifest) {
+export function validateBrowserEvidence(value, manifest) {
   const fields = [
     "browserVersion",
     "completedAt",

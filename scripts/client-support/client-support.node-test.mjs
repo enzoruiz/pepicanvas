@@ -474,4 +474,16 @@ test("workflow is least-privilege, bounded, and SHA-pinned", async () => {
   );
   assert.ok(uses.length >= 4);
   assert.ok(uses.every((value) => /@[0-9a-f]{40}$/.test(value)));
+  assert.match(
+    workflow,
+    /if \(\$releasecheckExitCode -eq 0\)[\s\S]*Select-String[\s\S]*Get-Content releasecheck-output\.txt\r?\n\s+exit 0/,
+  );
+});
+
+test("release template carries the approved immutable release identity", async () => {
+  const template = JSON.parse(await readFile(templatePath, "utf8"));
+  assert.deepEqual(template.release, {
+    version: "0.1.0",
+    releaseDate: "2026-10-17",
+  });
 });

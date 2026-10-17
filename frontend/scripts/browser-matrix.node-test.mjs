@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,12 +10,33 @@ import {
   loadBrowserMatrix,
   verifyArchive,
 } from "./browser-matrix.mjs";
+import {
+  buildBrowserEvidence,
+  emitBrowserEvidence,
+} from "./browser-matrix-runner.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const matrixPath = path.join(
   repositoryRoot,
   "releases/client-browser-matrix.json",
 );
+const evidenceManifest = {
+  clients: [
+    {
+      family: "chrome",
+      slot: "current",
+      version: "155.0.8059.79",
+      releaseDate: "2026-10-13",
+    },
+  ],
+  scenarios: [
+    {
+      id: "chrome-current",
+      clientFamily: "chrome",
+      clientSlot: "current",
+    },
+  ],
+};
 
 test("the checked-in matrix contains only the four authorized exact releases", async () => {
   const matrix = await loadBrowserMatrix(matrixPath);
@@ -84,5 +105,129 @@ test("the downloader rejects URL drift before network access", async () => {
   await assert.rejects(
     downloadArchive(browser, path.join(directory, "archive.zip")),
     /not authorized/i,
+  );
+});
+
+test("browser evidence binds exact report bytes and runtime identity", () => {
+  const reportBytes = Buffer.from(
+    JSON.stringify({ stats: { expected: 1, unexpected: 0, flaky: 0 } }),
+  );
+  const evidence = buildBrowserEvidence({
+    browser: AUTHORIZED_BROWSER_SLOTS[0],
+    startedAt: "2026-10-17T20:00:00.000Z",
+    completedAt: "2026-10-17T20:00:01.000Z",
+    correlationId: "chrome-current-00000000-0000-4000-8000-000000000001",
+    reportName: "chrome-current-report.json",
+    reportBytes,
+    nodeVersion: "24.16.0",
+    playwrightVersion: "1.64.0",
+    runtimeIdentity: { os: "linux", architecture: "x64" },
+    manifest: evidenceManifest,
+  });
+
+  assert.deepEqual(evidence, {
+    schemaVersion: 1,
+    slot: "chrome-current",
+    browserVersion: "155.0.8059.79",
+    releaseDate: "2026-10-13",
+    scenarioId: "chrome-current",
+    result: "PASS",
+    startedAt: "2026-10-17T20:00:00.000Z",
+    completedAt: "2026-10-17T20:00:01.000Z",
+    correlationId: "chrome-current-00000000-0000-4000-8000-000000000001",
+    runtime: {
+      os: "linux",
+      architecture: "x64",
+      node: "24.16.0",
+      playwright: "1.64.0",
+    },
+    outputs: [
+      {
+        name: "chrome-current-report.json",
+        sha256:
+          "b165c5bef91f093a36bdd36a5badb84ca8b38cee697fe13a27d87ec2924f91a6",
+        size: reportBytes.length,
+      },
+    ],
+  });
+});
+
+test("browser evidence rejects unsupported runtime identities", () => {
+  const options = {
+    browser: AUTHORIZED_BROWSER_SLOTS[0],
+    startedAt: "2026-10-17T20:00:00.000Z",
+    completedAt: "2026-10-17T20:00:01.000Z",
+    correlationId: "chrome-current-00000000-0000-4000-8000-000000000001",
+    reportName: "chrome-current-report.json",
+    reportBytes: Buffer.from(
+      JSON.stringify({ stats: { expected: 1, unexpected: 0, flaky: 0 } }),
+    ),
+    nodeVersion: "24.16.0",
+    playwrightVersion: "1.64.0",
+    manifest: evidenceManifest,
+  };
+
+  for (const runtimeIdentity of [
+    { os: "win32", architecture: "x64" },
+    { os: "linux", architecture: "arm64" },
+  ]) {
+    assert.throws(
+      () => buildBrowserEvidence({ ...options, runtimeIdentity }),
+      /runtime.*Linux x64/i,
+    );
+  }
+});
+
+test("browser evidence emission fails closed for incomplete or changed reports", async () => {
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "pepicanvas-browser-evidence-"),
+  );
+  const reportBytes = Buffer.from(
+    JSON.stringify({ stats: { expected: 1, unexpected: 0, flaky: 0 } }),
+  );
+  const options = {
+    browser: AUTHORIZED_BROWSER_SLOTS[0],
+    startedAt: "2026-10-17T20:00:00.000Z",
+    completedAt: "2026-10-17T20:00:01.000Z",
+    correlationId: "chrome-current-00000000-0000-4000-8000-000000000001",
+    reportName: "chrome-current-report.json",
+    reportBytes,
+    nodeVersion: "24.16.0",
+    playwrightVersion: "1.64.0",
+    runtimeIdentity: { os: "linux", architecture: "x64" },
+    manifest: evidenceManifest,
+  };
+  const evidence = buildBrowserEvidence(options);
+
+  await assert.rejects(
+    emitBrowserEvidence({
+      evidence,
+      evidenceDirectory: directory,
+      manifest: evidenceManifest,
+      reportBytes: Buffer.from("changed"),
+    }),
+    /report.*match/i,
+  );
+  assert.throws(
+    () =>
+      buildBrowserEvidence({
+        ...options,
+        reportBytes: Buffer.from(
+          JSON.stringify({ stats: { expected: 0, unexpected: 1, flaky: 0 } }),
+        ),
+      }),
+    /passing test/i,
+  );
+  await assert.rejects(readFile(path.join(directory, "chrome-current.json")));
+
+  await emitBrowserEvidence({
+    evidence,
+    evidenceDirectory: directory,
+    manifest: evidenceManifest,
+    reportBytes,
+  });
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(directory, "chrome-current.json"))),
+    evidence,
   );
 });

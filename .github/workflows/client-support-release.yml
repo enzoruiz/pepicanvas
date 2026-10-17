@@ -72,12 +72,14 @@ jobs:
         timeout-minutes: 2
         run: |
           go run ./cmd/releasecheck ../releases/client-support-release.template.json *> releasecheck-output.txt
-          if ($LASTEXITCODE -eq 0) { throw "Template unexpectedly passed the release gate" }
+          $releasecheckExitCode = $LASTEXITCODE
+          if ($releasecheckExitCode -eq 0) { throw "Template unexpectedly passed the release gate" }
           if (-not (Select-String -Quiet -Path releasecheck-output.txt -Pattern '^INCONCLUSIVE$')) {
             Get-Content releasecheck-output.txt
             throw "Release gate did not report INCONCLUSIVE"
           }
           Get-Content releasecheck-output.txt
+          exit 0
 
       - name: Upload OBS evidence for maintainer retrieval
         if: always()
