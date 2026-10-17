@@ -19,6 +19,15 @@ import { connectObsWebSocket } from "./obs-websocket.mjs";
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+async function waitForExit(processHandle) {
+  for (
+    let attempt = 0;
+    processHandle?.exitCode === null && attempt < 40;
+    attempt++
+  )
+    await delay(250);
+}
+
 function assertOverlayRender(file) {
   const script = [
     "Add-Type -AssemblyName System.Drawing",
@@ -233,10 +242,13 @@ export async function executeObsSlot({ slot, offline = false, outputRoot }) {
       });
     }
     if (server.exitCode === null) server.kill();
+    await Promise.all([waitForExit(obs), waitForExit(server)]);
     await Promise.all([serverLog.close(), obsLog.close()]);
     await rm(path.join(cacheRoot, "extracted", slot), {
       force: true,
+      maxRetries: 10,
       recursive: true,
+      retryDelay: 500,
     });
   }
 }
