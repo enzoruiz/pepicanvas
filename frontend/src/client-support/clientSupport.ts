@@ -1,13 +1,14 @@
 export const MINIMUM_VIEWPORT_WIDTH = 1280;
 export const MINIMUM_VIEWPORT_HEIGHT = 720;
 
-export type BrowserFamily = "chrome" | "edge" | "unknown";
+export type BrowserFamily = "chrome" | "edge" | "obs" | "unknown";
 export type UnsupportedReason = "browser" | "device" | "viewport";
 
 export interface ClientSnapshot {
   userAgent: string;
   userAgentDataMobile: boolean | null;
   maxTouchPoints: number;
+  obsStudioIntegration: boolean;
   viewportWidth: number;
   viewportHeight: number;
 }
@@ -18,22 +19,32 @@ export interface ClientSupportClassification {
   reasons: UnsupportedReason[];
 }
 
+const numericProductVersion = String.raw`\d+(?:\.\d+){0,3}`;
 const chromiumPrefix =
   String.raw`Mozilla\/5\.0 \([^)]+\) AppleWebKit\/537\.36 ` +
-  String.raw`\(KHTML, like Gecko\) Chrome\/\d+(?:\.\d+){0,3} Safari\/537\.36`;
+  String.raw`\(KHTML, like Gecko\) Chrome\/${numericProductVersion} Safari\/537\.36`;
 const chromeUserAgent = new RegExp(`^${chromiumPrefix}$`);
 const edgeUserAgent = new RegExp(
-  `^${chromiumPrefix} Edg\\/\\d+(?:\\.\\d+){0,3}$`,
+  `^${chromiumPrefix} Edg/${numericProductVersion}$`,
+);
+const obsUserAgent = new RegExp(
+  String.raw`^Mozilla\/5\.0 \([^)]+\) AppleWebKit\/537\.36 ` +
+    String.raw`\(KHTML, like Gecko\) Chrome\/${numericProductVersion} ` +
+    String.raw`OBS\/${numericProductVersion} Safari\/537\.36$`,
 );
 const mobileOrTabletUserAgent =
   /Android|Mobi|Mobile|Tablet|iPad|iPhone|iPod|Silk|Kindle/i;
 
-function classifyBrowser(userAgent: string): BrowserFamily {
-  if (edgeUserAgent.test(userAgent)) {
+function classifyBrowser(snapshot: ClientSnapshot): BrowserFamily {
+  if (snapshot.obsStudioIntegration) {
+    return obsUserAgent.test(snapshot.userAgent) ? "obs" : "unknown";
+  }
+
+  if (edgeUserAgent.test(snapshot.userAgent)) {
     return "edge";
   }
 
-  if (chromeUserAgent.test(userAgent)) {
+  if (chromeUserAgent.test(snapshot.userAgent)) {
     return "chrome";
   }
 
@@ -64,7 +75,7 @@ function hasSupportedViewport(snapshot: ClientSnapshot): boolean {
 export function classifyClientSupport(
   snapshot: ClientSnapshot,
 ): ClientSupportClassification {
-  const browserFamily = classifyBrowser(snapshot.userAgent);
+  const browserFamily = classifyBrowser(snapshot);
   const reasons: UnsupportedReason[] = [];
 
   if (browserFamily === "unknown") {

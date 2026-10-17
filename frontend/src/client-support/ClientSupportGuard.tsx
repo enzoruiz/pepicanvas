@@ -81,9 +81,9 @@ export function ClientSupportGuard({
           <div style={explanationStyle}>
             <h1 id="client-support-title">Unsupported client</h1>
             <p>
-              PepiCanvas requires desktop Google Chrome or Microsoft Edge and a
-              viewport of at least 1280 by 720 pixels. Mobile and tablet devices
-              are not supported.
+              PepiCanvas requires desktop Google Chrome, Microsoft Edge, or a
+              supported OBS Browser Source, and a viewport of at least 1280 by
+              720 pixels. Mobile and tablet devices are not supported.
             </p>
           </div>
         </section>

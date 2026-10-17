@@ -11,6 +11,7 @@ interface NavigatorSnapshotSource {
 interface ViewportSnapshotSource {
   innerWidth: number;
   innerHeight: number;
+  obsstudio?: unknown;
 }
 
 export function readClientSnapshot(
@@ -18,6 +19,7 @@ export function readClientSnapshot(
   viewportSource: ViewportSnapshotSource = window,
 ): ClientSnapshot {
   const mobileHint = navigatorSource.userAgentData?.mobile;
+  const obsStudioType = typeof viewportSource.obsstudio;
 
   return {
     userAgent: navigatorSource.userAgent,
@@ -26,6 +28,9 @@ export function readClientSnapshot(
       typeof navigatorSource.maxTouchPoints === "number"
         ? navigatorSource.maxTouchPoints
         : 0,
+    obsStudioIntegration:
+      (obsStudioType === "object" && viewportSource.obsstudio !== null) ||
+      obsStudioType === "function",
     viewportWidth: viewportSource.innerWidth,
     viewportHeight: viewportSource.innerHeight,
   };

@@ -14,6 +14,7 @@ function supportedSnapshot(): ClientSnapshot {
     userAgent: chromeUserAgent,
     userAgentDataMobile: false,
     maxTouchPoints: 0,
+    obsStudioIntegration: false,
     viewportWidth: 1280,
     viewportHeight: 720,
   };
@@ -49,6 +50,7 @@ describe("ClientSupportGuard", () => {
       "Unsupported client",
     );
     expect(screen.getByText(/1280 by 720/)).toBeInTheDocument();
+    expect(screen.getByText(/OBS Browser Source/)).toBeInTheDocument();
 
     const guardedContent = screen.getByTestId("client-support-content");
     expect(guardedContent).toHaveAttribute("inert");
