@@ -255,7 +255,7 @@ test("workflow is least-privilege, bounded, and SHA-pinned", async () => {
   );
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /pull_request:/);
-  assert.match(workflow, /permissions:\n  contents: read/);
+  assert.match(workflow, /permissions:\r?\n  contents: read/);
   assert.match(workflow, /runs-on: windows-latest/);
   assert.match(workflow, /timeout-minutes: 45/);
   assert.doesNotMatch(workflow, /secrets\./);
