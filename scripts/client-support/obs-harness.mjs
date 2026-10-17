@@ -19,6 +19,25 @@ import { connectObsWebSocket } from "./obs-websocket.mjs";
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function assertOverlayRender(file) {
+  const script = [
+    "Add-Type -AssemblyName System.Drawing",
+    "$b=[Drawing.Bitmap]::FromFile($args[0])",
+    "if($b.Width -ne 1280 -or $b.Height -ne 720){$b.Dispose();exit 2}",
+    "$t=0;$v=0",
+    "for($y=0;$y -lt 720;$y+=2){for($x=0;$x -lt 1280;$x+=2){$a=$b.GetPixel($x,$y).A;if($a -eq 0){$t++}elseif($a -gt 127){$v++}}}",
+    "$b.Dispose()",
+    "if($t -lt 184320 -or $v -lt 25){exit 3}",
+  ].join(";");
+  const probe = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script, file],
+    { windowsHide: true },
+  );
+  if (probe.status !== 0)
+    throw new Error("overlay render is blank or missing its visible marker");
+}
+
 async function digest(file) {
   const fileStat = await stat(file);
   const hash = createHash("sha256");
@@ -176,15 +195,7 @@ export async function executeObsSlot({ slot, offline = false, outputRoot }) {
       imageHeight: 720,
       imageCompressionQuality: 100,
     });
-    const signature = (await readFile(screenshot))
-      .subarray(0, 8)
-      .toString("hex");
-    if (
-      signature !== "89504e470d0a1a0a" ||
-      (await stat(screenshot)).size < 1_000
-    ) {
-      throw new Error(`${slot} source screenshot is missing or malformed`);
-    }
+    assertOverlayRender(screenshot);
     const evidence = {
       schemaVersion: 1,
       slot,

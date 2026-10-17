@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,7 +12,7 @@ import {
   loadObsMatrix,
   verifyInstaller,
 } from "./obs-matrix.mjs";
-import { validateObsEvidence } from "./obs-evidence.mjs";
+import { loadObsEvidence, validateObsEvidence } from "./obs-evidence.mjs";
 import { executeObsSlot } from "./obs-harness.mjs";
 import { generateReleaseManifest } from "./release-manifest.mjs";
 
@@ -127,6 +129,29 @@ test("evidence rejects malformed data, wrong versions, and missing render proof"
     () => validateObsEvidence({ ...valid, outputs: [] }),
     /render proof/i,
   );
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "pepicanvas-evidence-"),
+  );
+  const bytes = Buffer.from("expected screenshot bytes");
+  const evidencePath = path.join(directory, "obs-current-evidence.json");
+  valid.outputs[0] = {
+    name: "source-screenshot.png",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size: bytes.length,
+  };
+  await writeFile(evidencePath, JSON.stringify(valid));
+  await assert.rejects(
+    loadObsEvidence(evidencePath, directory),
+    /output.*missing/i,
+  );
+  await writeFile(
+    path.join(directory, "source-screenshot.png"),
+    Buffer.alloc(bytes.length),
+  );
+  await assert.rejects(
+    loadObsEvidence(evidencePath, directory),
+    /output.*(size|SHA-256)/i,
+  );
 });
 
 test("release generation remains fail-closed before OBS evidence exists", async () => {
@@ -145,11 +170,16 @@ test("release generation remains fail-closed before OBS evidence exists", async 
 });
 
 test("release generation binds strict committed browser evidence", async () => {
-  const directory = await mkdtemp(
+  const root = await mkdtemp(
     path.join(os.tmpdir(), "pepicanvas-browser-evidence-"),
   );
+  const directory = path.join(root, "releases", "evidence");
+  await mkdir(directory, { recursive: true });
+  const localTemplate = path.join(root, "releases", "template.json");
+  await writeFile(localTemplate, await readFile(templatePath));
+  const evidencePath = path.join(directory, "chrome-current.json");
   await writeFile(
-    path.join(directory, "chrome-current.json"),
+    evidencePath,
     JSON.stringify({
       schemaVersion: 1,
       slot: "chrome-current",
@@ -169,17 +199,40 @@ test("release generation binds strict committed browser evidence", async () => {
       outputs: [{ name: "report.json", sha256: "a".repeat(64), size: 10 }],
     }),
   );
-  const manifest = await generateReleaseManifest({
-    templatePath,
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  git("init", "-q");
+  const releaseOptions = {
+    templatePath: localTemplate,
     evidenceDirectory: directory,
     repositoryUrl: "https://github.com/enzoruiz/pepicanvas",
     evidenceCommit: "a".repeat(40),
-  });
+  };
+  await assert.rejects(generateReleaseManifest(releaseOptions), /Git commit/i);
+  git("add", "releases");
+  git(
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-qm",
+    "test fixture",
+  );
+  const commit = git("rev-parse", "HEAD").trim();
+  releaseOptions.evidenceCommit = commit;
+  await writeFile(evidencePath, `${await readFile(evidencePath, "utf8")}\n`);
+  await assert.rejects(
+    generateReleaseManifest(releaseOptions),
+    /committed evidence.*match/i,
+  );
+  git("checkout", "--", "releases/evidence/chrome-current.json");
+  const manifest = await generateReleaseManifest(releaseOptions);
   assert.equal(manifest.evidence.length, 1);
   assert.deepEqual(manifest.scenarios[0].evidence, ["evidence-chrome-current"]);
   assert.match(
     manifest.evidence[0].location,
-    /blob\/a{40}\/releases\/evidence/,
+    new RegExp(`blob/${commit}/releases/evidence`),
   );
 });
 

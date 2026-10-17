@@ -1,9 +1,22 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { validateObsEvidence } from "./obs-evidence.mjs";
+
+const execFileAsync = promisify(execFile);
+
+async function gitOutput(cwd, args, message) {
+  try {
+    return (await execFileAsync("git", args, { cwd, encoding: "buffer" }))
+      .stdout;
+  } catch (error) {
+    throw new Error(message, { cause: error });
+  }
+}
 
 function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
@@ -106,12 +119,9 @@ export async function generateReleaseManifest({
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map((entry) => entry.name)
     .sort();
+  const gitRoot = path.resolve(path.dirname(templatePath), "..");
 
-  for (const name of files) {
-    const bytes = await readFile(path.join(evidenceDirectory, name));
-    const value = JSON.parse(bytes);
-    if (String(value.slot ?? "").startsWith("obs-")) validateObsEvidence(value);
-    else validateBrowserEvidence(value, manifest);
+  if (files.length) {
     if (!repositoryUrl || !evidenceCommit) {
       throw new Error(
         "repositoryUrl and evidenceCommit are required when evidence is present",
@@ -119,6 +129,25 @@ export async function generateReleaseManifest({
     }
     if (!/^[0-9a-f]{40}$/.test(evidenceCommit))
       throw new Error("evidenceCommit must be a full Git commit SHA");
+    await gitOutput(
+      gitRoot,
+      ["cat-file", "-e", `${evidenceCommit}^{commit}`],
+      "evidenceCommit must identify an existing local Git commit",
+    );
+  }
+
+  for (const name of files) {
+    const bytes = await readFile(path.join(evidenceDirectory, name));
+    const value = JSON.parse(bytes);
+    if (String(value.slot ?? "").startsWith("obs-")) validateObsEvidence(value);
+    else validateBrowserEvidence(value, manifest);
+    const committed = await gitOutput(
+      gitRoot,
+      ["show", `${evidenceCommit}:releases/evidence/${name}`],
+      `committed evidence ${name} is missing`,
+    );
+    if (!Buffer.from(committed).equals(bytes))
+      throw new Error(`committed evidence ${name} does not match local bytes`);
     const scenario = manifest.scenarios.find(
       ({ id }) => id === value.scenarioId,
     );

@@ -15,7 +15,8 @@ if (evidence.length !== 2)
   );
 const slots = new Set();
 for (const name of evidence) {
-  const value = await loadObsEvidence(path.join(directory, name));
+  const evidencePath = path.join(directory, name);
+  const value = await loadObsEvidence(evidencePath, path.dirname(evidencePath));
   if (slots.has(value.slot))
     throw new Error(`duplicate evidence slot ${value.slot}`);
   slots.add(value.slot);

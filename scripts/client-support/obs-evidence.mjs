@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 import { AUTHORIZED_OBS_SLOTS } from "./obs-matrix.mjs";
 
@@ -108,14 +110,33 @@ export function validateObsEvidence(value) {
   return value;
 }
 
-export async function loadObsEvidence(path) {
+export async function loadObsEvidence(evidencePath, outputDirectory) {
   let value;
   try {
-    value = JSON.parse(await readFile(path, "utf8"));
+    value = JSON.parse(await readFile(evidencePath, "utf8"));
   } catch (error) {
     throw new Error(`OBS evidence is not valid JSON: ${error.message}`, {
       cause: error,
     });
   }
-  return validateObsEvidence(value);
+  validateObsEvidence(value);
+  if (outputDirectory) {
+    for (const output of value.outputs) {
+      const bytes = await readFile(
+        path.join(outputDirectory, output.name),
+      ).catch((error) => {
+        throw new Error(`${value.slot} output ${output.name} is missing`, {
+          cause: error,
+        });
+      });
+      if (
+        bytes.length !== output.size ||
+        createHash("sha256").update(bytes).digest("hex") !== output.sha256
+      )
+        throw new Error(
+          `${value.slot} output ${output.name} size/SHA-256 does not match`,
+        );
+    }
+  }
+  return value;
 }
