@@ -106,6 +106,29 @@ export async function emitBrowserEvidence({
   );
 }
 
+export function buildPlaywrightInvocation({
+  frontendRoot,
+  browserSlot,
+  reportPath,
+  environment = process.env,
+}) {
+  const args = [
+    path.join(frontendRoot, "node_modules", "@playwright", "test", "cli.js"),
+    "test",
+    "--project",
+    browserSlot,
+  ];
+  const env = { ...environment };
+  if (reportPath) {
+    args.push("--reporter", "json");
+    env.PLAYWRIGHT_JSON_OUTPUT_NAME = reportPath;
+  }
+  return {
+    args,
+    options: { cwd: frontendRoot, env, stdio: "inherit" },
+  };
+}
+
 async function main() {
   const [mode, ...rest] = process.argv.slice(2);
   const evidenceDirectory =
@@ -122,21 +145,25 @@ async function main() {
   }
 
   const frontendRoot = path.join(repositoryRoot, "frontend");
-  const manifest = JSON.parse(
-    await readFile(
-      path.join(
-        repositoryRoot,
-        "releases/client-support-release.template.json",
-      ),
-      "utf8",
-    ),
-  );
-  const playwrightPackage = JSON.parse(
-    await readFile(
-      path.join(frontendRoot, "node_modules/@playwright/test/package.json"),
-      "utf8",
-    ),
-  );
+  const manifest = evidenceDirectory
+    ? JSON.parse(
+        await readFile(
+          path.join(
+            repositoryRoot,
+            "releases/client-support-release.template.json",
+          ),
+          "utf8",
+        ),
+      )
+    : undefined;
+  const playwrightPackage = evidenceDirectory
+    ? JSON.parse(
+        await readFile(
+          path.join(frontendRoot, "node_modules/@playwright/test/package.json"),
+          "utf8",
+        ),
+      )
+    : undefined;
   const matrix = await prepareBrowserCache({ offline: mode === "--offline" });
   const extractedRoot = path.join(
     frontendRoot,
@@ -150,39 +177,37 @@ async function main() {
     "browser-evidence",
   );
   await rm(extractedRoot, { force: true, recursive: true });
-  await rm(reportRoot, { force: true, recursive: true });
-  await mkdir(reportRoot, { recursive: true });
+  if (evidenceDirectory) {
+    await rm(reportRoot, { force: true, recursive: true });
+    await mkdir(reportRoot, { recursive: true });
+  }
 
   for (const browser of matrix.browsers) {
     const paths = browserCachePaths(frontendRoot, browser);
     try {
       const { versionOutput } = await prepareExtractedBrowser(browser);
       console.log(`${browser.slot}: executing ${versionOutput}`);
-      const startedAt = new Date().toISOString();
-      const correlationId = `${browser.slot}-${randomUUID()}`;
-      const reportName = `${correlationId}-report.json`;
-      const reportPath = path.join(reportRoot, reportName);
+      const startedAt = evidenceDirectory
+        ? new Date().toISOString()
+        : undefined;
+      const correlationId = evidenceDirectory
+        ? `${browser.slot}-${randomUUID()}`
+        : undefined;
+      const reportName = correlationId
+        ? `${correlationId}-report.json`
+        : undefined;
+      const reportPath = reportName
+        ? path.join(reportRoot, reportName)
+        : undefined;
+      const invocation = buildPlaywrightInvocation({
+        frontendRoot,
+        browserSlot: browser.slot,
+        reportPath,
+      });
       const result = spawnSync(
         process.execPath,
-        [
-          path.join(
-            frontendRoot,
-            "node_modules",
-            "@playwright",
-            "test",
-            "cli.js",
-          ),
-          "test",
-          "--project",
-          browser.slot,
-          "--reporter",
-          "json",
-        ],
-        {
-          cwd: frontendRoot,
-          env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath },
-          stdio: "inherit",
-        },
+        invocation.args,
+        invocation.options,
       );
       if (result.error || result.status !== 0) {
         throw new Error(
@@ -191,24 +216,24 @@ async function main() {
           }`,
         );
       }
-      const completedAt = new Date().toISOString();
-      const reportBytes = await readFile(reportPath);
-      const evidence = buildBrowserEvidence({
-        browser,
-        startedAt,
-        completedAt,
-        correlationId,
-        reportName,
-        reportBytes,
-        nodeVersion: process.versions.node,
-        playwrightVersion: playwrightPackage.version,
-        runtimeIdentity: {
-          os: process.platform,
-          architecture: process.arch,
-        },
-        manifest,
-      });
       if (evidenceDirectory) {
+        const completedAt = new Date().toISOString();
+        const reportBytes = await readFile(reportPath);
+        const evidence = buildBrowserEvidence({
+          browser,
+          startedAt,
+          completedAt,
+          correlationId,
+          reportName,
+          reportBytes,
+          nodeVersion: process.versions.node,
+          playwrightVersion: playwrightPackage.version,
+          runtimeIdentity: {
+            os: process.platform,
+            architecture: process.arch,
+          },
+          manifest,
+        });
         await emitBrowserEvidence({
           evidence,
           evidenceDirectory,

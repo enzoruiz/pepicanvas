@@ -12,6 +12,7 @@ import {
 } from "./browser-matrix.mjs";
 import {
   buildBrowserEvidence,
+  buildPlaywrightInvocation,
   emitBrowserEvidence,
 } from "./browser-matrix-runner.mjs";
 
@@ -37,6 +38,43 @@ const evidenceManifest = {
     },
   ],
 };
+
+test("ordinary browser runs preserve Playwright reporter behavior", () => {
+  const environment = {
+    PLAYWRIGHT_JSON_OUTPUT_NAME: "caller-selected-report.json",
+    PLAYWRIGHT_HTML_OPEN: "never",
+  };
+
+  const invocation = buildPlaywrightInvocation({
+    frontendRoot: "/workspace/frontend",
+    browserSlot: "chrome-current",
+    environment,
+  });
+
+  assert.deepEqual(invocation.args, [
+    "/workspace/frontend/node_modules/@playwright/test/cli.js",
+    "test",
+    "--project",
+    "chrome-current",
+  ]);
+  assert.deepEqual(invocation.options.env, environment);
+  assert.equal(invocation.options.stdio, "inherit");
+});
+
+test("evidence browser runs select the JSON reporter and output file", () => {
+  const invocation = buildPlaywrightInvocation({
+    frontendRoot: "/workspace/frontend",
+    browserSlot: "chrome-current",
+    reportPath: "/workspace/report.json",
+    environment: { PLAYWRIGHT_HTML_OPEN: "never" },
+  });
+
+  assert.deepEqual(invocation.args.slice(-2), ["--reporter", "json"]);
+  assert.equal(
+    invocation.options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,
+    "/workspace/report.json",
+  );
+});
 
 test("the checked-in matrix contains only the four authorized exact releases", async () => {
   const matrix = await loadBrowserMatrix(matrixPath);
