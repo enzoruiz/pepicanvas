@@ -159,7 +159,7 @@ export async function executeObsSlot({ slot, offline = false, outputRoot }) {
         "PepiCanvas",
       ],
       {
-        cwd: extracted.root,
+        cwd: path.dirname(extracted.executable),
         stdio: ["ignore", obsLog.fd, obsLog.fd],
         windowsHide: true,
       },
