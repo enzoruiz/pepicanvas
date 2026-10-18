@@ -20,7 +20,7 @@ import (
 var tenantA = canvas.Key{TenantID: "tenant-a", CanvasID: "canvas-1"}
 
 // openStore connects to the current server address and migrates it.
-func openStore(t *testing.T, server *pgtest.Server) (*postgres.CanvasStore, *pgxpool.Pool) {
+func openStore(t *testing.T, server *pgtest.Server, options ...postgres.CanvasStoreOption) (*postgres.CanvasStore, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	pool, err := postgres.Open(ctx, server.DSN(t))
@@ -31,7 +31,7 @@ func openStore(t *testing.T, server *pgtest.Server) (*postgres.CanvasStore, *pgx
 	if err := postgres.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	return postgres.NewCanvasStore(pool), pool
+	return postgres.NewCanvasStore(pool, options...), pool
 }
 
 func mustCreate(t *testing.T, store canvas.Store, key canvas.Key) canvas.Canvas {

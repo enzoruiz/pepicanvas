@@ -4,6 +4,10 @@
 
 package db
 
+import (
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
 type Canvas struct {
 	TenantID string
 	CanvasID string
@@ -25,4 +29,16 @@ type CanvasObject struct {
 	Height   int32
 	Rotation float64
 	Z        int64
+}
+
+type CanvasOperation struct {
+	TenantID      string
+	CanvasID      string
+	OperationID   string
+	Fingerprint   []byte
+	Revision      int64
+	ObjectID      string
+	Z             int64
+	CorrelationID pgtype.Text
+	AcceptedAt    pgtype.Timestamptz
 }

@@ -82,3 +82,54 @@ func TestValidateRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestFingerprintIdentifiesTheMutation(t *testing.T) {
+	base := map[string]canvas.Mutation{
+		"dimensions": canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 640, Height: 360}},
+		"create":     canvas.CreateObject{Kind: canvas.KindText, Content: "hello", Transform: transform},
+		"content":    canvas.SetContent{ObjectID: "obj-1", Content: "hello"},
+		"transform":  canvas.SetTransform{ObjectID: "obj-1", Transform: transform},
+		"delete":     canvas.DeleteObject{ObjectID: "obj-1"},
+	}
+	for name, mutation := range base {
+		if canvas.Fingerprint(mutation) != canvas.Fingerprint(mutation) {
+			t.Fatalf("%s: equal mutations have different fingerprints", name)
+		}
+	}
+	zero := canvas.SetTransform{ObjectID: "obj-1", Transform: canvas.Transform{Width: 1, Height: 1}}
+	negativeZero := zero
+	negativeZero.Transform.Rotation = math.Copysign(0, -1)
+	if canvas.Fingerprint(zero) != canvas.Fingerprint(negativeZero) {
+		t.Fatal("rotation 0 and -0 have different fingerprints")
+	}
+
+	moved := func(change func(*canvas.Transform)) canvas.Transform {
+		t := transform
+		change(&t)
+		return t
+	}
+	changed := map[string][2]canvas.Mutation{
+		"width":            {base["dimensions"], canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 641, Height: 360}}},
+		"height":           {base["dimensions"], canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 640, Height: 361}}},
+		"create kind":      {base["create"], canvas.CreateObject{Kind: canvas.KindImage, Content: "hello", Transform: transform}},
+		"create content":   {base["create"], canvas.CreateObject{Kind: canvas.KindText, Content: "hellO", Transform: transform}},
+		"create x":         {base["create"], canvas.CreateObject{Kind: canvas.KindText, Content: "hello", Transform: moved(func(t *canvas.Transform) { t.X++ })}},
+		"content object":   {base["content"], canvas.SetContent{ObjectID: "obj-2", Content: "hello"}},
+		"content text":     {base["content"], canvas.SetContent{ObjectID: "obj-1", Content: "hello!"}},
+		"content boundary": {canvas.SetContent{ObjectID: "ab", Content: "c"}, canvas.SetContent{ObjectID: "a", Content: "bc"}},
+		"transform object": {base["transform"], canvas.SetTransform{ObjectID: "obj-2", Transform: transform}},
+		"transform x":      {base["transform"], canvas.SetTransform{ObjectID: "obj-1", Transform: moved(func(t *canvas.Transform) { t.X++ })}},
+		"transform y":      {base["transform"], canvas.SetTransform{ObjectID: "obj-1", Transform: moved(func(t *canvas.Transform) { t.Y++ })}},
+		"transform width":  {base["transform"], canvas.SetTransform{ObjectID: "obj-1", Transform: moved(func(t *canvas.Transform) { t.Width++ })}},
+		"transform height": {base["transform"], canvas.SetTransform{ObjectID: "obj-1", Transform: moved(func(t *canvas.Transform) { t.Height++ })}},
+		"rotation":         {base["transform"], canvas.SetTransform{ObjectID: "obj-1", Transform: moved(func(t *canvas.Transform) { t.Rotation = math.Nextafter(t.Rotation, 360) })}},
+		"delete object":    {base["delete"], canvas.DeleteObject{ObjectID: "obj-2"}},
+		"kind of mutation": {canvas.SetContent{ObjectID: "obj-1", Content: "obj-1"}, canvas.DeleteObject{ObjectID: "obj-1"}},
+		"move or retarget": {base["transform"], canvas.CreateObject{Kind: canvas.KindText, Content: "obj-1", Transform: transform}},
+	}
+	for name, pair := range changed {
+		if canvas.Fingerprint(pair[0]) == canvas.Fingerprint(pair[1]) {
+			t.Fatalf("%s: different mutations share a fingerprint: %+v and %+v", name, pair[0], pair[1])
+		}
+	}
+}

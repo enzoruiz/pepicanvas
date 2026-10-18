@@ -1,30 +1,61 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
 )
 
+// DefaultOperationRetention is how long an accepted operation ID replays its
+// result, matching the realtime retention.
+const DefaultOperationRetention = 10 * time.Minute
+
 // CanvasStore implements canvas.Store. Every mutation locks its canvas row,
-// so mutations of one canvas commit one at a time in revision order.
+// so mutations of one canvas commit one at a time in revision order. Each
+// accepted mutation retains its operation ID and result in the same
+// transaction, so a retry returns the committed result without a second effect.
 type CanvasStore struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	now       func() time.Time
+	retention time.Duration
+	// beforeCommit, when set by tests, runs after the mutation and before commit.
+	beforeCommit func(context.Context) error
 }
 
 var _ canvas.Store = (*CanvasStore)(nil)
 
+// CanvasStoreOption configures a CanvasStore.
+type CanvasStoreOption func(*CanvasStore)
+
+// WithClock sets the time source used for operation retention.
+func WithClock(now func() time.Time) CanvasStoreOption {
+	return func(s *CanvasStore) { s.now = now }
+}
+
+// WithRetention sets how long an operation ID replays its result. An operation
+// accepted at T is retained while now < T + ttl.
+func WithRetention(ttl time.Duration) CanvasStoreOption {
+	return func(s *CanvasStore) { s.retention = ttl }
+}
+
 // NewCanvasStore returns a store over a migrated pool.
-func NewCanvasStore(pool *pgxpool.Pool) *CanvasStore {
-	return &CanvasStore{pool: pool}
+func NewCanvasStore(pool *pgxpool.Pool, options ...CanvasStoreOption) *CanvasStore {
+	s := &CanvasStore{pool: pool, now: time.Now, retention: DefaultOperationRetention}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 // Create makes the canvas with default dimensions, or returns the existing one.
@@ -84,11 +115,15 @@ func (s *CanvasStore) Load(ctx context.Context, key canvas.Key) (canvas.Canvas, 
 	return loaded, nil
 }
 
-// Apply validates one mutation and commits it in a single transaction.
+// Apply validates one mutation and commits it in a single transaction. A
+// retained operation ID replays its result when the mutation is equal and
+// returns canvas.ErrOperationConflict when it differs.
 func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error) {
 	if err := canvas.Validate(key, operation, mutation); err != nil {
 		return canvas.Result{}, err
 	}
+	fingerprint := canvas.Fingerprint(mutation)
+	now := s.now()
 	var result canvas.Result
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := db.New(tx)
@@ -97,14 +132,53 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		} else if err != nil {
 			return err
 		}
-		var err error
-		result, err = mutate(ctx, q, key, mutation)
-		return err
+		replayed, found, err := retained(ctx, q, key, operation, fingerprint, now.Add(-s.retention))
+		if err != nil || found {
+			result = replayed
+			return err
+		}
+		if result, err = mutate(ctx, q, key, mutation); err != nil {
+			return err
+		}
+		if err := q.InsertOperation(ctx, db.InsertOperationParams{
+			TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operation.ID,
+			Fingerprint: fingerprint[:],
+			Revision:    result.Revision, ObjectID: result.ObjectID, Z: result.Z,
+			CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
+			AcceptedAt:    pgtype.Timestamptz{Time: now, Valid: true},
+		}); err != nil {
+			return err
+		}
+		if s.beforeCommit != nil {
+			return s.beforeCommit(ctx)
+		}
+		return nil
 	})
 	if err != nil {
 		return canvas.Result{}, wrap("apply mutation", err)
 	}
 	return result, nil
+}
+
+// retained purges the canvas operations accepted at or before expiredAt and
+// returns the result of an equal retry, or canvas.ErrOperationConflict.
+func retained(ctx context.Context, q *db.Queries, key canvas.Key, operation canvas.Operation, fingerprint [32]byte, expiredAt time.Time) (canvas.Result, bool, error) {
+	if err := q.PurgeExpiredOperations(ctx, db.PurgeExpiredOperationsParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, ExpiredAt: pgtype.Timestamptz{Time: expiredAt, Valid: true},
+	}); err != nil {
+		return canvas.Result{}, false, err
+	}
+	row, err := q.GetOperation(ctx, db.GetOperationParams{TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operation.ID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return canvas.Result{}, false, nil
+	}
+	if err != nil {
+		return canvas.Result{}, false, err
+	}
+	if !bytes.Equal(row.Fingerprint, fingerprint[:]) {
+		return canvas.Result{}, false, canvas.ErrOperationConflict
+	}
+	return canvas.Result{Revision: row.Revision, ObjectID: row.ObjectID, Z: row.Z}, true, nil
 }
 
 // mutate runs one mutation inside the transaction that holds the canvas lock.

@@ -4,6 +4,8 @@ package canvas
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -101,6 +103,8 @@ type Operation struct {
 // Mutation is one durable change applied atomically to a canvas.
 type Mutation interface {
 	validate() error
+	// fields lists the mutation kind and every field, in a fixed order.
+	fields() [][]byte
 }
 
 // SetDimensions resizes the canvas without moving, resizing, or reordering objects.
@@ -138,6 +142,21 @@ type Result struct {
 	Revision int64
 	ObjectID string
 	Z        int64
+}
+
+// Fingerprint identifies the intent of a mutation, so a retry under the same
+// operation ID can be told apart from a different mutation. The operation and
+// its correlation ID are excluded, so a retry over a new connection stays
+// equivalent.
+func Fingerprint(mutation Mutation) [sha256.Size]byte {
+	hash := sha256.New()
+	for _, part := range mutation.fields() {
+		_ = binary.Write(hash, binary.BigEndian, uint64(len(part)))
+		hash.Write(part)
+	}
+	var sum [sha256.Size]byte
+	hash.Sum(sum[:0])
+	return sum
 }
 
 // Store persists canvases. Each Apply commits in a single transaction or not at all.
@@ -213,6 +232,37 @@ func (m SetTransform) validate() error {
 
 func (m DeleteObject) validate() error {
 	return validateIdentifier("object", m.ObjectID)
+}
+
+func (m SetDimensions) fields() [][]byte {
+	return [][]byte{[]byte("set_dimensions"), intField(m.Dimensions.Width), intField(m.Dimensions.Height)}
+}
+
+func (m CreateObject) fields() [][]byte {
+	return append([][]byte{[]byte("create_object"), []byte(m.Kind), []byte(m.Content)}, m.Transform.fields()...)
+}
+
+func (m SetContent) fields() [][]byte {
+	return [][]byte{[]byte("set_content"), []byte(m.ObjectID), []byte(m.Content)}
+}
+
+func (m SetTransform) fields() [][]byte {
+	return append([][]byte{[]byte("set_transform"), []byte(m.ObjectID)}, m.Transform.fields()...)
+}
+
+func (m DeleteObject) fields() [][]byte {
+	return [][]byte{[]byte("delete_object"), []byte(m.ObjectID)}
+}
+
+func (t Transform) fields() [][]byte {
+	return [][]byte{
+		intField(t.X), intField(t.Y), intField(t.Width), intField(t.Height),
+		binary.BigEndian.AppendUint64(nil, math.Float64bits(t.Rotation+0)), // +0 folds -0 into 0
+	}
+}
+
+func intField(value int) []byte {
+	return binary.BigEndian.AppendUint64(nil, uint64(int64(value)))
 }
 
 func (t Transform) validate() error {
