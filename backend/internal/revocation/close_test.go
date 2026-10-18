@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -223,5 +224,44 @@ func TestBudgetExcessIsLoggedAsAnError(t *testing.T) {
 			}
 		}
 		t.Fatalf("no budget error record in %v", records())
+	})
+}
+
+// slowAbortConn honors the Conn contract but its Close returns only some
+// time after Abort, like a transport flushing its socket.
+type slowAbortConn struct {
+	abort    chan struct{}
+	once     sync.Once
+	returned atomic.Bool
+}
+
+func (c *slowAbortConn) Close(context.Context, Reason) error {
+	<-c.abort
+	time.Sleep(50 * time.Millisecond)
+	c.returned.Store(true)
+	return errAborted
+}
+
+func (c *slowAbortConn) Abort() { c.once.Do(func() { close(c.abort) }) }
+
+func TestCloseAndCutWaitForAbortedTransportClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		registry := newRegistry(t)
+		conn := &slowAbortConn{abort: make(chan struct{})}
+		register(t, registry, obsGrant("tenant-a", "cred-1", 5), conn)
+		if err := registry.Close(context.Background()); err != nil || !conn.returned.Load() {
+			t.Fatalf("Close() error = %v, transport Close returned = %v; want nil and true", err, conn.returned.Load())
+		}
+
+		registry = newRegistry(t)
+		conn = &slowAbortConn{abort: make(chan struct{})}
+		register(t, registry, obsGrant("tenant-a", "cred-1", 5), conn)
+		report := mustApply(t, registry, rotation("op-1", "tenant-a", "cred-1", 10))
+		if !conn.returned.Load() {
+			t.Fatal("Apply returned before the transport Close")
+		}
+		if got, want := report.MaxLatency, DefaultBudget*3/4+50*time.Millisecond; got != want {
+			t.Fatalf("MaxLatency = %v, want %v including the transport drain", got, want)
+		}
 	})
 }

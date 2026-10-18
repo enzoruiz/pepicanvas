@@ -495,3 +495,38 @@ func TestConcurrentCutsInTwoTenants(t *testing.T) {
 		}
 	})
 }
+
+// TestEveryCutTypeStaysInsideItsTenant applies each cut type in one tenant
+// while the other tenant holds grants with the same identifiers.
+func TestEveryCutTypeStaysInsideItsTenant(t *testing.T) {
+	cuts := []func(tenant string) Cut{
+		func(tenant string) Cut { return accountRevocation("op-1", tenant, "acct-1", 10) },
+		func(tenant string) Cut { return sessionRevocation("op-1", tenant, "sess-1", 10) },
+		func(tenant string) Cut { return rotation("op-1", tenant, "cred-1", 10) },
+		func(tenant string) Cut { return deactivation("op-1", tenant, 10) },
+	}
+	for _, cutIn := range cuts {
+		for _, cutTenant := range []string{"tenant-a", "tenant-b"} {
+			registry := newRegistry(t)
+			other := map[string]string{"tenant-a": "tenant-b", "tenant-b": "tenant-a"}[cutTenant]
+			editor, obs := newConn(0), newConn(0)
+			editorLease := register(t, registry, editorGrant(other, "acct-1", "sess-1", 5), editor)
+			obsLease := register(t, registry, obsGrant(other, "cred-1", 5), obs)
+
+			cut := cutIn(cutTenant)
+			if report := mustApply(t, registry, cut); len(report.Closures) != 0 {
+				t.Fatalf("%s in %s closed %d connections of %s", cut.Type, cutTenant, len(report.Closures), other)
+			}
+			for _, conn := range []*fakeConn{editor, obs} {
+				if _, closes, _ := conn.state(); closes != 0 {
+					t.Fatalf("%s in %s closed a connection of %s", cut.Type, cutTenant, other)
+				}
+			}
+			if editorLease.Err() != nil || obsLease.Err() != nil {
+				t.Fatalf("%s in %s ended a lease of %s", cut.Type, cutTenant, other)
+			}
+			register(t, registry, editorGrant(other, "acct-1", "sess-1", 5), newConn(0))
+			register(t, registry, obsGrant(other, "cred-1", 5), newConn(0))
+		}
+	}
+}

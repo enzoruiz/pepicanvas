@@ -37,7 +37,8 @@ type Conn interface {
 	// Close sends reason and closes gracefully. It must return once ctx ends.
 	Close(ctx context.Context, reason Reason) error
 	// Abort terminates the connection at once. It may run concurrently with
-	// Close and must make a pending Close return.
+	// Close and must make a pending Close return promptly: the registry
+	// waits for both, so a hung Abort or Close blocks the cut or shutdown.
 	Abort()
 }
 
@@ -158,7 +159,8 @@ func (r *Registry) Register(grant Grant, conn Conn) (*Lease, error) {
 // ErrBudgetExceeded with the full report when any close ran over. A retry
 // with the same operation ID and cut returns the same answer without a
 // second cut, waiting for it if it is still closing; a retry whose ctx ends
-// first returns ctx's error while the cut completes.
+// first returns ctx's error while the cut completes. After Close, every
+// call, retries included, returns ErrClosed.
 func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 	if err := cut.validate(); err != nil {
 		return Report{}, err
@@ -327,26 +329,33 @@ func (r *Registry) closeAll(ctx context.Context, leases []*Lease, reason Reason,
 
 // closeOne closes gracefully within three quarters of the budget measured
 // from start, then aborts; it aborts at once when Close runs out of time.
+// It always waits for the transport Close to return, so no goroutine
+// outlives the cut or the shutdown.
 func (r *Registry) closeOne(lease *Lease, reason Reason, start time.Time) Closure {
 	graceful := r.config.Budget - r.config.Budget/4 - r.config.Now().Sub(start)
 	ctx, cancel := context.WithTimeout(context.Background(), graceful)
 	defer cancel()
 	closed := make(chan error, 1)
 	go func() { closed <- lease.conn.Close(ctx, reason) }()
-	aborted := false
 	select {
 	case err := <-closed:
-		if err != nil {
-			lease.conn.Abort()
-			aborted = true
+		if err == nil {
+			return r.closure(lease, start, false)
 		}
+		lease.conn.Abort()
 	case <-ctx.Done():
 		lease.conn.Abort()
-		aborted = true
+		<-closed
 	case <-r.abort.Done():
+		cancel()
 		lease.conn.Abort()
-		aborted = true
+		<-closed
 	}
+	return r.closure(lease, start, true)
+}
+
+// closure measures one close once its transport Close has returned.
+func (r *Registry) closure(lease *Lease, start time.Time, aborted bool) Closure {
 	latency := r.config.Now().Sub(start)
 	return Closure{
 		Client:   lease.grant.Client,
