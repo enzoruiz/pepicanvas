@@ -151,9 +151,10 @@ body:
     id: cross_cutting_controls
     attributes:
       label: Controles técnicos transversales
-      description: Consulte el contrato canónico en docs/stack.md. Escriba una línea por control aplicable con su ID y la evidencia esperada; use “No aplica” con justificación cuando corresponda.
+      description: Consulte el contrato canónico en docs/stack.md. Escriba una línea por control aplicable con su ID y la evidencia esperada; use “Diferido a TE-0XX” solo si el propietario sigue abierto al cerrar este issue, y “No aplica” con justificación cuando corresponda.
       placeholder: |
         CTRL-... — Evidencia esperada ...
+        CTRL-... — Diferido a TE-0XX: evidencia de la primitiva o de la parte propia ...
         No aplica — Justificación ...
     validations:
       required: true
