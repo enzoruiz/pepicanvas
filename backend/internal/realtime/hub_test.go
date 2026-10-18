@@ -44,6 +44,16 @@ func mustSubmit(t *testing.T, hub *Hub, command Command) Result {
 	return result
 }
 
+// submitAsync is mustSubmit for goroutines, where t.Fatal must not be called.
+func submitAsync(t *testing.T, hub *Hub, command Command) Result {
+	t.Helper()
+	result, err := hub.Submit(context.Background(), command)
+	if err != nil {
+		t.Errorf("Submit(%s) error = %v", command.OperationID, err)
+	}
+	return result
+}
+
 func mustEvents(t *testing.T, hub *Hub, key Key, after uint64) []Event {
 	t.Helper()
 	events, err := hub.Events(context.Background(), key, after)
@@ -103,7 +113,7 @@ func TestConcurrentCommandsLastAcceptedWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = mustSubmit(t, hub, setCommand(key, fmt.Sprintf("op-%d", i), "obj-1", fmt.Sprintf("v%d", i)))
+			results[i] = submitAsync(t, hub, setCommand(key, fmt.Sprintf("op-%d", i), "obj-1", fmt.Sprintf("v%d", i)))
 		}()
 	}
 	wg.Wait()
@@ -181,7 +191,7 @@ func TestTenantsWithSameCanvasIDAreIsolated(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := range 20 {
-				mustSubmit(t, hub, setCommand(key, fmt.Sprintf("op-%d", i), "obj-1", key.TenantID))
+				submitAsync(t, hub, setCommand(key, fmt.Sprintf("op-%d", i), "obj-1", key.TenantID))
 			}
 		}()
 	}

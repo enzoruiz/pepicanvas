@@ -56,3 +56,12 @@ func (s *State) Object(objectID string) (Object, bool) {
 func (s *State) Sequence() uint64 {
 	return s.sequence
 }
+
+// Objects returns a copy of every addressed object keyed by object ID.
+func (s *State) Objects() map[string]Object {
+	objects := make(map[string]Object, len(s.objects))
+	for id := range s.objects {
+		objects[id], _ = s.Object(id)
+	}
+	return objects
+}
