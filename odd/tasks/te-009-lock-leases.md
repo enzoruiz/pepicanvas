@@ -28,8 +28,8 @@ Scope: stdlib-only core in `backend/internal/locking` (roadmap stage 2, rule 1: 
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| T1 | S1–S6 | inline, test-first | done | see L3 |
-| T2 | S7 | inline, test-first | pending | |
+| T1 | S1–S6 | inline, test-first | done | `94cac41` |
+| T2 | S7 | inline, test-first | done | see L4 |
 | T3 | S8, S9 | inline, test-first | pending | |
 | T4 | all | docs, independent verify, RDD assess | pending | |
 
@@ -38,3 +38,5 @@ Scope: stdlib-only core in `backend/internal/locking` (roadmap stage 2, rule 1: 
 - **L1** (user, 2026-10-18): "empieza el desarrollo del issue 11 en su respectivo worktree"
 - **L2** (scope from roadmap): stage 2 marks TE-009 "Paralelo seguro" beside US-001 and TE-008; rule 1 gives US-001 the stage's `go.mod` change, so TE-009 stays stdlib-only. Control owners per rule 2: IDEM owner TE-007 is closed (prove complete); WEB TE-014, TRACE TE-015, READY/SHUTDOWN TE-016 are open (defer, with primitives where this slice can build them).
 - **L3** (T1 evidence): RED `go test -race ./internal/locking` failed to build (`no non-test Go files`). GREEN `ok .../internal/locking 1.009s`; `-count=20` passed; full `go test -race ./...` passed. Mutation: expiring at `now.After(deadline)` instead of `!now.Before(deadline)` failed the exact-expiry, deadline-heartbeat, and independence tests. Decisions: a session is bound to its connection context with `context.AfterFunc`, so disconnect and a TE-002 cut release every lease before the cut returns (proven with a real `revocation.Registry`); leases compare by session pointer, so a reconnection with the same IDs never touches old leases; expiry is both a timer and a lazy check at every access, so it is exact even before the timer runs; the authorizer runs outside the manager lock before every acquire and for every lease on heartbeat, and any error ends the lease as `unauthorized`; a heartbeat renews every held lease (connection-level) and reports leases lost since the previous one; release is never authorized (it only reduces access) and accepts only `finished` or `cancelled`; denied acquires name the holder.
+  Slice note: T1 is 943 lines (about 430 implementation, the rest tests and tracker), above the ~400 advisory, kept as one behavior unit.
+- **L4** (T2 evidence): RED build failure (`undefined: locking.ErrOperationConflict`, unknown `Config.Retention`). GREEN `ok .../internal/locking 1.010s`; `-count=20` passed; full `go vet ./...` and `go test -race ./...` passed. Mutation: skipping the fingerprint comparison failed the conflict and retention tests. Decisions: answers are retained per tenant and account, so a retry after reconnect finds them; the intent covers kind, canvas, object, and release reason, never the session or correlation; a retained acquire answer is the original response and does not mean the lease is still held (Heartbeat and Lookup tell that); denied acquires are retained like grants; authorizer errors, invalid requests, `ErrNotHolder`, and `ErrDetached` are not retained; lookup runs after authorization; defaults 10m and 4096; the heartbeat is excluded as ephemeral presence with no durable effect.

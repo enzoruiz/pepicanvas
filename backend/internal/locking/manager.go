@@ -39,6 +39,9 @@ type Config struct {
 	// TTL is the lease lifetime after the last accepted heartbeat. It
 	// defaults to DefaultTTL.
 	TTL time.Duration
+	// Retention bounds the acquire and release answers kept per account for
+	// deduplication.
+	Retention Retention
 	// Clock defaults to the system clock.
 	Clock Clock
 }
@@ -47,8 +50,9 @@ type Config struct {
 type Manager struct {
 	config Config
 
-	mu     sync.Mutex
-	leases map[Key]*entry
+	mu         sync.Mutex
+	leases     map[Key]*entry
+	operations map[scope]*operations
 }
 
 type entry struct {
@@ -62,16 +66,22 @@ func NewManager(config Config) (*Manager, error) {
 	if config.Authorize == nil {
 		return nil, fmt.Errorf("%w: authorizer is required", ErrInvalidConfig)
 	}
-	if config.TTL < 0 {
-		return nil, fmt.Errorf("%w: negative ttl", ErrInvalidConfig)
+	if config.TTL < 0 || config.Retention.TTL < 0 || config.Retention.MaxOperations < 0 {
+		return nil, fmt.Errorf("%w: negative ttl or retention", ErrInvalidConfig)
 	}
 	if config.TTL == 0 {
 		config.TTL = DefaultTTL
 	}
+	if config.Retention.TTL == 0 {
+		config.Retention.TTL = DefaultRetentionTTL
+	}
+	if config.Retention.MaxOperations == 0 {
+		config.Retention.MaxOperations = DefaultRetentionMaxOperations
+	}
 	if config.Clock == nil {
 		config.Clock = systemClock{}
 	}
-	return &Manager{config: config, leases: map[Key]*entry{}}, nil
+	return &Manager{config: config, leases: map[Key]*entry{}, operations: map[scope]*operations{}}, nil
 }
 
 // Session is one connection's view of the manager. Every lease it acquires
@@ -114,7 +124,10 @@ func (m *Manager) Lookup(key Key) (Lease, bool) {
 
 // Acquire grants the lease on the requested object when it is free or
 // already held by this session, renewing it in the latter case. A lease
-// held by another session is denied and the answer names its holder.
+// held by another session is denied and the answer names its holder. A
+// retry with the same operation ID, from this or a later session of the
+// same account, returns the retained answer without a new effect; it does
+// not mean the lease is still held, which only Heartbeat and Lookup tell.
 func (s *Session) Acquire(ctx context.Context, request Request) (Result, error) {
 	if err := request.validate(); err != nil {
 		return Result{}, err
@@ -134,6 +147,9 @@ func (s *Session) Acquire(ctx context.Context, request Request) (Result, error) 
 		return Result{}, ErrDetached
 	}
 	now := m.config.Clock.Now()
+	if answer, ok, err := m.lookupLocked(s.scope(), kindAcquire, request, now); ok || err != nil {
+		return answer, err
+	}
 	result := Result{OperationID: request.OperationID, Outcome: OutcomeGranted}
 	switch e := m.liveLocked(key, now); {
 	case e == nil:
@@ -150,6 +166,7 @@ func (s *Session) Acquire(ctx context.Context, request Request) (Result, error) 
 		result.Outcome = OutcomeDenied
 		result.Lease = e.lease
 	}
+	m.rememberLocked(s.scope(), kindAcquire, request, result, now)
 	return result, nil
 }
 
@@ -204,7 +221,8 @@ func (s *Session) Heartbeat(ctx context.Context) (Renewal, error) {
 	return renewal, nil
 }
 
-// Release ends a lease the session holds, freeing it at once.
+// Release ends a lease the session holds, freeing it at once. A retry with
+// the same operation ID returns the retained answer without a new effect.
 func (s *Session) Release(ctx context.Context, request Request) (Result, error) {
 	if err := request.validateRelease(); err != nil {
 		return Result{}, err
@@ -215,12 +233,18 @@ func (s *Session) Release(ctx context.Context, request Request) (Result, error) 
 	if s.detached {
 		return Result{}, ErrDetached
 	}
-	e := m.liveLocked(s.key(request), m.config.Clock.Now())
+	now := m.config.Clock.Now()
+	if answer, ok, err := m.lookupLocked(s.scope(), kindRelease, request, now); ok || err != nil {
+		return answer, err
+	}
+	e := m.liveLocked(s.key(request), now)
 	if e == nil || e.session != s {
 		return Result{}, ErrNotHolder
 	}
 	m.removeLocked(e)
-	return Result{OperationID: request.OperationID, Outcome: OutcomeReleased, Reason: request.Reason, Lease: e.lease}, nil
+	result := Result{OperationID: request.OperationID, Outcome: OutcomeReleased, Reason: request.Reason, Lease: e.lease}
+	m.rememberLocked(s.scope(), kindRelease, request, result, now)
+	return result, nil
 }
 
 // Detach releases every lease of the session and rejects further work. The
@@ -248,6 +272,10 @@ func (s *Session) alive() error {
 		return ErrDetached
 	}
 	return nil
+}
+
+func (s *Session) scope() scope {
+	return scope{tenantID: s.holder.TenantID, accountID: s.holder.AccountID}
 }
 
 func (s *Session) key(request Request) Key {
