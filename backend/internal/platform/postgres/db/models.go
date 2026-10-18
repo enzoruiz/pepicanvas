@@ -64,6 +64,11 @@ type Membership struct {
 	Role      string
 }
 
+type Operator struct {
+	AccountID string
+	GrantedAt pgtype.Timestamptz
+}
+
 type Session struct {
 	TokenHash  []byte
 	AccountID  string
@@ -71,7 +76,21 @@ type Session struct {
 	LastSeenAt pgtype.Timestamptz
 }
 
+type SubscriptionActivation struct {
+	OperationID       string
+	Fingerprint       []byte
+	OperatorAccountID string
+	AccountID         string
+	TenantID          string
+	CanvasID          string
+	Created           bool
+	CorrelationID     pgtype.Text
+	AcceptedAt        pgtype.Timestamptz
+}
+
 type Tenant struct {
 	TenantID           string
 	SubscriptionStatus string
+	OwnerAccountID     pgtype.Text
+	CanvasID           pgtype.Text
 }
