@@ -6,7 +6,7 @@ Este documento fija las tecnologías del MVP piloto y el motivo de cada elecció
 
 | Capa | Elección |
 |---|---|
-| Backend | Go (última versión estable, mínimo 1.25) con biblioteca estándar, **sin framework** |
+| Backend | Go (última versión estable, mínimo 1.26) con biblioteca estándar, **sin framework** |
 | Frontend | TypeScript + React + Vite (SPA), **sin framework de servidor** |
 | Base de datos | PostgreSQL |
 | Archivos | Almacenamiento compatible con S3 (MinIO en local) |
@@ -39,7 +39,7 @@ Este documento fija las tecnologías del MVP piloto y el motivo de cada elecció
 | HTTP y enrutamiento | `net/http` (stdlib) | Suficiente desde Go 1.22 |
 | WebSocket | `github.com/coder/websocket` | Mantenida, integra `context.Context` para cancelar y cerrar conexiones en ≤2 s (TE-002) |
 | Driver de PostgreSQL | `github.com/jackc/pgx/v5` | Driver nativo, transacciones y pool |
-| Consultas SQL | `sqlc` (generador) | SQL explícito con tipos generados; sin ORM, para controlar transacciones y bloqueos de fila (TE-004, TE-006) |
+| Consultas SQL | `sqlc` (generador, imagen fijada por digest en `scripts/sqlc.sh`) | SQL explícito con tipos generados; sin ORM, para controlar transacciones y bloqueos de fila (TE-004, TE-006) |
 | Migraciones | `github.com/pressly/goose/v3` | Migraciones SQL versionadas, ejecutables desde el binario |
 | Contraseñas | `golang.org/x/crypto/argon2` (argon2id) | Hash de contraseñas recomendado por OWASP (US-001) |
 | Almacenamiento de archivos | `github.com/minio/minio-go/v7` | Cliente S3 liviano, compatible con MinIO, S3 y R2 |
@@ -55,6 +55,7 @@ Este documento fija las tecnologías del MVP piloto y el motivo de cada elecció
 - **Cuota en bytes enteros.** Se guarda como `BIGINT` en bytes y se reserva en transacción. Así la contabilidad es exacta, sin flotantes (TE-006).
 - **Los medios se sirven a través del backend.** No se exponen URLs firmadas del almacenamiento. Las respuestas privadas usan `Cache-Control: no-store` y `Referrer-Policy: no-referrer` (TE-003).
 - **Primitivas de redacción (TE-003).** Los secretos viajan como `secret.Value`, que se redacta en toda salida de formato, texto, JSON y `slog`. Los tokens generados llevan prefijo por tipo (`pci_`, `pcs_`, `pco_`) para que `secret.Scrub` los redacte también en texto libre; `Scrub` elimina además credenciales, query y fragmento de las URLs. El handler de `logging` aplica esa limpieza a mensajes y atributos, redacta por completo las claves sensibles y agrega `correlation_id` desde el contexto (`platform/correlation`, 32 caracteres hexadecimales). `platform/httpx` aporta `Private`, que reimpone las cabeceras privadas al escribir la respuesta, `Correlate`, `Responder.Error`, con un vocabulario cerrado de errores que nunca refleja el error interno, y `Recover`. Un string sin prefijo bajo una clave no sensible no es detectable, por lo que todo secreto debe tiparse como `secret.Value`.
+- **Persistencia atómica del canvas (TE-004).** Cada mutación de dimensiones, contenido, transformación, orden o eliminación corre en una única transacción que primero bloquea la fila del canvas (`SELECT ... FOR UPDATE`). Así las mutaciones de un canvas se confirman de a una, con una revisión sin huecos y un orden z único que sigue el orden de confirmación. La eliminación borra la fila, sin papelera ni estado recuperable. Cada mutación aceptada guarda en la misma transacción su identificador de operación, una huella SHA-256 de la mutación (sin la correlación) y su resultado. Un reintento equivalente devuelve ese resultado sin repetir el efecto, un identificador reutilizado con otra mutación se rechaza y la retención por defecto es de 10 minutos. Las migraciones viven en `backend/migrations` y se embeben en el binario.
 - **Inspección de medios.** `ffprobe` determina el tipo real, los códecs, la duración y la resolución. `ffmpeg -f null` decodifica el archivo completo, incluidos todos los fotogramas de un GIF, antes de aceptarlo (TE-005). Corre como subproceso con límite de tiempo.
 
 ### Estructura (screaming + hexagonal)
@@ -126,7 +127,7 @@ No se usa una biblioteca de estado de servidor (TanStack Query), porque casi tod
 
 - **Docker Compose** para PostgreSQL y MinIO en local.
 - **Un solo binario de Go** en producción, que sirve la API, el WebSocket y los archivos estáticos del frontend.
-- **GitHub Actions** para CI: `golangci-lint`, `go test -race`, `sqlc diff`, ESLint, `prettier --check`, Vitest y Playwright.
+- **GitHub Actions** para CI: `golangci-lint`, `go test -race`, `sqlc diff` (`scripts/sqlc.sh diff`), ESLint, `prettier --check`, Vitest y Playwright.
 
 ## Pruebas
 
@@ -134,7 +135,7 @@ No se usa una biblioteca de estado de servidor (TanStack Query), porque casi tod
 |---|---|---|
 | Dominio Go | `testing` + pruebas en tabla + `-race` | Matriz de autorización con dos tenants por caso (TE-001), orden y deduplicación |
 | Tiempo | `testing/synctest` | Heartbeat de 5 s y cierres en ≤2 s sin esperas reales |
-| Integración Go | `testcontainers-go` | PostgreSQL y MinIO reales, atomicidad tras reinicio (TE-004) |
+| Integración Go | `testcontainers-go` | PostgreSQL y MinIO reales, atomicidad tras reinicio (TE-004). Sin Docker las pruebas se omiten; con `PEPICANVAS_REQUIRE_POSTGRES=1`, como en CI, fallan |
 | Frontend | Vitest | Lógica del almacén y del renderizador |
 | E2E | Playwright (canales `chrome` y `msedge`) | Matriz de navegadores soportados (TE-011) |
 | OBS | Procedimiento propio | Playwright no puede automatizar OBS; se definirá en TE-011 |
