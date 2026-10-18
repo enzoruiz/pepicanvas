@@ -62,6 +62,9 @@ func (h handler) WithGroup(name string) slog.Handler {
 
 func scrubAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
+	if sensitiveKey(a.Key) {
+		return slog.String(a.Key, redacted)
+	}
 	if v.Kind() == slog.KindGroup {
 		group := v.Group()
 		scrubbed := make([]any, len(group))
@@ -69,9 +72,6 @@ func scrubAttr(a slog.Attr) slog.Attr {
 			scrubbed[i] = scrubAttr(member)
 		}
 		return slog.Group(a.Key, scrubbed...)
-	}
-	if sensitiveKey(a.Key) {
-		return slog.String(a.Key, redacted)
 	}
 	switch v.Kind() {
 	case slog.KindString:

@@ -53,6 +53,18 @@ func (w *privateWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// FlushError commits the private headers before flushing, so
+// http.ResponseController cannot send a handler's weaker headers first.
+func (w *privateWriter) FlushError() error {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Flush implements http.Flusher with the same header guarantee.
+func (w *privateWriter) Flush() { _ = w.FlushError() }
+
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *privateWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 

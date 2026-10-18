@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -117,5 +118,22 @@ func TestHandlerRespectsInnerLevel(t *testing.T) {
 	logger.Info("hidden")
 	if out.Len() != 0 {
 		t.Fatalf("info record emitted below inner level: %s", out.String())
+	}
+}
+
+func TestHandlerRedactsSensitiveGroupsAndEncodedURLs(t *testing.T) {
+	var out bytes.Buffer
+	logger := slog.New(logging.NewHandler(slog.NewJSONHandler(&out, nil)))
+	logger.Info("m",
+		slog.Group("credentials", slog.String("value", "decoygroupvalue")),
+		"next", url.QueryEscape("https://b.invalid/a.png?X-Amz-Signature=decoyencodedsig"),
+	)
+	for _, leak := range []string{"decoygroupvalue", "decoyencodedsig"} {
+		if strings.Contains(out.String(), leak) {
+			t.Errorf("leaked %q: %s", leak, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), `"credentials":"[REDACTED]"`) {
+		t.Errorf("sensitive group not redacted as a whole: %s", out.String())
 	}
 }

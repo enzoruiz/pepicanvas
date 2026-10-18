@@ -180,3 +180,37 @@ func TestRecoverRepanicsAbortHandler(t *testing.T) {
 	}()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 }
+
+func TestPrivateSurvivesResponseControllerFlush(t *testing.T) {
+	srv := httptest.NewServer(httpx.Private(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Del("Referrer-Policy")
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush: %v", err)
+		}
+		_, _ = w.Write([]byte("private"))
+	})))
+	defer srv.Close()
+	res, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	assertPrivateHeaders(t, res.Header)
+}
+
+func TestPrivateWriterSupportsFlusher(t *testing.T) {
+	rec := httptest.NewRecorder()
+	httpx.Private(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("private writer does not implement http.Flusher")
+		}
+		w.Header().Set("Cache-Control", "public")
+		f.Flush()
+	})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assertPrivateHeaders(t, rec.Result().Header)
+	if !rec.Flushed {
+		t.Fatal("flush did not reach the underlying writer")
+	}
+}

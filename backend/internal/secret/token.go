@@ -42,6 +42,9 @@ var (
 	absoluteURLPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
 	relativeURLPattern = regexp.MustCompile(`(^|[\s("'=])(/[^\s?#"'<>]*)([?#][^\s"'<>]*)`)
 	userinfoPattern    = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?#]*@`)
+	encodedURLPattern  = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*%3A%2F%2F[^\s"'<>]+`)
+	encodedUserinfo    = regexp.MustCompile(`(?i)^([a-z][a-z0-9+.-]*%3A%2F%2F)(?:[^%]|%[0-9a-f]{2})*?%40`)
+	encodedCut         = regexp.MustCompile(`(?i)%3F|%23`)
 )
 
 // Scrub removes secret material from free text: generated tokens, URL
@@ -54,6 +57,15 @@ func Scrub(s string) string {
 	s = absoluteURLPattern.ReplaceAllStringFunc(s, func(u string) string {
 		u = userinfoPattern.ReplaceAllString(u, "${1}[REDACTED]@")
 		return cutQueryAndFragment(u)
+	})
+	s = encodedURLPattern.ReplaceAllStringFunc(s, func(u string) string {
+		if m := encodedUserinfo.FindStringSubmatch(u); m != nil && !strings.Contains(strings.ToUpper(m[0][len(m[1]):]), "%2F") {
+			u = m[1] + "[REDACTED]%40" + u[len(m[0]):]
+		}
+		if loc := encodedCut.FindStringIndex(u); loc != nil {
+			return u[:loc[1]] + "[REDACTED]"
+		}
+		return u
 	})
 	return relativeURLPattern.ReplaceAllStringFunc(s, func(m string) string {
 		parts := relativeURLPattern.FindStringSubmatch(m)

@@ -87,3 +87,19 @@ func TestScrubLeavesOrdinaryTextUnchanged(t *testing.T) {
 		t.Fatalf("Scrub changed ordinary text: %q", got)
 	}
 }
+
+func TestScrubCutsPercentEncodedURLQueries(t *testing.T) {
+	in := "next=https%3A%2F%2Fb.invalid%2Fa.png%3FX-Amz-Signature%3Ddecoyenc&x=1 done"
+	want := "next=https%3A%2F%2Fb.invalid%2Fa.png%3F[REDACTED] done"
+	if got := secret.Scrub(in); got != want {
+		t.Fatalf("Scrub(%q) = %q, want %q", in, got, want)
+	}
+}
+
+func TestScrubRedactsPercentEncodedUserinfo(t *testing.T) {
+	in := "next=https%3A%2F%2Fuser%3Adecoypass%40minio.local%2Fobj done"
+	want := "next=https%3A%2F%2F[REDACTED]%40minio.local%2Fobj done"
+	if got := secret.Scrub(in); got != want {
+		t.Fatalf("Scrub(%q) = %q, want %q", in, got, want)
+	}
+}
