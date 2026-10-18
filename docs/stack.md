@@ -54,6 +54,7 @@ Este documento fija las tecnologías del MVP piloto y el motivo de cada elecció
 - **Reloj inyectable.** Los bloqueos con heartbeat de 5 s (TE-009) y los plazos de cierre de 2 s dependen de una interfaz de reloj. Se prueban con `testing/synctest`.
 - **Cuota en bytes enteros.** Se guarda como `BIGINT` en bytes y se reserva en transacción. Así la contabilidad es exacta, sin flotantes (TE-006).
 - **Los medios se sirven a través del backend.** No se exponen URLs firmadas del almacenamiento. Las respuestas privadas usan `Cache-Control: no-store` y `Referrer-Policy: no-referrer` (TE-003).
+- **Primitivas de redacción (TE-003).** Los secretos viajan como `secret.Value`, que se redacta en toda salida de formato, texto, JSON y `slog`. Los tokens generados llevan prefijo por tipo (`pci_`, `pcs_`, `pco_`) para que `secret.Scrub` los redacte también en texto libre; `Scrub` elimina además credenciales, query y fragmento de las URLs. El handler de `logging` aplica esa limpieza a mensajes y atributos, redacta por completo las claves sensibles y agrega `correlation_id` desde el contexto (`platform/correlation`, 32 caracteres hexadecimales). `platform/httpx` aporta `Private`, que reimpone las cabeceras privadas al escribir la respuesta, `Correlate`, `Responder.Error`, con un vocabulario cerrado de errores que nunca refleja el error interno, y `Recover`. Un string sin prefijo bajo una clave no sensible no es detectable, por lo que todo secreto debe tiparse como `secret.Value`.
 - **Inspección de medios.** `ffprobe` determina el tipo real, los códecs, la duración y la resolución. `ffmpeg -f null` decodifica el archivo completo, incluidos todos los fotogramas de un GIF, antes de aceptarlo (TE-005). Corre como subproceso con límite de tiempo.
 
 ### Estructura (screaming + hexagonal)
@@ -86,6 +87,8 @@ Cada módulo de dominio expone puertos (interfaces) y no importa `platform`. Los
 
 - **Editor** (`/editor`): lo usan streamers y moderadores.
 - **Overlay de OBS** (`/overlay`): página mínima con fondo transparente para la fuente de navegador. No carga lógica de edición.
+
+Ambos documentos declaran `<meta name="referrer" content="no-referrer">` e instalan `installWindowRestoreGuard()`: al salir hacia la caché de ida y vuelta (`pagehide` con `persisted`) ocultan el documento, y al restaurarse (`pageshow` con `persisted`) recargan para que el servidor vuelva a decidir el acceso. `Cache-Control: no-store` no basta: Chrome restauró desde esa caché una página privada después de un corte de acceso en el servidor (TE-003).
 
 Ambos comparten un **renderizador de canvas basado en DOM** (elementos `img`, `video` y `audio` con transformaciones CSS). Usar DOM en vez de `<canvas>` permite reproducir video, GIF y audio de forma nativa, y garantiza que el editor y OBS muestren exactamente lo mismo (US-007).
 
@@ -135,6 +138,7 @@ No se usa una biblioteca de estado de servidor (TanStack Query), porque casi tod
 | Frontend | Vitest | Lógica del almacén y del renderizador |
 | E2E | Playwright (canales `chrome` y `msedge`) | Matriz de navegadores soportados (TE-011) |
 | OBS | Procedimiento propio | Playwright no puede automatizar OBS; se definirá en TE-011 |
+| Privacidad | Playwright + fixture Go de prueba (`npm run privacy:matrix`) | Por cada navegador de la matriz, señuelos nuevos; se escanean el log del fixture, la salida de Playwright y `test-results`, se exige `correlation_id` en cada registro de solicitud y se prueba que ningún señuelo anterior reaparece (TE-003) |
 
 ## Lo que no se usa y por qué
 

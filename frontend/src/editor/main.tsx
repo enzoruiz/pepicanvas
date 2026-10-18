@@ -2,7 +2,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { ClientSupportGuard } from "../client-support/ClientSupportGuard";
+import { installWindowRestoreGuard } from "../privacy/restoreGuard";
 import { EditorShell } from "./EditorShell";
+
+installWindowRestoreGuard();
 
 const editorRoot = document.querySelector("#editor-root");
 
