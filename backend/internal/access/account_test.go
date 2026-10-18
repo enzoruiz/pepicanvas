@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/access/accesstest"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 )
@@ -20,15 +21,15 @@ const (
 )
 
 type fixture struct {
-	store  *memoryStore
-	hasher *plainHasher
-	clock  *clock
+	store  *accesstest.MemoryStore
+	hasher *accesstest.PlainHasher
+	clock  *accesstest.Clock
 	svc    *access.Service
 }
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	f := fixture{store: newMemoryStore(), hasher: &plainHasher{}, clock: newClock()}
+	f := fixture{store: accesstest.NewMemoryStore(), hasher: &accesstest.PlainHasher{}, clock: accesstest.NewClock()}
 	svc, err := access.NewService(f.store, f.store, f.hasher, access.WithClock(f.clock.Now))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -99,7 +100,7 @@ func TestInvalidRegistrationIsRejectedWithoutEffect(t *testing.T) {
 			if !errors.Is(err, access.ErrInvalidRegistration) {
 				t.Fatalf("Register error = %v, want ErrInvalidRegistration", err)
 			}
-			if accounts, _ := f.store.counts(); accounts != 0 {
+			if accounts, _ := f.store.Counts(); accounts != 0 {
 				t.Fatalf("accounts = %d, want 0", accounts)
 			}
 		})
@@ -110,7 +111,7 @@ func TestRegistrationBoundariesAreAccepted(t *testing.T) {
 	f := newFixture(t)
 	f.register(t, strings.Repeat("o", 16), strings.Repeat("a", 242)+"@example.com", strings.Repeat("x", 12))
 	f.register(t, strings.Repeat("p", 128), "bob@example.com", strings.Repeat("y", 128))
-	if accounts, _ := f.store.counts(); accounts != 2 {
+	if accounts, _ := f.store.Counts(); accounts != 2 {
 		t.Fatalf("accounts = %d, want 2", accounts)
 	}
 }
@@ -125,7 +126,7 @@ func TestRegisteredIdentityDoesNotProduceASecondAccount(t *testing.T) {
 			t.Fatalf("Register(%q) error = %v, want ErrIdentityTaken", email, err)
 		}
 	}
-	if accounts, _ := f.store.counts(); accounts != 1 {
+	if accounts, _ := f.store.Counts(); accounts != 1 {
 		t.Fatalf("accounts = %d, want 1", accounts)
 	}
 	session, err := f.svc.SignIn(context.Background(), "alice@example.com", pw(password))
@@ -150,7 +151,7 @@ func TestInvalidCredentialsCreateNoSessionAndLookTheSame(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := f.hasher.verifications()
+			before := f.hasher.Verifications()
 			session, err := f.svc.SignIn(context.Background(), c.email, pw(c.password))
 			if !errors.Is(err, access.ErrInvalidCredentials) {
 				t.Fatalf("SignIn error = %v, want ErrInvalidCredentials", err)
@@ -161,10 +162,10 @@ func TestInvalidCredentialsCreateNoSessionAndLookTheSame(t *testing.T) {
 			if !session.Token.IsZero() {
 				t.Fatal("failed SignIn returned a token")
 			}
-			if _, sessions := f.store.counts(); sessions != 0 {
+			if _, sessions := f.store.Counts(); sessions != 0 {
 				t.Fatalf("sessions = %d, want 0", sessions)
 			}
-			if got := f.hasher.verifications() - before; got != 1 {
+			if got := f.hasher.Verifications() - before; got != 1 {
 				t.Fatalf("password verifications = %d, want exactly 1 for every failure path", got)
 			}
 		})
@@ -189,7 +190,7 @@ func TestSessionExpiresAfterIdleTimeout(t *testing.T) {
 	if _, err := f.svc.Authenticate(context.Background(), session.Token); !errors.Is(err, access.ErrSessionInvalid) {
 		t.Fatalf("idle session error = %v, want ErrSessionInvalid", err)
 	}
-	if _, sessions := f.store.counts(); sessions != 0 {
+	if _, sessions := f.store.Counts(); sessions != 0 {
 		t.Fatalf("expired session must be deleted, sessions = %d", sessions)
 	}
 }
@@ -298,7 +299,7 @@ func TestRegistrationRetryReplaysTheSameAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstCorrelation := f.store.correlations[opA]
+	firstCorrelation := f.store.Correlation(opA)
 	if firstCorrelation == "" {
 		t.Fatal("registration must retain the request correlation ID")
 	}
@@ -313,10 +314,10 @@ func TestRegistrationRetryReplaysTheSameAccount(t *testing.T) {
 	if again != first {
 		t.Fatalf("retry account = %q, want %q", again, first)
 	}
-	if accounts, _ := f.store.counts(); accounts != 1 {
+	if accounts, _ := f.store.Counts(); accounts != 1 {
 		t.Fatalf("accounts = %d, want 1", accounts)
 	}
-	if f.store.correlations[opA] != firstCorrelation {
+	if f.store.Correlation(opA) != firstCorrelation {
 		t.Fatal("retry must not overwrite the retained operation")
 	}
 }
@@ -334,7 +335,7 @@ func TestReusedOperationIDWithADifferentPayloadIsRejected(t *testing.T) {
 			t.Fatalf("%s: error = %v, want ErrOperationConflict", name, err)
 		}
 	}
-	if accounts, _ := f.store.counts(); accounts != 1 {
+	if accounts, _ := f.store.Counts(); accounts != 1 {
 		t.Fatalf("accounts = %d, want 1", accounts)
 	}
 	if _, ok, _ := f.store.AccountByEmail(context.Background(), "bob@example.com"); ok {
@@ -365,14 +366,14 @@ func TestRegistrationRetentionExpires(t *testing.T) {
 
 func TestFailedRegistrationLeavesNoTraceAndRetryAppliesOnce(t *testing.T) {
 	f := newFixture(t)
-	f.store.createErr = errors.New("connection reset before commit")
+	f.store.FailCreate(errors.New("connection reset before commit"))
 	if _, err := f.svc.Register(context.Background(), access.RegisterRequest{OperationID: opA, Email: "alice@example.com", Password: pw(password)}); err == nil {
 		t.Fatal("Register must surface the store failure")
 	}
-	if accounts, _ := f.store.counts(); accounts != 0 {
+	if accounts, _ := f.store.Counts(); accounts != 0 {
 		t.Fatalf("accounts = %d, want 0", accounts)
 	}
-	f.store.createErr = nil
+	f.store.FailCreate(nil)
 	first := f.register(t, opA, "alice@example.com", password)
 	second := f.register(t, opA, "alice@example.com", password)
 	if first != second {
@@ -397,7 +398,7 @@ func TestConcurrentDuplicateRegistrationsProduceOneAccount(t *testing.T) {
 			t.Fatalf("call %d: id %q err %v, want %q", i, ids[i], errs[i], ids[0])
 		}
 	}
-	if accounts, _ := f.store.counts(); accounts != 1 {
+	if accounts, _ := f.store.Counts(); accounts != 1 {
 		t.Fatalf("accounts = %d, want 1", accounts)
 	}
 }

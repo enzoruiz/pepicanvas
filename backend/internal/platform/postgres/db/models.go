@@ -8,6 +8,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Account struct {
+	AccountID    string
+	Email        string
+	PasswordHash string
+	CreatedAt    pgtype.Timestamptz
+}
+
+type AccountRegistration struct {
+	OperationID   string
+	EmailDigest   []byte
+	AccountID     string
+	CorrelationID pgtype.Text
+	AcceptedAt    pgtype.Timestamptz
+}
+
 type Canvas struct {
 	TenantID string
 	CanvasID string
@@ -41,4 +56,22 @@ type CanvasOperation struct {
 	Z             int64
 	CorrelationID pgtype.Text
 	AcceptedAt    pgtype.Timestamptz
+}
+
+type Membership struct {
+	TenantID  string
+	AccountID string
+	Role      string
+}
+
+type Session struct {
+	TokenHash  []byte
+	AccountID  string
+	CreatedAt  pgtype.Timestamptz
+	LastSeenAt pgtype.Timestamptz
+}
+
+type Tenant struct {
+	TenantID           string
+	SubscriptionStatus string
 }
