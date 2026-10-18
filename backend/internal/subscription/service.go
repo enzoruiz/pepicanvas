@@ -1,0 +1,174 @@
+package subscription
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+)
+
+// Service activates streamers and resolves each streamer's canvas.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// WithClock sets the time source used for operation retention.
+func WithClock(now func() time.Time) Option {
+	return func(s *Service) { s.now = now }
+}
+
+// NewService builds the service.
+func NewService(store Store, options ...Option) *Service {
+	s := &Service{store: store, now: time.Now}
+	for _, option := range options {
+		option(s)
+	}
+	return s
+}
+
+// Activate gives the account of request.Email exactly one active tenant and
+// one canvas. Activating an active account returns its existing tenant and
+// canvas; activating an inactive one enables them again. A retry under the
+// same operation ID returns the first answer while it is retained.
+func (s *Service) Activate(ctx context.Context, request ActivateRequest) (Activation, error) {
+	email, ok := access.NormalizeEmail(request.Email)
+	if !ok || !access.ValidOperationID(request.OperationID) {
+		return Activation{}, ErrInvalidActivation
+	}
+	fingerprint := sha256.Sum256([]byte(string(request.OperatorID) + "\x00" + email))
+
+	result, err := s.activate(ctx, request, email, fingerprint)
+	if errors.Is(err, ErrOperationRetained) {
+		// A concurrent activation committed the same operation ID first:
+		// replay it, or reject a different payload.
+		result, err = s.activate(ctx, request, email, fingerprint)
+		if errors.Is(err, ErrOperationRetained) {
+			return Activation{}, ErrOperationConflict
+		}
+	}
+	return result, err
+}
+
+func (s *Service) activate(ctx context.Context, request ActivateRequest, email string, fingerprint [32]byte) (Activation, error) {
+	tenantID, err := randomHex(16)
+	if err != nil {
+		return Activation{}, err
+	}
+	canvasID, err := randomHex(16)
+	if err != nil {
+		return Activation{}, err
+	}
+	now := s.now()
+	notBefore := now.Add(-ActivationRetention)
+
+	var result Activation
+	err = s.store.InTx(ctx, func(tx Tx) error {
+		// The grant stays locked until commit, so the decision still holds
+		// when the activation is confirmed.
+		operator, err := tx.IsOperator(ctx, request.OperatorID)
+		if err != nil {
+			return fmt.Errorf("subscription: read operator: %w", err)
+		}
+		if err := access.Check(access.OperatorRequest(operator, tenantID, access.ActionActivate)); err != nil {
+			return err
+		}
+
+		record, found, err := tx.Activation(ctx, request.OperationID, notBefore)
+		if err != nil {
+			return fmt.Errorf("subscription: find activation: %w", err)
+		}
+		if found {
+			if subtle.ConstantTimeCompare(record.Fingerprint[:], fingerprint[:]) != 1 {
+				return ErrOperationConflict
+			}
+			result = record.Result
+			return nil
+		}
+
+		account, found, err := tx.LockAccount(ctx, email)
+		if err != nil {
+			return fmt.Errorf("subscription: lock account: %w", err)
+		}
+		if !found {
+			return ErrAccountNotFound
+		}
+		tenant, found, err := tx.TenantOwnedBy(ctx, account)
+		if err != nil {
+			return fmt.Errorf("subscription: find tenant: %w", err)
+		}
+		created := !found
+		switch {
+		case created:
+			tenant = Tenant{ID: tenantID, Owner: account, CanvasID: canvasID, Status: access.SubscriptionActive}
+			if err := tx.CreateTenant(ctx, tenant); err != nil {
+				return fmt.Errorf("subscription: create tenant: %w", err)
+			}
+		case tenant.Status != access.SubscriptionActive:
+			if err := tx.ActivateTenant(ctx, tenant.ID); err != nil {
+				return fmt.Errorf("subscription: activate tenant: %w", err)
+			}
+		}
+		if err := access.Check(access.OperatorRequest(operator, tenant.ID, access.ActionActivate)); err != nil {
+			return err
+		}
+
+		result = Activation{AccountID: account, TenantID: tenant.ID, CanvasID: tenant.CanvasID, Created: created}
+		err = tx.RecordActivation(ctx, Record{
+			OperationID:   request.OperationID,
+			Fingerprint:   fingerprint,
+			Result:        result,
+			CorrelationID: request.CorrelationID,
+			AcceptedAt:    now,
+		}, notBefore)
+		if err != nil && !errors.Is(err, ErrOperationRetained) {
+			return fmt.Errorf("subscription: record activation: %w", err)
+		}
+		return err
+	})
+	if err != nil {
+		return Activation{}, err
+	}
+	return result, nil
+}
+
+// CanvasOf returns the canvas of the tenant the account owns. An account
+// without an active subscription gets the shared access denial.
+func (s *Service) CanvasOf(ctx context.Context, account access.AccountID) (canvas.Key, error) {
+	tenant, found, err := s.store.OwnedTenant(ctx, account)
+	if err != nil {
+		return canvas.Key{}, fmt.Errorf("subscription: find tenant: %w", err)
+	}
+	membership := access.Membership{TenantID: tenant.ID, Role: access.RoleOwner, Subscription: tenant.Status}
+	if err := access.Check(access.CanvasRequest(membership, found, tenant.ID, access.ActionView)); err != nil {
+		return canvas.Key{}, err
+	}
+	return canvas.Key{TenantID: tenant.ID, CanvasID: tenant.CanvasID}, nil
+}
+
+// IsOperator reports whether the account currently holds the operator role.
+func (s *Service) IsOperator(ctx context.Context, account access.AccountID) (bool, error) {
+	operator, err := s.store.IsOperator(ctx, account)
+	if err != nil {
+		return false, fmt.Errorf("subscription: read operator: %w", err)
+	}
+	return operator, nil
+}
+
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("subscription: read random bytes: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
