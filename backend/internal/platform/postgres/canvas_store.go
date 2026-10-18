@@ -123,7 +123,6 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		return canvas.Result{}, err
 	}
 	fingerprint := canvas.Fingerprint(mutation)
-	now := s.now()
 	var result canvas.Result
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := db.New(tx)
@@ -132,6 +131,8 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		} else if err != nil {
 			return err
 		}
+		// Read the clock after the lock wait, so retention starts at acceptance.
+		now := s.now()
 		replayed, found, err := retained(ctx, q, key, operation, fingerprint, now.Add(-s.retention))
 		if err != nil || found {
 			result = replayed

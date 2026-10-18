@@ -216,6 +216,25 @@ func TestReusedOperationIDWithADifferentMutationIsRejected(t *testing.T) {
 	}
 }
 
+func TestPointerMutationUnderAUsedOperationIDIsRejected(t *testing.T) {
+	store, pool := openStore(t, pgtest.Start(t))
+	mustCreate(t, store, tenantA)
+	operation := nextOperation(t)
+	mustApply(t, store, tenantA, operation, createText)
+	want := mustLoad(t, store, tenantA)
+
+	pointer := createText
+	if result, err := store.Apply(context.Background(), tenantA, operation, &pointer); !errors.Is(err, canvas.ErrInvalid) {
+		t.Fatalf("pointer mutation under a used operation ID = %+v, error = %v, want ErrInvalid", result, err)
+	}
+	if got := mustLoad(t, store, tenantA); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pointer mutation changed the canvas:\n got %+v\nwant %+v", got, want)
+	}
+	if rows := operationRows(t, pool, tenantA); rows != 1 {
+		t.Fatalf("pointer mutation retained %d operations, want 1", rows)
+	}
+}
+
 func TestRejectedMutationsAreNotRetained(t *testing.T) {
 	store, pool := openStore(t, pgtest.Start(t))
 	mustCreate(t, store, tenantA)
@@ -232,6 +251,56 @@ func TestRejectedMutationsAreNotRetained(t *testing.T) {
 	}
 	if result := mustApply(t, store, tenantA, operation, createText); result.Revision != 1 {
 		t.Fatalf("first accepted mutation under the rejected ID = %+v, want revision 1", result)
+	}
+}
+
+func TestAcceptedAtIsReadAfterTheCanvasLock(t *testing.T) {
+	start := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	locked := start.Add(time.Hour)
+	now := &clock{now: start}
+	store, pool := openStore(t, pgtest.Start(t), postgres.WithClock(now.Now))
+	mustCreate(t, store, tenantA)
+	ctx := context.Background()
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, "SELECT 1 FROM canvases WHERE tenant_id = $1 AND canvas_id = $2 FOR UPDATE", tenantA.TenantID, tenantA.CanvasID); err != nil {
+		t.Fatalf("lock canvas: %v", err)
+	}
+
+	operation := nextOperation(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.Apply(ctx, tenantA, operation, createText)
+		done <- err
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()").Scan(&waiting); err != nil {
+			t.Fatalf("count waiting sessions: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Apply never waited for the canvas lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	now.Set(locked)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release canvas lock: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Apply after the lock wait: %v", err)
+	}
+
+	var acceptedAt time.Time
+	if err := pool.QueryRow(ctx, "SELECT accepted_at FROM canvas_operations WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3", tenantA.TenantID, tenantA.CanvasID, operation.ID).Scan(&acceptedAt); err != nil || !acceptedAt.Equal(locked) {
+		t.Fatalf("accepted_at = %v (err %v), want the lock acquisition time %v", acceptedAt, err, locked)
 	}
 }
 

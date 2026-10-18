@@ -193,6 +193,13 @@ func Validate(key Key, operation Operation, mutation Mutation) error {
 	if mutation == nil {
 		return fmt.Errorf("%w: missing mutation", ErrInvalid)
 	}
+	// Only the value forms are mutations; a pointer could be nil, and its
+	// fingerprint would match the value form under a used operation ID.
+	switch mutation.(type) {
+	case SetDimensions, CreateObject, SetContent, SetTransform, DeleteObject:
+	default:
+		return fmt.Errorf("%w: unsupported mutation %T", ErrInvalid, mutation)
+	}
 	return mutation.validate()
 }
 

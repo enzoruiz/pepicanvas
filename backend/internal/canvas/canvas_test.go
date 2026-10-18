@@ -73,6 +73,17 @@ func TestValidateRejects(t *testing.T) {
 		"NaN rotation":          {key, operation, canvas.SetTransform{ObjectID: "obj-1", Transform: canvas.Transform{Width: 1, Height: 1, Rotation: math.NaN()}}},
 		"transform missing id":  {key, operation, canvas.SetTransform{Transform: transform}},
 		"delete missing id":     {key, operation, canvas.DeleteObject{}},
+
+		"nil dimensions pointer": {key, operation, (*canvas.SetDimensions)(nil)},
+		"nil create pointer":     {key, operation, (*canvas.CreateObject)(nil)},
+		"nil content pointer":    {key, operation, (*canvas.SetContent)(nil)},
+		"nil transform pointer":  {key, operation, (*canvas.SetTransform)(nil)},
+		"nil delete pointer":     {key, operation, (*canvas.DeleteObject)(nil)},
+		"dimensions pointer":     {key, operation, &canvas.SetDimensions{Dimensions: canvas.DefaultDimensions}},
+		"create pointer":         {key, operation, &canvas.CreateObject{Kind: canvas.KindText, Content: "x", Transform: transform}},
+		"content pointer":        {key, operation, &canvas.SetContent{ObjectID: "obj-1", Content: "x"}},
+		"transform pointer":      {key, operation, &canvas.SetTransform{ObjectID: "obj-1", Transform: transform}},
+		"delete pointer":         {key, operation, &canvas.DeleteObject{ObjectID: "obj-1"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
