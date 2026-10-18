@@ -219,6 +219,14 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrInternal, err)
 		return
 	}
+	// A successful sign-in replaces the session the browser presented, so an
+	// earlier session never outlives the cookie that carried it.
+	if presented := sessionToken(r); !presented.IsZero() {
+		if err := a.Accounts.SignOut(r.Context(), presented); err != nil {
+			a.responder.Error(w, r, httpx.ErrInternal, err)
+			return
+		}
+	}
 	principal, err := a.Accounts.Authenticate(r.Context(), session.Token)
 	if err != nil {
 		a.responder.Error(w, r, httpx.ErrInternal, err)

@@ -385,6 +385,28 @@ func TestSignOutRequiresTheSessionCSRFToken(t *testing.T) {
 	}
 }
 
+func TestSignInReplacesThePresentedSession(t *testing.T) {
+	e := newEnv(t, httpapi.DefaultLimits)
+	e.register("op-http-replace-01", "alice@example.com")
+	e.register("op-http-replace-02", "bob@example.com")
+	first := e.signIn("alice@example.com")
+
+	second := e.signIn("alice@example.com", withSession(first.token))
+	expectError(t, e.do(http.MethodGet, "/api/session", nil, withSession(first.token)), http.StatusUnauthorized, "unauthorized")
+	if res := e.do(http.MethodGet, "/api/session", nil, withSession(second.token)); res.StatusCode != http.StatusOK {
+		t.Fatalf("new session = %d", res.StatusCode)
+	}
+	// Signing in as another account also ends the presented session.
+	e.signIn("bob@example.com", withSession(second.token))
+	expectError(t, e.do(http.MethodGet, "/api/session", nil, withSession(second.token)), http.StatusUnauthorized, "unauthorized")
+	// A failed sign-in keeps the presented session.
+	third := e.signIn("alice@example.com")
+	expectError(t, e.do(http.MethodPost, "/api/sessions", credentials("alice@example.com", "wrong password!!"), withSession(third.token)), http.StatusUnauthorized, "unauthorized")
+	if res := e.do(http.MethodGet, "/api/session", nil, withSession(third.token)); res.StatusCode != http.StatusOK {
+		t.Fatal("a failed sign-in ended the presented session")
+	}
+}
+
 func TestOriginIsCheckedBeforeTheDomain(t *testing.T) {
 	e := newEnv(t, httpapi.DefaultLimits)
 	e.register("op-http-origin-001", "alice@example.com")

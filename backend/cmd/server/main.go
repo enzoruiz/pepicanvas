@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -133,6 +134,14 @@ func staticFiles(dir string) http.Handler {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/editor/", http.StatusFound)
 			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/") {
+			// Serve directory index pages only; never list a directory.
+			index := filepath.Join(dir, filepath.FromSlash(path.Clean(r.URL.Path)), "index.html")
+			if info, err := os.Stat(index); err != nil || !info.Mode().IsRegular() {
+				http.NotFound(w, r)
+				return
+			}
 		}
 		if strings.HasSuffix(r.URL.Path, "/") || path.Ext(r.URL.Path) == ".html" {
 			w.Header().Set("Cache-Control", "no-store")
