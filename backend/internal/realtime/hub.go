@@ -1,0 +1,195 @@
+package realtime
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+)
+
+var (
+	// ErrInvalidConfig reports a hub configuration that cannot fail closed.
+	ErrInvalidConfig = errors.New("realtime: invalid config")
+	// ErrClosed reports work submitted after the hub stopped accepting it.
+	ErrClosed = errors.New("realtime: hub closed")
+	// ErrResyncRequired reports a replay cursor older than the retained events.
+	ErrResyncRequired = errors.New("realtime: resync required")
+)
+
+// Authorizer re-evaluates current access immediately before acceptance.
+// A non-nil error rejects the command without ordering or retaining it.
+// It must return promptly once ctx ends, so Close can abort within its deadline.
+type Authorizer func(context.Context, Command) error
+
+// Defaults applied when a Config field is zero.
+const (
+	DefaultQueueSize = 64
+	DefaultLogSize   = 1024
+)
+
+// Config configures a Hub. Authorize is required.
+type Config struct {
+	Authorize Authorizer
+	// QueueSize bounds the pending commands per canvas.
+	QueueSize int
+	// LogSize bounds the accepted events retained per canvas for replay.
+	LogSize int
+	// Retention bounds the operation results kept per canvas for deduplication.
+	Retention Retention
+	// Now returns the current time; it defaults to time.Now.
+	Now func() time.Time
+}
+
+// Hub routes commands to one actor per canvas.
+type Hub struct {
+	config Config
+	// abort cancels in-flight work when Close runs out of time.
+	abort       context.Context
+	cancelAbort context.CancelFunc
+	// sending counts Submit calls between admission and enqueue, so Close
+	// can close the queues without racing a send.
+	sending sync.WaitGroup
+	actorWG sync.WaitGroup
+
+	mu     sync.Mutex
+	actors map[Key]*actor
+	closed bool
+}
+
+type request struct {
+	ctx     context.Context
+	command Command
+	reply   chan reply
+}
+
+type reply struct {
+	result Result
+	err    error
+}
+
+// NewHub validates the configuration and returns a running hub.
+func NewHub(config Config) (*Hub, error) {
+	if config.Authorize == nil {
+		return nil, errors.Join(ErrInvalidConfig, errors.New("authorizer is required"))
+	}
+	if config.QueueSize < 0 || config.LogSize < 0 || config.Retention.TTL < 0 || config.Retention.MaxOperations < 0 {
+		return nil, errors.Join(ErrInvalidConfig, errors.New("sizes must not be negative"))
+	}
+	if config.QueueSize == 0 {
+		config.QueueSize = DefaultQueueSize
+	}
+	if config.LogSize == 0 {
+		config.LogSize = DefaultLogSize
+	}
+	if config.Retention.TTL == 0 {
+		config.Retention.TTL = DefaultRetentionTTL
+	}
+	if config.Retention.MaxOperations == 0 {
+		config.Retention.MaxOperations = DefaultRetentionMaxOperations
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	abort, cancelAbort := context.WithCancel(context.Background())
+	return &Hub{config: config, abort: abort, cancelAbort: cancelAbort, actors: map[Key]*actor{}}, nil
+}
+
+// Submit validates, authorizes, orders, and applies one command. A caller
+// whose context ends after enqueueing may retry with the same operation ID.
+func (h *Hub) Submit(ctx context.Context, command Command) (Result, error) {
+	if err := command.validate(); err != nil {
+		return Result{}, err
+	}
+	command.Payload = clonePayload(command.Payload)
+	target, err := h.admit(command.Key)
+	if err != nil {
+		return Result{}, err
+	}
+	replies := make(chan reply, 1)
+	select {
+	case target.inbox <- request{ctx: ctx, command: command, reply: replies}:
+		h.sending.Done()
+	case <-ctx.Done():
+		h.sending.Done()
+		return Result{}, ctx.Err()
+	}
+	select {
+	case answer := <-replies:
+		return answer.result, answer.err
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+}
+
+// Events returns the retained accepted events after the given sequence.
+func (h *Hub) Events(_ context.Context, key Key, after uint64) ([]Event, error) {
+	h.mu.Lock()
+	target := h.actors[key]
+	h.mu.Unlock()
+	if target == nil {
+		return nil, nil
+	}
+	return target.events(after)
+}
+
+// Close stops accepting work, drains every queued command, and waits for the
+// actors to exit. If ctx ends first, in-flight work is cancelled, queued work
+// is answered with ErrClosed without being applied, and ctx's error is
+// returned once every actor has exited. Close is idempotent.
+func (h *Hub) Close(ctx context.Context) error {
+	h.mu.Lock()
+	first := !h.closed
+	h.closed = true
+	h.mu.Unlock()
+
+	if first {
+		go func() {
+			h.sending.Wait()
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			for _, target := range h.actors {
+				close(target.inbox)
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		h.sending.Wait()
+		h.actorWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		h.cancelAbort()
+		<-done
+		return ctx.Err()
+	}
+}
+
+// admit returns the actor for key and reserves one enqueue, or ErrClosed.
+func (h *Hub) admit(key Key) (*actor, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, ErrClosed
+	}
+	target, ok := h.actors[key]
+	if !ok {
+		target = &actor{
+			config: h.config,
+			inbox:  make(chan request, h.config.QueueSize),
+			state:  NewState(),
+			ops:    newOperations(h.config.Retention),
+		}
+		h.actors[key] = target
+		h.actorWG.Add(1)
+		go func() {
+			defer h.actorWG.Done()
+			target.run(h.abort)
+		}()
+	}
+	h.sending.Add(1)
+	return target, nil
+}
