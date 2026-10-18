@@ -11,6 +11,8 @@ Este documento fija el orden de trabajo de los issues abiertos del milestone «M
 
 El orden respeta las «Dependencias exactas» de cada issue y las dependencias prácticas de la sección siguiente.
 
+Cada issue lleva el label de su etapa, de `etapa:01` a `etapa:17`. Por ejemplo, la búsqueda `is:open label:etapa:04` lista la etapa 4.
+
 ## Etapas
 
 | Etapa | Camino crítico | Paralelo seguro | Paralelo con condición |
@@ -51,4 +53,4 @@ Estas restricciones no figuran en las «Dependencias exactas» de los issues, pe
 
 1. Dentro de una etapa, solo un issue agrega dependencias a `backend/go.mod` o a `frontend/package.json`.
 2. Al empezar un issue, revisá sus líneas de controles según las reglas 6 a 8 de `docs/stack.md`: un control cuyo propietario ya cerró se demuestra completo; si el propietario sigue abierto, se declara `Diferido a`.
-3. Si un issue cambia de etapa, actualizá esta tabla en el mismo cambio que lo justifica.
+3. Si un issue cambia de etapa, actualizá esta tabla en el mismo cambio que lo justifica y cambiá su label `etapa:NN`.
