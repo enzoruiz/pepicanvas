@@ -1,8 +1,10 @@
 /* global console, process, setTimeout */
 
-// Runs the US-001 end-to-end scenarios on every browser of the support
-// matrix against a disposable PostgreSQL container and the real Go server,
-// which serves the production frontend build.
+// Runs the US-001 and US-002 end-to-end scenarios on every browser of the
+// support matrix against a disposable PostgreSQL container and the real Go
+// server, which serves the production frontend build. The scenarios get the
+// database URL in PEPICANVAS_E2E_DATABASE_URL, which the server and the
+// host-side `server grant-operator` command share.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -122,11 +124,11 @@ async function main() {
   }
   if (failed.length > 0) {
     throw new Error(
-      `account and session scenarios failed on ${failed.join(", ")}`,
+      `account, session, and activation scenarios failed on ${failed.join(", ")}`,
     );
   }
   console.log(
-    `account and session scenarios passed on ${matrix.browsers.length} browsers`,
+    `account, session, and activation scenarios passed on ${matrix.browsers.length} browsers`,
   );
 }
 
