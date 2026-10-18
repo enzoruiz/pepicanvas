@@ -11,6 +11,36 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const allOutboxStats = `-- name: AllOutboxStats :one
+SELECT count(*) FILTER (WHERE settled_at IS NULL) AS pending,
+    (min(created_at) FILTER (WHERE settled_at IS NULL))::timestamptz AS oldest_pending,
+    count(*) FILTER (WHERE settled_at IS NULL AND attempts > 0) AS retrying,
+    (COALESCE(sum(attempts) FILTER (WHERE settled_at IS NULL), 0))::bigint AS pending_attempts,
+    count(*) FILTER (WHERE outcome = 'rejected') AS rejected
+FROM canvas_outbox
+`
+
+type AllOutboxStatsRow struct {
+	Pending         int64
+	OldestPending   pgtype.Timestamptz
+	Retrying        int64
+	PendingAttempts int64
+	Rejected        int64
+}
+
+func (q *Queries) AllOutboxStats(ctx context.Context) (AllOutboxStatsRow, error) {
+	row := q.db.QueryRow(ctx, allOutboxStats)
+	var i AllOutboxStatsRow
+	err := row.Scan(
+		&i.Pending,
+		&i.OldestPending,
+		&i.Retrying,
+		&i.PendingAttempts,
+		&i.Rejected,
+	)
+	return i, err
+}
+
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 INSERT INTO canvas_outbox (tenant_id, canvas_id, revision, operation_id, correlation_id, kind, mutation, object_id, z, created_at, next_attempt_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
@@ -45,8 +75,70 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 	return err
 }
 
+const listOutboxHeads = `-- name: ListOutboxHeads :many
+SELECT h.id, h.tenant_id, h.canvas_id, h.revision, h.correlation_id, h.kind, h.mutation, h.object_id, h.z, h.created_at, h.attempts, h.next_attempt_at, h.last_error
+FROM (
+    SELECT DISTINCT ON (tenant_id, canvas_id) id, tenant_id, canvas_id, revision, correlation_id, kind, mutation, object_id, z, created_at, attempts, next_attempt_at, last_error
+    FROM canvas_outbox
+    WHERE settled_at IS NULL
+    ORDER BY tenant_id, canvas_id, id
+) h
+ORDER BY h.next_attempt_at, h.id
+LIMIT $1
+`
+
+type ListOutboxHeadsRow struct {
+	ID            int64
+	TenantID      string
+	CanvasID      string
+	Revision      int64
+	CorrelationID pgtype.Text
+	Kind          string
+	Mutation      []byte
+	ObjectID      string
+	Z             int64
+	CreatedAt     pgtype.Timestamptz
+	Attempts      int32
+	NextAttemptAt pgtype.Timestamptz
+	LastError     pgtype.Text
+}
+
+func (q *Queries) ListOutboxHeads(ctx context.Context, maxRecords int32) ([]ListOutboxHeadsRow, error) {
+	rows, err := q.db.Query(ctx, listOutboxHeads, maxRecords)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOutboxHeadsRow
+	for rows.Next() {
+		var i ListOutboxHeadsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.CanvasID,
+			&i.Revision,
+			&i.CorrelationID,
+			&i.Kind,
+			&i.Mutation,
+			&i.ObjectID,
+			&i.Z,
+			&i.CreatedAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.LastError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingOutbox = `-- name: ListPendingOutbox :many
-SELECT id, tenant_id, canvas_id, revision, correlation_id, kind, mutation, object_id, z, created_at, attempts, next_attempt_at
+SELECT id, tenant_id, canvas_id, revision, correlation_id, kind, mutation, object_id, z, created_at, attempts, next_attempt_at, last_error
 FROM canvas_outbox
 WHERE tenant_id = $1 AND canvas_id = $2 AND settled_at IS NULL
 ORDER BY id
@@ -72,6 +164,7 @@ type ListPendingOutboxRow struct {
 	CreatedAt     pgtype.Timestamptz
 	Attempts      int32
 	NextAttemptAt pgtype.Timestamptz
+	LastError     pgtype.Text
 }
 
 func (q *Queries) ListPendingOutbox(ctx context.Context, arg ListPendingOutboxParams) ([]ListPendingOutboxRow, error) {
@@ -96,6 +189,7 @@ func (q *Queries) ListPendingOutbox(ctx context.Context, arg ListPendingOutboxPa
 			&i.CreatedAt,
 			&i.Attempts,
 			&i.NextAttemptAt,
+			&i.LastError,
 		); err != nil {
 			return nil, err
 		}
@@ -105,4 +199,112 @@ func (q *Queries) ListPendingOutbox(ctx context.Context, arg ListPendingOutboxPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeSettledOutbox = `-- name: PurgeSettledOutbox :execrows
+DELETE FROM canvas_outbox
+WHERE id IN (
+    SELECT s.id FROM canvas_outbox s
+    WHERE s.settled_at IS NOT NULL AND s.settled_at <= $1
+    ORDER BY s.settled_at, s.id
+    LIMIT $2
+)
+`
+
+type PurgeSettledOutboxParams struct {
+	Cutoff     pgtype.Timestamptz
+	MaxRecords int32
+}
+
+func (q *Queries) PurgeSettledOutbox(ctx context.Context, arg PurgeSettledOutboxParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeSettledOutbox, arg.Cutoff, arg.MaxRecords)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const retryOutbox = `-- name: RetryOutbox :execrows
+UPDATE canvas_outbox
+SET attempts = $1, next_attempt_at = $2,
+    last_error = NULLIF($3::text, '')
+WHERE id = $4 AND settled_at IS NULL
+`
+
+type RetryOutboxParams struct {
+	Attempts      int32
+	NextAttemptAt pgtype.Timestamptz
+	Reason        string
+	ID            int64
+}
+
+func (q *Queries) RetryOutbox(ctx context.Context, arg RetryOutboxParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retryOutbox,
+		arg.Attempts,
+		arg.NextAttemptAt,
+		arg.Reason,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const settleOutbox = `-- name: SettleOutbox :execrows
+UPDATE canvas_outbox
+SET settled_at = $1, outcome = $2,
+    last_error = COALESCE(NULLIF($3::text, ''), last_error)
+WHERE id = $4 AND settled_at IS NULL
+`
+
+type SettleOutboxParams struct {
+	SettledAt pgtype.Timestamptz
+	Outcome   pgtype.Text
+	Reason    string
+	ID        int64
+}
+
+func (q *Queries) SettleOutbox(ctx context.Context, arg SettleOutboxParams) (int64, error) {
+	result, err := q.db.Exec(ctx, settleOutbox,
+		arg.SettledAt,
+		arg.Outcome,
+		arg.Reason,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const tenantOutboxStats = `-- name: TenantOutboxStats :one
+SELECT count(*) FILTER (WHERE settled_at IS NULL) AS pending,
+    (min(created_at) FILTER (WHERE settled_at IS NULL))::timestamptz AS oldest_pending,
+    count(*) FILTER (WHERE settled_at IS NULL AND attempts > 0) AS retrying,
+    (COALESCE(sum(attempts) FILTER (WHERE settled_at IS NULL), 0))::bigint AS pending_attempts,
+    count(*) FILTER (WHERE outcome = 'rejected') AS rejected
+FROM canvas_outbox
+WHERE tenant_id = $1
+`
+
+type TenantOutboxStatsRow struct {
+	Pending         int64
+	OldestPending   pgtype.Timestamptz
+	Retrying        int64
+	PendingAttempts int64
+	Rejected        int64
+}
+
+func (q *Queries) TenantOutboxStats(ctx context.Context, tenantID string) (TenantOutboxStatsRow, error) {
+	row := q.db.QueryRow(ctx, tenantOutboxStats, tenantID)
+	var i TenantOutboxStatsRow
+	err := row.Scan(
+		&i.Pending,
+		&i.OldestPending,
+		&i.Retrying,
+		&i.PendingAttempts,
+		&i.Rejected,
+	)
+	return i, err
 }

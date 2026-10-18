@@ -32,6 +32,8 @@ type Record struct {
 	Attempts int
 	// NextAttempt is the earliest time of the next delivery.
 	NextAttempt time.Time
+	// LastError is the reason of the last failed delivery, or "".
+	LastError string
 }
 
 // Mutation kinds as stored in the outbox.
