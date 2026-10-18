@@ -1,0 +1,12 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: internal/platform/postgres/queries
+    gen:
+      go:
+        package: db
+        out: internal/platform/postgres/db
+        sql_package: pgx/v5
+        rename:
+          canvase: Canvas
