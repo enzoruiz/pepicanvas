@@ -3,6 +3,7 @@ frontend/dist/
 frontend/coverage/
 frontend/.cache/client-browsers/
 frontend/.cache/privacy-fixture/
+frontend/.cache/auth-e2e/
 frontend/playwright-report/
 frontend/test-results/
 scripts/client-support/.cache/

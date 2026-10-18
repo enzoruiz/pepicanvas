@@ -5,6 +5,13 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // The API runs in the Go server; proxying keeps one origin, so the
+    // session cookie and the Origin check behave as in production.
+    proxy: {
+      "/api": process.env.PEPICANVAS_API_TARGET ?? "http://127.0.0.1:8080",
+    },
+  },
   build: {
     rolldownOptions: {
       input: {

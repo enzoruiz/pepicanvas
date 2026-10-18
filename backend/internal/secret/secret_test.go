@@ -20,6 +20,8 @@ func kinds() []secret.Kind {
 		secret.KindSessionToken,
 		secret.KindMediaURL,
 		secret.KindOBSCredential,
+		secret.KindPassword,
+		secret.KindCSRFToken,
 	}
 }
 
@@ -122,5 +124,5 @@ func TestNewPanicsOnUnknownKind(t *testing.T) {
 			t.Fatal("New with an unknown kind must panic")
 		}
 	}()
-	secret.New(secret.Kind("password"), decoy)
+	secret.New(secret.Kind("not_a_kind"), decoy)
 }
