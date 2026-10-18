@@ -23,6 +23,8 @@
     "privacy:matrix": "node scripts/privacy-runner.mjs --download",
     "privacy:matrix:offline": "node scripts/privacy-runner.mjs --offline",
     "privacy:evidence:test": "node --test scripts/privacy-evidence.node-test.mjs",
+    "auth:e2e": "node scripts/auth-e2e-runner.mjs --download",
+    "auth:e2e:offline": "node scripts/auth-e2e-runner.mjs --offline",
     "playwright:list": "playwright test --list --pass-with-no-tests"
   },
   "dependencies": {

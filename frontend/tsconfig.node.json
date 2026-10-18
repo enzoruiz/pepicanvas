@@ -19,6 +19,7 @@
   "include": [
     "vite.config.ts",
     "playwright.config.ts",
-    "playwright.privacy.config.ts"
+    "playwright.privacy.config.ts",
+    "playwright.auth.config.ts"
   ]
 }
