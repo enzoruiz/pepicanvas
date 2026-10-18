@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 var (
@@ -32,6 +33,10 @@ type Config struct {
 	QueueSize int
 	// LogSize bounds the accepted events retained per canvas for replay.
 	LogSize int
+	// Retention bounds the operation results kept per canvas for deduplication.
+	Retention Retention
+	// Now returns the current time; it defaults to time.Now.
+	Now func() time.Time
 }
 
 // Hub routes commands to one actor per canvas.
@@ -61,7 +66,7 @@ func NewHub(config Config) (*Hub, error) {
 	if config.Authorize == nil {
 		return nil, errors.Join(ErrInvalidConfig, errors.New("authorizer is required"))
 	}
-	if config.QueueSize < 0 || config.LogSize < 0 {
+	if config.QueueSize < 0 || config.LogSize < 0 || config.Retention.TTL < 0 || config.Retention.MaxOperations < 0 {
 		return nil, errors.Join(ErrInvalidConfig, errors.New("sizes must not be negative"))
 	}
 	if config.QueueSize == 0 {
@@ -69,6 +74,15 @@ func NewHub(config Config) (*Hub, error) {
 	}
 	if config.LogSize == 0 {
 		config.LogSize = DefaultLogSize
+	}
+	if config.Retention.TTL == 0 {
+		config.Retention.TTL = DefaultRetentionTTL
+	}
+	if config.Retention.MaxOperations == 0 {
+		config.Retention.MaxOperations = DefaultRetentionMaxOperations
+	}
+	if config.Now == nil {
+		config.Now = time.Now
 	}
 	return &Hub{config: config, stop: make(chan struct{}), actors: map[Key]*actor{}}, nil
 }
@@ -144,6 +158,7 @@ func (h *Hub) actor(key Key) (*actor, error) {
 			config: h.config,
 			inbox:  make(chan request, h.config.QueueSize),
 			state:  NewState(),
+			ops:    newOperations(h.config.Retention),
 		}
 		h.actors[key] = target
 		h.wg.Add(1)

@@ -29,8 +29,8 @@ Scope approved in-session: core actor plus early primitives (drain contract, cor
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| T1 | S1, S3, S4, S5, S8 | inline, test-first | done | see Log L4 |
-| T2 | S6 | inline, test-first | pending | — |
+| T1 | S1, S3, S4, S5, S8 | inline, test-first | done | `cb98881` |
+| T2 | S6 | inline, test-first | done | see Log L5 |
 | T3 | S2, S5 | inline, test-first | pending | — |
 | T4 | S7 | inline, test-first | pending | — |
 | T5 | all | independent verify (Risk item 4, concurrency) + RDD assess | pending | — |
@@ -41,3 +41,4 @@ Scope approved in-session: core actor plus early primitives (drain contract, cor
 - **L2** (user decision): selected "Núcleo + primitivas (recomendado)": actor core in `internal/realtime` stdlib-only, plus Start/Stop drain and correlation ID primitives; CONS, WEB, process READY, and operational TRACE documented for owners TE-012/014/015/016, as in TE-001 and TE-005.
 - **L3** (parallel fence from roadmap analysis): TE-007 stays stdlib-only in `backend/internal/realtime` with no canvas persistence types, so it can run beside TE-003/TE-004.
 - **L4** (T1 evidence): RED `go test -race ./internal/realtime` failed to build (`undefined: Command`, `Config`, `Hub`, `Key`). GREEN `ok .../internal/realtime 1.010s`; full `go test -race ./...` passed; `git diff --check` clean. Known gap handed to T4: `Close` drops queued commands and a waiting `Submit` with a non-expiring context blocks.
+- **L5** (T2 evidence): RED build failure (`undefined: ErrOperationConflict`, unknown `Config.Now`/`Config.Retention`). GREEN `ok .../internal/realtime 1.034s`; full race suite passed. Decisions: the fingerprint covers kind, object, and payload but not the correlation ID; denials are not retained; domain rejections are; retention is valid while `now < accepted+TTL` and is also capped by count (defaults 10m, 4096). Slice note: T1 was 764 lines (about 300 implementation, the rest tests and tracker), above the ~400 advisory, kept as one behavior unit.

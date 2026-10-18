@@ -10,6 +10,7 @@ type actor struct {
 
 	mu       sync.Mutex
 	state    *State
+	ops      *operations
 	sequence uint64
 	log      []Event
 }
@@ -33,9 +34,14 @@ func (a *actor) handle(next request) (Result, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := a.config.Now()
+	if previous, ok, err := a.ops.lookup(command, now); err != nil || ok {
+		return previous, err
+	}
 	result := Result{OperationID: command.OperationID, CorrelationID: command.CorrelationID}
 	if reason := a.state.Decide(command); reason != "" {
 		result.Outcome, result.Reason = OutcomeRejected, reason
+		a.ops.remember(command, result, now)
 		return result, nil
 	}
 	a.sequence++
@@ -46,6 +52,7 @@ func (a *actor) handle(next request) (Result, error) {
 		a.log = append(a.log[:0:0], a.log[overflow:]...)
 	}
 	result.Outcome, result.Sequence = OutcomeAccepted, a.sequence
+	a.ops.remember(command, result, now)
 	return result, nil
 }
 
