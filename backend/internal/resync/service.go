@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
@@ -49,6 +50,8 @@ type Loader interface {
 
 // Access loads the current access facts of the connection's actor for viewing
 // one canvas (TE-001). It is called before the read and again before delivery.
+// The transport must bind it to the same actor as the lease's grant; the
+// service checks only that the facts describe viewing the requested canvas.
 type Access func(ctx context.Context, key canvas.Key) (access.Request, error)
 
 // Lease is the live connection asking to resync; *revocation.Lease satisfies
@@ -84,10 +87,11 @@ func (s *Service) Snapshot(ctx context.Context, lease Lease, request Request) (S
 		return Snapshot{}, err
 	}
 	key := request.Key
-	if lease == nil {
+	if lease == nil || (reflect.ValueOf(lease).Kind() == reflect.Pointer && reflect.ValueOf(lease).IsNil()) {
 		return Snapshot{}, access.ErrAccessDenied
 	}
 	var snapshot Snapshot
+	delivered := false
 	err := lease.Guard(func(leaseCtx context.Context) error {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
@@ -98,6 +102,9 @@ func (s *Service) Snapshot(ctx context.Context, lease Lease, request Request) (S
 		var committed canvas.Canvas
 		read := func() (err error) {
 			committed, err = s.loader.Load(ctx, key)
+			if err == nil && committed.Key != key {
+				return canvas.ErrNotFound
+			}
 			return err
 		}
 		if err := access.GuardReadDelivery(facts, read); err != nil {
@@ -111,13 +118,17 @@ func (s *Service) Snapshot(ctx context.Context, lease Lease, request Request) (S
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			snapshot = NewSnapshot(committed, request.CorrelationID)
+			snapshot, delivered = NewSnapshot(committed, request.CorrelationID), true
 			return nil
 		}
 		return s.leaseErr(lease, access.GuardReadDelivery(facts, deliver))
 	})
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if !delivered {
+		// A lease that reports success without running the work is not live.
+		return Snapshot{}, access.ErrAccessDenied
 	}
 	return snapshot, nil
 }

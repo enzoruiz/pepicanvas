@@ -23,6 +23,9 @@ func Fold(c Canvas, mutation Mutation, result Result) (Canvas, error) {
 	if err := mutation.validate(); err != nil {
 		return Canvas{}, err
 	}
+	if target := objectOf(mutation); target != "" && target != result.ObjectID {
+		return Canvas{}, fmt.Errorf("%w: result names another object", ErrInvalid)
+	}
 	next := c
 	next.Revision = result.Revision
 	next.Objects = slices.Clone(c.Objects)
@@ -64,6 +67,19 @@ func Fold(c Canvas, mutation Mutation, result Result) (Canvas, error) {
 	}
 	slices.SortFunc(next.Objects, func(a, b Object) int { return cmp.Compare(a.Z, b.Z) })
 	return next, nil
+}
+
+// objectOf returns the existing object a mutation addresses, if any.
+func objectOf(mutation Mutation) string {
+	switch m := mutation.(type) {
+	case SetContent:
+		return m.ObjectID
+	case SetTransform:
+		return m.ObjectID
+	case DeleteObject:
+		return m.ObjectID
+	}
+	return ""
 }
 
 func index(objects []Object, id string) int {

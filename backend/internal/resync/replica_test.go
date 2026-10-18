@@ -340,3 +340,20 @@ func TestSnapshotsCarryOnlyStoppedMedia(t *testing.T) {
 		t.Fatalf("playback entries = %d, media objects = %d", len(snapshot.Playback), media)
 	}
 }
+
+func TestOverflowKeepsTheNextRevision(t *testing.T) {
+	h := newHistory(t, keyA, resync.DefaultWindow+10)
+	replica := synced(t, h, 0)
+	receive(t, replica, h, span(3, h.last())...)
+	receive(t, replica, h, 1, 2)
+	if replica.Revision() < 3 {
+		t.Fatalf("revision = %d after the gap filled, want the buffered revisions applied", replica.Revision())
+	}
+	if !replica.NeedsResync() {
+		t.Fatal("events dropped by the overflow are not reported")
+	}
+	if err := replica.Adopt(h.snapshot(h.last())); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	requireState(t, replica, h, h.last())
+}

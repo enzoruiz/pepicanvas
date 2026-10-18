@@ -125,3 +125,18 @@ func TestFoldRejectsInconsistentResults(t *testing.T) {
 		})
 	}
 }
+
+func TestFoldRejectsAResultForAnotherObject(t *testing.T) {
+	for name, mutation := range map[string]canvas.Mutation{
+		"content":   canvas.SetContent{ObjectID: "obj-1", Content: "x"},
+		"transform": canvas.SetTransform{ObjectID: "obj-1", Transform: transform},
+		"delete":    canvas.DeleteObject{ObjectID: "obj-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := canvas.Fold(foldBase(), mutation, canvas.Result{Revision: 4, ObjectID: "obj-2", Z: 9})
+			if !errors.Is(err, canvas.ErrInvalid) {
+				t.Fatalf("Fold error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}

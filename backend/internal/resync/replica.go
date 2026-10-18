@@ -51,10 +51,28 @@ func (r *Replica) Receive(event Event) error {
 	if r.synced && event.Result.Revision <= r.state.Revision {
 		return nil
 	}
-	if _, ok := r.pending[event.Result.Revision]; !ok && len(r.pending) < DefaultWindow {
-		r.pending[event.Result.Revision] = event
-	}
+	r.buffer(event)
 	return r.drain()
+}
+
+// buffer keeps an event while it waits. A full buffer keeps the lowest
+// revisions, which are applied first, and drops the highest one.
+func (r *Replica) buffer(event Event) {
+	revision := event.Result.Revision
+	if _, ok := r.pending[revision]; ok {
+		return
+	}
+	if len(r.pending) >= DefaultWindow {
+		highest := revision
+		for buffered := range r.pending {
+			highest = max(highest, buffered)
+		}
+		if highest == revision {
+			return
+		}
+		delete(r.pending, highest)
+	}
+	r.pending[revision] = event
 }
 
 // Notice records the latest committed revision announced by the server, for

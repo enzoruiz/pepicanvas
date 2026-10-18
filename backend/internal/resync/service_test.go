@@ -403,3 +403,70 @@ func TestRetriesReturnTheSameSnapshot(t *testing.T) {
 		t.Fatalf("retries = %+v and %+v, want %+v", first, second, want)
 	}
 }
+
+// wrongLoader answers every read with another canvas.
+type wrongLoader struct{ answer canvas.Canvas }
+
+func (w wrongLoader) Load(context.Context, canvas.Key) (canvas.Canvas, error) { return w.answer, nil }
+
+func TestLoaderAnsweringAnotherCanvasDeliversNothing(t *testing.T) {
+	f := newFixture(t)
+	other := f.stored
+	other.Key = keyB
+	service, err := resync.NewService(wrongLoader{answer: other}, f.facts.load)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	got, err := service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
+	requireNothing(t, got, err, canvas.ErrNotFound)
+}
+
+func TestTypedNilLeaseIsDenied(t *testing.T) {
+	f := newFixture(t)
+	var lease *revocation.Lease
+	got, err := f.service.Snapshot(context.Background(), lease, resync.Request{Key: keyA})
+	requireNothing(t, got, err, access.ErrAccessDenied)
+}
+
+// skippingLease reports a live lease but never runs the guarded work.
+type skippingLease struct{}
+
+func (skippingLease) Guard(func(context.Context) error) error { return nil }
+func (skippingLease) Err() error                              { return nil }
+
+func TestLeaseThatSkipsTheWorkDeliversNothing(t *testing.T) {
+	f := newFixture(t)
+	got, err := f.service.Snapshot(context.Background(), skippingLease{}, resync.Request{Key: keyA})
+	requireNothing(t, got, err, access.ErrAccessDenied)
+}
+
+func TestCutDuringTheSecondCheckDeliversNothing(t *testing.T) {
+	f := newFixture(t)
+	allowed := viewer(access.RoleModerator, "tenant-a", "tenant-a")
+	var calls atomic.Int64
+	service, err := resync.NewService(f.store, func(context.Context, canvas.Key) (access.Request, error) {
+		if calls.Add(1) == 2 {
+			f.cut(t, 6)
+		}
+		return allowed, nil
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	got, err := service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
+	requireNothing(t, got, err, revocation.ErrAccessRevoked)
+}
+
+func TestSecondCheckForAnotherTenantDeliversNothing(t *testing.T) {
+	f := newFixture(t, viewer(access.RoleOwner, "tenant-a", "tenant-a"), viewer(access.RoleOwner, "tenant-b", "tenant-b"))
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
+	requireNothing(t, got, err, access.ErrAccessDenied)
+}
+
+func TestCancelledCallerReceivesNothing(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := f.service.Snapshot(ctx, f.lease, resync.Request{Key: keyA})
+	requireNothing(t, got, err, context.Canceled)
+}
