@@ -16,12 +16,14 @@ const (
 	KindSessionToken    Kind = "session_token"
 	KindMediaURL        Kind = "media_url"
 	KindOBSCredential   Kind = "obs_credential"
+	KindPassword        Kind = "password"
+	KindCSRFToken       Kind = "csrf_token"
 )
 
 // Valid reports whether the kind belongs to the closed vocabulary.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindInvitationToken, KindSessionToken, KindMediaURL, KindOBSCredential:
+	case KindInvitationToken, KindSessionToken, KindMediaURL, KindOBSCredential, KindPassword, KindCSRFToken:
 		return true
 	default:
 		return false
