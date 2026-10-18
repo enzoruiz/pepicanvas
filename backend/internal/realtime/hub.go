@@ -18,6 +18,7 @@ var (
 
 // Authorizer re-evaluates current access immediately before acceptance.
 // A non-nil error rejects the command without ordering or retaining it.
+// It must return promptly once ctx ends, so Close can abort within its deadline.
 type Authorizer func(context.Context, Command) error
 
 // Defaults applied when a Config field is zero.
