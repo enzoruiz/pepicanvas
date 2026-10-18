@@ -64,6 +64,8 @@ const (
 	ReasonUnauthorized Reason = "unauthorized"
 	// ReasonDetached ends every lease of a session whose connection ended.
 	ReasonDetached Reason = "detached"
+	// ReasonShutdown ends every lease when the manager closes.
+	ReasonShutdown Reason = "shutdown"
 )
 
 // Request asks to acquire or release the lease on one object of the
