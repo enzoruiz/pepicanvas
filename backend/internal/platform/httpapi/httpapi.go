@@ -1,5 +1,6 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
-// (US-001). Every response is private and correlated; unsafe methods must
+// (US-001) and the manual streamer activation and own-canvas read (US-002).
+// Every response is private and correlated; unsafe methods must
 // come from the configured origin, and authenticated mutations must carry the
 // session's CSRF token (CTRL-WEB-01 early primitive; TE-014 owns the control).
 package httpapi
@@ -21,9 +22,11 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ratelimit"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 const (
@@ -72,11 +75,19 @@ type CanvasLoader interface {
 	Load(ctx context.Context, key canvas.Key) (canvas.Canvas, error)
 }
 
+// Subscriptions is the streamer activation service.
+type Subscriptions interface {
+	Activate(ctx context.Context, request subscription.ActivateRequest) (subscription.Activation, error)
+	CanvasOf(ctx context.Context, account access.AccountID) (canvas.Key, error)
+	IsOperator(ctx context.Context, account access.AccountID) (bool, error)
+}
+
 // Config wires the API.
 type Config struct {
-	Accounts    Accounts
-	Memberships access.MembershipStore
-	Canvases    CanvasLoader
+	Accounts      Accounts
+	Memberships   access.MembershipStore
+	Canvases      CanvasLoader
+	Subscriptions Subscriptions
 	// AllowedOrigin is the exact scheme://host[:port] of the editor.
 	AllowedOrigin string
 	Logger        *slog.Logger
@@ -98,8 +109,8 @@ func New(config Config) (http.Handler, error) {
 	if err := validateOrigin(config.AllowedOrigin); err != nil {
 		return nil, err
 	}
-	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil {
-		return nil, errors.New("httpapi: accounts, memberships, and canvases are required")
+	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil {
+		return nil, errors.New("httpapi: accounts, memberships, canvases, and subscriptions are required")
 	}
 	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP} {
 		if rate.Limit < 1 || rate.Window <= 0 {
@@ -126,6 +137,8 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/session", a.currentSession)
 	mux.HandleFunc("DELETE /api/session", a.signOut)
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}", a.canvas)
+	mux.HandleFunc("POST /api/activations", a.activate)
+	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(a.checkOrigin(mux)))), nil
 }
 
@@ -198,6 +211,7 @@ type sessionBody struct {
 	AccountID string `json:"account_id"`
 	Email     string `json:"email"`
 	CSRFToken string `json:"csrf_token"`
+	Operator  bool   `json:"operator"`
 }
 
 func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +246,11 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrInternal, err)
 		return
 	}
+	operator, err := a.Subscriptions.IsOperator(r.Context(), principal.AccountID)
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookie,
 		Value:    session.Token.Reveal(),
@@ -242,7 +261,12 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	a.Logger.InfoContext(r.Context(), "session created", slog.String("account_id", string(session.AccountID)))
-	writeJSON(w, http.StatusCreated, sessionBody{AccountID: string(principal.AccountID), Email: principal.Email, CSRFToken: session.CSRF.Reveal()})
+	writeJSON(w, http.StatusCreated, sessionBody{
+		AccountID: string(principal.AccountID),
+		Email:     principal.Email,
+		CSRFToken: session.CSRF.Reveal(),
+		Operator:  operator,
+	})
 }
 
 func (a *api) currentSession(w http.ResponseWriter, r *http.Request) {
@@ -250,11 +274,79 @@ func (a *api) currentSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	operator, err := a.Subscriptions.IsOperator(r.Context(), principal.AccountID)
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, sessionBody{
 		AccountID: string(principal.AccountID),
 		Email:     principal.Email,
 		CSRFToken: access.CSRFToken(token).Reveal(),
+		Operator:  operator,
 	})
+}
+
+type activationBody struct {
+	OperationID string `json:"operation_id"`
+	Email       string `json:"email"`
+}
+
+type activationResult struct {
+	AccountID string `json:"account_id"`
+	TenantID  string `json:"tenant_id"`
+	CanvasID  string `json:"canvas_id"`
+	Created   bool   `json:"created"`
+}
+
+// activate lets an operator activate the account of an email. The session
+// and its CSRF token are checked before the body is read; the operator role
+// is checked by the domain before the account is looked up.
+func (a *api) activate(w http.ResponseWriter, r *http.Request) {
+	token, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !access.VerifyCSRF(token, r.Header.Get(CSRFHeader)) {
+		a.responder.Error(w, r, httpx.ErrForbidden, errors.New("csrf token rejected"))
+		return
+	}
+	var body activationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	result, err := a.Subscriptions.Activate(r.Context(), subscription.ActivateRequest{
+		OperatorID:    principal.AccountID,
+		OperationID:   body.OperationID,
+		Email:         body.Email,
+		CorrelationID: correlationID.String(),
+	})
+	switch {
+	case err == nil:
+		a.Logger.InfoContext(r.Context(), "activation confirmed",
+			slog.String("account_id", string(result.AccountID)),
+			slog.String("tenant_id", result.TenantID),
+			slog.String("canvas_id", result.CanvasID),
+		)
+		writeJSON(w, http.StatusOK, activationResult{
+			AccountID: string(result.AccountID),
+			TenantID:  result.TenantID,
+			CanvasID:  result.CanvasID,
+			Created:   result.Created,
+		})
+	case errors.Is(err, access.ErrAccessDenied):
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	case errors.Is(err, subscription.ErrInvalidActivation):
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+	case errors.Is(err, subscription.ErrAccountNotFound):
+		a.responder.Error(w, r, httpx.ErrNotFound, err)
+	case errors.Is(err, subscription.ErrOperationConflict):
+		a.responder.Error(w, r, httpx.ErrConflict, err)
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+	}
 }
 
 func (a *api) signOut(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +395,67 @@ type canvasBody struct {
 	Objects  []objectBody `json:"objects"`
 }
 
+type ownCanvasBody struct {
+	TenantID string `json:"tenant_id"`
+	canvasBody
+}
+
+func newCanvasBody(loaded canvas.Canvas) canvasBody {
+	body := canvasBody{
+		CanvasID: loaded.Key.CanvasID,
+		Width:    loaded.Dimensions.Width,
+		Height:   loaded.Dimensions.Height,
+		Revision: loaded.Revision,
+		Objects:  make([]objectBody, 0, len(loaded.Objects)),
+	}
+	for _, o := range loaded.Objects {
+		body.Objects = append(body.Objects, objectBody{
+			ID: o.ID, Kind: string(o.Kind), Content: o.Content,
+			X: o.Transform.X, Y: o.Transform.Y, Width: o.Transform.Width, Height: o.Transform.Height,
+			Rotation: o.Transform.Rotation, Z: o.Z,
+		})
+	}
+	return body
+}
+
+// ownCanvas answers the canvas of the tenant the account owns. Every denial,
+// including a missing canvas, is the forbidden answer of the canvas route.
+func (a *api) ownCanvas(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	key, err := a.Subscriptions.CanvasOf(r.Context(), principal.AccountID)
+	if errors.Is(err, access.ErrAccessDenied) {
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+		return
+	}
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return
+	}
+	loaded, ok := a.load(w, r, key)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, ownCanvasBody{TenantID: key.TenantID, canvasBody: newCanvasBody(loaded)})
+}
+
+// load reads a canvas the caller may view. A missing or invalid canvas is
+// the access denial.
+func (a *api) load(w http.ResponseWriter, r *http.Request, key canvas.Key) (canvas.Canvas, bool) {
+	loaded, err := a.Canvases.Load(r.Context(), key)
+	if errors.Is(err, canvas.ErrNotFound) || errors.Is(err, canvas.ErrInvalid) {
+		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
+		return canvas.Canvas{}, false
+	}
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return canvas.Canvas{}, false
+	}
+	return loaded, true
+}
+
 // canvas answers a canvas request. Every denial, including a missing tenant
 // or canvas, returns the same forbidden answer, so no response reveals
 // whether a canvas exists for another tenant.
@@ -325,30 +478,11 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrForbidden, err)
 		return
 	}
-	loaded, err := a.Canvases.Load(r.Context(), key)
-	if errors.Is(err, canvas.ErrNotFound) || errors.Is(err, canvas.ErrInvalid) {
-		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
+	loaded, ok := a.load(w, r, key)
+	if !ok {
 		return
 	}
-	if err != nil {
-		a.responder.Error(w, r, httpx.ErrInternal, err)
-		return
-	}
-	body := canvasBody{
-		CanvasID: loaded.Key.CanvasID,
-		Width:    loaded.Dimensions.Width,
-		Height:   loaded.Dimensions.Height,
-		Revision: loaded.Revision,
-		Objects:  make([]objectBody, 0, len(loaded.Objects)),
-	}
-	for _, o := range loaded.Objects {
-		body.Objects = append(body.Objects, objectBody{
-			ID: o.ID, Kind: string(o.Kind), Content: o.Content,
-			X: o.Transform.X, Y: o.Transform.Y, Width: o.Transform.Width, Height: o.Transform.Height,
-			Rotation: o.Transform.Rotation, Z: o.Z,
-		})
-	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, newCanvasBody(loaded))
 }
 
 // authenticate resolves the session cookie. An invalid session clears the
