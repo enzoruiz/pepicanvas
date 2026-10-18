@@ -45,6 +45,9 @@ type Config struct {
 	Budget time.Duration
 	// History bounds the cuts retained per tenant to reject stale grants.
 	History int
+	// Retention bounds the cut results kept per tenant for deduplication.
+	// Its TTL must not be shorter than Budget.
+	Retention Retention
 	// Now returns the current time; it defaults to time.Now.
 	Now func() time.Time
 }
@@ -80,11 +83,12 @@ type Registry struct {
 type tenant struct {
 	leases  map[*Lease]struct{}
 	history history
+	ops     *operations
 }
 
 // NewRegistry validates the configuration and returns an empty registry.
 func NewRegistry(config Config) (*Registry, error) {
-	if config.Budget < 0 || config.History < 0 {
+	if config.Budget < 0 || config.History < 0 || config.Retention.TTL < 0 || config.Retention.MaxOperations < 0 {
 		return nil, errors.Join(ErrInvalidConfig, errors.New("budget and history must not be negative"))
 	}
 	if config.Budget == 0 {
@@ -92,6 +96,15 @@ func NewRegistry(config Config) (*Registry, error) {
 	}
 	if config.History == 0 {
 		config.History = DefaultHistory
+	}
+	if config.Retention.TTL == 0 {
+		config.Retention.TTL = DefaultRetentionTTL
+	}
+	if config.Retention.MaxOperations == 0 {
+		config.Retention.MaxOperations = DefaultRetentionMaxOperations
+	}
+	if config.Retention.TTL < config.Budget {
+		return nil, errors.Join(ErrInvalidConfig, errors.New("retention must outlast the close budget"))
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -121,14 +134,32 @@ func (r *Registry) Register(grant Grant, conn Conn) (*Lease, error) {
 
 // Apply records a confirmed cut, rejects further use of every affected
 // lease at once, and closes their connections within the budget. It returns
-// ErrBudgetExceeded with the full report when any close ran over.
-func (r *Registry) Apply(_ context.Context, cut Cut) (Report, error) {
+// ErrBudgetExceeded with the full report when any close ran over. A retry
+// with the same operation ID and cut returns the same answer without a
+// second cut, waiting for it if it is still closing; a retry whose ctx ends
+// first returns ctx's error while the cut completes.
+func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 	if err := cut.validate(); err != nil {
 		return Report{}, err
 	}
 	start := r.config.Now()
 	r.mu.Lock()
 	state := r.tenant(cut.Target.TenantID)
+	op, run, err := state.ops.start(cut, start)
+	if err != nil {
+		r.mu.Unlock()
+		return Report{}, err
+	}
+	if !run {
+		r.mu.Unlock()
+		select {
+		case <-op.done:
+			return op.answer()
+		case <-ctx.Done():
+			return Report{}, ctx.Err()
+		}
+	}
+	defer close(op.done)
 	state.history.record(cut.Target, cut.Version, r.config.History)
 	var affected []*Lease
 	for lease := range state.leases {
@@ -154,16 +185,17 @@ func (r *Registry) Apply(_ context.Context, cut Cut) (Report, error) {
 			report.Exceeded++
 		}
 	}
+	op.report = report
 	if report.Exceeded > 0 {
-		return report, ErrBudgetExceeded
+		op.err = ErrBudgetExceeded
 	}
-	return report, nil
+	return op.answer()
 }
 
 func (r *Registry) tenant(id string) *tenant {
 	state, ok := r.tenants[id]
 	if !ok {
-		state = &tenant{leases: map[*Lease]struct{}{}, history: history{latest: map[Target]uint64{}}}
+		state = &tenant{leases: map[*Lease]struct{}{}, history: history{latest: map[Target]uint64{}}, ops: newOperations(r.config.Retention)}
 		r.tenants[id] = state
 	}
 	return state
