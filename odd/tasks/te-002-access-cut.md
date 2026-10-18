@@ -29,8 +29,8 @@ Scope: stdlib-only core in `backend/internal/revocation` (roadmap stage 1, rule 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
 | T1 | S1–S6 | inline, test-first | done | `ad394e5` |
-| T2 | S7 | inline, test-first | done | see L4 |
-| T3 | S8, S9 | inline, test-first | pending | |
+| T2 | S7 | inline, test-first | done | `4a1effa` |
+| T3 | S8, S9 | inline, test-first | done | see L5 |
 | T4 | all | docs, independent verify, RDD assess | pending | |
 
 ## Log
@@ -40,3 +40,4 @@ Scope: stdlib-only core in `backend/internal/revocation` (roadmap stage 1, rule 
 - **L3** (T1 evidence): RED `go test -race ./internal/revocation` failed to build (`undefined: Reason`, `Registry`, `Grant`, `Conn`, `Lease`). GREEN `ok .../internal/revocation 1.010s`; `-count=3` passed; full `go test -race ./...` passed. Mutation: dropping the `grant.Version < cut.Version` check failed `TestCutsApplyInConfirmationOrderNotArrivalOrder`. Decisions: the clock starts when the confirmed cut reaches `Apply` (commit-to-registry delay belongs to TE-012); graceful close gets 3/4 of the 2 s budget, then `Abort`; any close over budget returns `ErrBudgetExceeded` with the full report; cut history is per tenant (default 4096) and eviction raises a per-tenant floor that makes older grants `ErrStaleGrant`; every cut is tenant-scoped, so a session revocation names its tenant.
   Slice note: T1 is 1084 lines (about 550 implementation, the rest tests and tracker), above the ~400 advisory, kept as one behavior unit.
 - **L4** (T2 evidence): RED build failure (`undefined: ErrOperationConflict`, unknown `Config.Retention`). GREEN `ok .../internal/revocation 1.013s`, `-count=3` passed. Decisions: results are retained per tenant by operation ID; the intent covers type, target, and version but not the correlation ID; concurrent retries wait for the first cut; the budget failure is retained like any answer; invalid and conflicting cuts are not retained; defaults 10m and 4096, and the TTL must not be shorter than the budget.
+- **L5** (T3 evidence): RED build failure (`registry.Close undefined`, `undefined: ErrClosed`). GREEN `ok .../internal/revocation 1.015s`; `-count=20` passed; full `go vet ./...` and `go test -race ./...` passed. Contract: `Close` rejects `Register` and `Apply` with `ErrClosed` at once, ends every live lease with `ErrClosed`, closes with the retryable `ReasonShutdown` within the budget (abort included), waits for cuts in progress, and on ctx deadline aborts every pending close and returns ctx's error after all returned; idempotent; the synctest bubble proves no goroutines or timers remain. Correlation: `revocation` does not import `platform` (domain rule); it logs with `*Context` so the TE-003 handler adds `correlation_id`; the test proves the confirmation and every closure share it and that session, credential, and account decoys never reach the logs (target IDs are not logged). Budget excess logs at ERROR.

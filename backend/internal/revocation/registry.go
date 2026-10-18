@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ var (
 	// ErrBudgetExceeded reports a cut that closed a connection after the
 	// budget. The cut is still fully applied.
 	ErrBudgetExceeded = errors.New("revocation: close budget exceeded")
+	// ErrClosed reports work submitted after the registry began shutting
+	// down, and ends every lease the shutdown closed.
+	ErrClosed = errors.New("revocation: registry closed")
 )
 
 // Defaults applied when a Config field is zero.
@@ -50,6 +54,10 @@ type Config struct {
 	Retention Retention
 	// Now returns the current time; it defaults to time.Now.
 	Now func() time.Time
+	// Logger records each confirmation and closure. It should be built on
+	// platform/logging so records carry the context's correlation_id and
+	// are redacted. It defaults to discarding.
+	Logger *slog.Logger
 }
 
 // Closure reports how one affected connection was closed.
@@ -75,9 +83,15 @@ type Report struct {
 // Registry tracks live connections by tenant and applies cuts to them.
 type Registry struct {
 	config Config
+	// abort makes every pending close abort when Close runs out of time.
+	abort       context.Context
+	cancelAbort context.CancelFunc
+	// work counts cuts and the shutdown still closing connections.
+	work sync.WaitGroup
 
 	mu      sync.Mutex
 	tenants map[string]*tenant
+	closed  bool
 }
 
 type tenant struct {
@@ -109,7 +123,11 @@ func NewRegistry(config Config) (*Registry, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Registry{config: config, tenants: map[string]*tenant{}}, nil
+	if config.Logger == nil {
+		config.Logger = slog.New(slog.DiscardHandler)
+	}
+	abort, cancelAbort := context.WithCancel(context.Background())
+	return &Registry{config: config, abort: abort, cancelAbort: cancelAbort, tenants: map[string]*tenant{}}, nil
 }
 
 // Register admits a connection authorized by grant, or rejects it when a
@@ -123,6 +141,9 @@ func (r *Registry) Register(grant Grant, conn Conn) (*Lease, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, ErrClosed
+	}
 	state := r.tenant(grant.TenantID)
 	if err := state.history.check(grant); err != nil {
 		return nil, err
@@ -144,6 +165,10 @@ func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 	}
 	start := r.config.Now()
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return Report{}, ErrClosed
+	}
 	state := r.tenant(cut.Target.TenantID)
 	op, run, err := state.ops.start(cut, start)
 	if err != nil {
@@ -159,6 +184,8 @@ func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 			return Report{}, ctx.Err()
 		}
 	}
+	r.work.Add(1)
+	defer r.work.Done()
 	defer close(op.done)
 	state.history.record(cut.Target, cut.Version, r.config.History)
 	var affected []*Lease
@@ -170,6 +197,14 @@ func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 		}
 	}
 	r.mu.Unlock()
+	r.config.Logger.InfoContext(ctx, "access cut confirmed",
+		"operation_id", cut.OperationID,
+		"type", string(cut.Type),
+		"target_kind", string(cut.Target.Kind),
+		"tenant_id", cut.Target.TenantID,
+		"version", cut.Version,
+		"affected", len(affected),
+	)
 
 	report := Report{
 		OperationID:   cut.OperationID,
@@ -177,7 +212,7 @@ func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 		Target:        cut.Target,
 		Version:       cut.Version,
 		CorrelationID: cut.CorrelationID,
-		Closures:      r.closeAll(affected, cut.reason(), start),
+		Closures:      r.closeAll(context.WithoutCancel(ctx), affected, cut.reason(), start),
 	}
 	for _, closure := range report.Closures {
 		report.MaxLatency = max(report.MaxLatency, closure.Latency)
@@ -188,8 +223,57 @@ func (r *Registry) Apply(ctx context.Context, cut Cut) (Report, error) {
 	op.report = report
 	if report.Exceeded > 0 {
 		op.err = ErrBudgetExceeded
+		r.config.Logger.ErrorContext(ctx, "access cut exceeded close budget",
+			"operation_id", cut.OperationID,
+			"tenant_id", cut.Target.TenantID,
+			"exceeded", report.Exceeded,
+			"max_latency_ms", report.MaxLatency.Milliseconds(),
+		)
 	}
 	return op.answer()
+}
+
+// Close stops admitting connections and cuts, closes every live connection
+// with the retryable ReasonShutdown within the budget, and waits for cuts in
+// progress. If ctx ends first, every pending close is aborted and ctx's
+// error is returned once all of them have returned. Close is idempotent.
+func (r *Registry) Close(ctx context.Context) error {
+	r.mu.Lock()
+	first := !r.closed
+	r.closed = true
+	var leases []*Lease
+	if first {
+		for _, state := range r.tenants {
+			for lease := range state.leases {
+				delete(state.leases, lease)
+				lease.end(ErrClosed)
+				leases = append(leases, lease)
+			}
+		}
+		r.work.Add(1)
+	}
+	r.mu.Unlock()
+
+	if first {
+		start := r.config.Now()
+		go func() {
+			defer r.work.Done()
+			r.closeAll(context.WithoutCancel(ctx), leases, ReasonShutdown, start)
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		r.work.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		r.cancelAbort()
+		<-done
+		return ctx.Err()
+	}
 }
 
 func (r *Registry) tenant(id string) *tenant {
@@ -211,7 +295,7 @@ func (r *Registry) release(lease *Lease) {
 
 // closeAll closes every lease concurrently and returns the closures in a
 // stable order.
-func (r *Registry) closeAll(leases []*Lease, reason Reason, start time.Time) []Closure {
+func (r *Registry) closeAll(ctx context.Context, leases []*Lease, reason Reason, start time.Time) []Closure {
 	closures := make([]Closure, len(leases))
 	var wg sync.WaitGroup
 	for i, lease := range leases {
@@ -219,6 +303,13 @@ func (r *Registry) closeAll(leases []*Lease, reason Reason, start time.Time) []C
 		go func() {
 			defer wg.Done()
 			closures[i] = r.closeOne(lease, reason, start)
+			r.config.Logger.InfoContext(ctx, "connection closed",
+				"tenant_id", lease.grant.TenantID,
+				"client", string(closures[i].Client),
+				"reason", string(reason),
+				"latency_ms", closures[i].Latency.Milliseconds(),
+				"aborted", closures[i].Aborted,
+			)
 		}()
 	}
 	wg.Wait()
@@ -235,7 +326,7 @@ func (r *Registry) closeAll(leases []*Lease, reason Reason, start time.Time) []C
 }
 
 // closeOne closes gracefully within three quarters of the budget measured
-// from start, then aborts.
+// from start, then aborts; it aborts at once when Close runs out of time.
 func (r *Registry) closeOne(lease *Lease, reason Reason, start time.Time) Closure {
 	graceful := r.config.Budget - r.config.Budget/4 - r.config.Now().Sub(start)
 	ctx, cancel := context.WithTimeout(context.Background(), graceful)
@@ -250,6 +341,9 @@ func (r *Registry) closeOne(lease *Lease, reason Reason, start time.Time) Closur
 			aborted = true
 		}
 	case <-ctx.Done():
+		lease.conn.Abort()
+		aborted = true
+	case <-r.abort.Done():
 		lease.conn.Abort()
 		aborted = true
 	}
