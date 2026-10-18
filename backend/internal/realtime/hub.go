@@ -42,8 +42,13 @@ type Config struct {
 // Hub routes commands to one actor per canvas.
 type Hub struct {
 	config Config
-	stop   chan struct{}
-	wg     sync.WaitGroup
+	// abort cancels in-flight work when Close runs out of time.
+	abort       context.Context
+	cancelAbort context.CancelFunc
+	// sending counts Submit calls between admission and enqueue, so Close
+	// can close the queues without racing a send.
+	sending sync.WaitGroup
+	actorWG sync.WaitGroup
 
 	mu     sync.Mutex
 	actors map[Key]*actor
@@ -84,7 +89,8 @@ func NewHub(config Config) (*Hub, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Hub{config: config, stop: make(chan struct{}), actors: map[Key]*actor{}}, nil
+	abort, cancelAbort := context.WithCancel(context.Background())
+	return &Hub{config: config, abort: abort, cancelAbort: cancelAbort, actors: map[Key]*actor{}}, nil
 }
 
 // Submit validates, authorizes, orders, and applies one command. A caller
@@ -94,16 +100,16 @@ func (h *Hub) Submit(ctx context.Context, command Command) (Result, error) {
 		return Result{}, err
 	}
 	command.Payload = clonePayload(command.Payload)
-	target, err := h.actor(command.Key)
+	target, err := h.admit(command.Key)
 	if err != nil {
 		return Result{}, err
 	}
 	replies := make(chan reply, 1)
 	select {
 	case target.inbox <- request{ctx: ctx, command: command, reply: replies}:
-	case <-h.stop:
-		return Result{}, ErrClosed
+		h.sending.Done()
 	case <-ctx.Done():
+		h.sending.Done()
 		return Result{}, ctx.Err()
 	}
 	select {
@@ -125,28 +131,44 @@ func (h *Hub) Events(_ context.Context, key Key, after uint64) ([]Event, error) 
 	return target.events(after)
 }
 
-// Close stops every actor and waits for them to exit or for ctx to end.
+// Close stops accepting work, drains every queued command, and waits for the
+// actors to exit. If ctx ends first, in-flight work is cancelled, queued work
+// is answered with ErrClosed without being applied, and ctx's error is
+// returned once every actor has exited. Close is idempotent.
 func (h *Hub) Close(ctx context.Context) error {
 	h.mu.Lock()
-	if !h.closed {
-		h.closed = true
-		close(h.stop)
-	}
+	first := !h.closed
+	h.closed = true
 	h.mu.Unlock()
+
+	if first {
+		go func() {
+			h.sending.Wait()
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			for _, target := range h.actors {
+				close(target.inbox)
+			}
+		}()
+	}
 	done := make(chan struct{})
 	go func() {
-		h.wg.Wait()
+		h.sending.Wait()
+		h.actorWG.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		h.cancelAbort()
+		<-done
 		return ctx.Err()
 	}
 }
 
-func (h *Hub) actor(key Key) (*actor, error) {
+// admit returns the actor for key and reserves one enqueue, or ErrClosed.
+func (h *Hub) admit(key Key) (*actor, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -161,11 +183,12 @@ func (h *Hub) actor(key Key) (*actor, error) {
 			ops:    newOperations(h.config.Retention),
 		}
 		h.actors[key] = target
-		h.wg.Add(1)
+		h.actorWG.Add(1)
 		go func() {
-			defer h.wg.Done()
-			target.run(h.stop)
+			defer h.actorWG.Done()
+			target.run(h.abort)
 		}()
 	}
+	h.sending.Add(1)
 	return target, nil
 }

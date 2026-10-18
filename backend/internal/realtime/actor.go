@@ -1,6 +1,9 @@
 package realtime
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // actor owns the order and state of one canvas. Only its goroutine mutates
 // them; mu lets Events read the replay log concurrently.
@@ -15,22 +18,30 @@ type actor struct {
 	log      []Event
 }
 
-func (a *actor) run(stop <-chan struct{}) {
-	for {
-		select {
-		case <-stop:
-			return
-		case next := <-a.inbox:
-			result, err := a.handle(next)
-			next.reply <- reply{result: result, err: err}
+// run serves the inbox until Close closes it. After abort, remaining
+// requests are answered with ErrClosed without being applied.
+func (a *actor) run(abort context.Context) {
+	for next := range a.inbox {
+		if abort.Err() != nil {
+			next.reply <- reply{err: ErrClosed}
+			continue
 		}
+		result, err := a.handle(abort, next)
+		next.reply <- reply{result: result, err: err}
 	}
 }
 
-func (a *actor) handle(next request) (Result, error) {
+func (a *actor) handle(abort context.Context, next request) (Result, error) {
 	command := next.command
-	if err := a.config.Authorize(next.ctx, command); err != nil {
+	ctx, cancel := context.WithCancel(next.ctx)
+	defer cancel()
+	stop := context.AfterFunc(abort, cancel)
+	defer stop()
+	if err := a.config.Authorize(ctx, command); err != nil {
 		return Result{}, err
+	}
+	if abort.Err() != nil {
+		return Result{}, ErrClosed
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

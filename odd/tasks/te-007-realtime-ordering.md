@@ -31,8 +31,8 @@ Scope approved in-session: core actor plus early primitives (drain contract, cor
 |---|---|---|---|---|
 | T1 | S1, S3, S4, S5, S8 | inline, test-first | done | `cb98881` |
 | T2 | S6 | inline, test-first | done | `76151d0` |
-| T3 | S2, S5 | inline, test-first | done | see Log L6 |
-| T4 | S7 | inline, test-first | pending | — |
+| T3 | S2, S5 | inline, test-first | done | `ec73c03` |
+| T4 | S7 | inline, test-first | done | see Log L7 |
 | T5 | all | independent verify (Risk item 4, concurrency) + RDD assess | pending | — |
 
 ## Log
@@ -43,3 +43,4 @@ Scope approved in-session: core actor plus early primitives (drain contract, cor
 - **L4** (T1 evidence): RED `go test -race ./internal/realtime` failed to build (`undefined: Command`, `Config`, `Hub`, `Key`). GREEN `ok .../internal/realtime 1.010s`; full `go test -race ./...` passed; `git diff --check` clean. Known gap handed to T4: `Close` drops queued commands and a waiting `Submit` with a non-expiring context blocks.
 - **L5** (T2 evidence): RED build failure (`undefined: ErrOperationConflict`, unknown `Config.Now`/`Config.Retention`). GREEN `ok .../internal/realtime 1.034s`; full race suite passed. Decisions: the fingerprint covers kind, object, and payload but not the correlation ID; denials are not retained; domain rejections are; retention is valid while `now < accepted+TTL` and is also capped by count (defaults 10m, 4096). Slice note: T1 was 764 lines (about 300 implementation, the rest tests and tracker), above the ~400 advisory, kept as one behavior unit.
 - **L6** (T3 evidence): RED build failure (`undefined: Fetcher`, `NewReplica`, `ErrForeignEvent`, `ErrInvalidEvent`). GREEN `ok .../internal/realtime 1.075s`; full race suite passed. Harness: 20 seeds, two tenants with the same canvas ID, three concurrent clients each with retries and deletes, three replicas per tenant with injected loss (20%), duplication (20%), delay past catch-up (10%), and shuffled order; every replica equals the authoritative state and rejects every foreign-tenant event. Mutation check: applying events without sequence buffering made the ordering and convergence tests fail, then the restored code passed. Tail loss is recovered by `CatchUp`, which transports call on reconnect or heartbeat; a cursor older than the log returns `ErrResyncRequired` (snapshot belongs to TE-008).
+- **L7** (T4 evidence): RED under `testing/synctest`: "drain took 300ms, want 400ms" and "deadlock: main bubble goroutine has exited but blocked goroutines remain" (the old `Close` dropped queued work and orphaned waiting `Submit` calls). GREEN `ok .../internal/realtime 1.099s`; `-race -count=30` passed in 3.8s; full race suite passed. Contract: `Close` rejects new work with `ErrClosed` immediately, waits for admitted sends, drains queued commands (measured exactly 400ms for four 100ms commands), and on deadline cancels the authorizer context, answers queued work with `ErrClosed` without applying it (zero events), and returns only after every actor exits. Retained events stay readable after `Close`. No timers are used.
