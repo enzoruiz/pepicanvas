@@ -1,0 +1,40 @@
+# TE-009 exclusive lock leases with a five-second heartbeat
+
+Issue #11 (TE-009). Branch `feat/te-009-lock-leases`, worktree `/home/enzo/projects/pepicanvas-te-009`, base `c5feef1`.
+Scope: stdlib-only core in `backend/internal/locking` (roadmap stage 2, rule 1: US-001 owns this stage's `go.mod` changes). Read every section up to `## Log`.
+
+## Specs
+
+- **S1 — Exclusive lease with visible owner.** Issue: "Concesiones temporales exclusivas muestran propietario, se renuevan por señal de vida (heartbeat) y expiran exactamente a los 5 segundos sin señal de vida (heartbeat) aceptada." One object of one canvas has at most one holder; a denied acquire and a lookup name the current holder.
+- **S2 — Concurrent acquire and renewal.** Issue: "Adquisición simultánea y renovación." Concurrent acquires grant exactly one; an accepted heartbeat moves the deadline to 5 s after it.
+- **S3 — Exact expiry.** Issue: "expiran exactamente a los 5 segundos sin señal de vida (heartbeat) aceptada." The lease is held until just before 5 s after the last accepted heartbeat (or the acquire) and is free at exactly 5 s; a heartbeat at or after the deadline is not accepted.
+- **S4 — Finish, cancel, expiry.** Issue: "Finalización, cancelación y expiración." Each releases the lease, reports why, and frees it for another holder at once.
+- **S5 — Disconnect, revocation, reconnect.** Issue: "Desconexión, revocación y reconexión." and "Nunca hay dos titulares y todos los caminos liberan dentro del tiempo definido sin restauración por reconexión." A session is bound to its connection context (a TE-002 lease context); when it ends, every lease of the session is released immediately and the session rejects further work. A reconnected session never gets the previous leases back. Authorization is re-evaluated before every acquire and heartbeat (TE-001), fail-closed.
+- **S6 — Independence.** Issue: "Independencia entre objetos y tenants." Leases are keyed by tenant, canvas, and object; equal IDs in two tenants never share a lease, and a session acts only inside its own tenant.
+- **S7 — Idempotency (CTRL-IDEM-01, owner TE-007 closed: proven complete).** Issue: "CTRL-IDEM-01 — reintentos de TE-009 (#11) antes y después de timeout o reconexión producen un único efecto y la misma respuesta; un payload distinto con el mismo operation ID se rechaza y la retención acotada se prueba en su vencimiento." Applies to acquire and release; the heartbeat is ephemeral presence with no durable effect and is excluded with that justification (stack.md CTRL-IDEM-01 exclusion).
+- **S8 — Shutdown primitive (CTRL-SHUTDOWN-01, deferred to TE-016).** Issue: "CTRL-SHUTDOWN-01 — una prueba de señal con trabajo de TE-009 (#11) en curso mide el drenaje, rechaza trabajo nuevo y demuestra ausencia de commits parciales, conexiones tardías, temporizadores o procesos huérfanos." This slice proves the manager part: `Close` rejects new work, releases every lease, and leaves no goroutines or timers.
+- **S9 — Correlation primitive (CTRL-TRACE-01, deferred to TE-015).** Issue: "CTRL-TRACE-01 — recorrido instrumentado de TE-009 (#11) conserva una correlación consultable desde aceptación por HTTP/WebSocket hasta dominio, PostgreSQL, outbox, actor, S3 o subproceso aplicable, con redacción verificada." Acquire, release, and the asynchronous expiry log the `correlation_id` (TE-003) of the operation that set the lease, with redaction verified.
+
+### Deferred to their owners
+
+- "CTRL-WEB-01 — pruebas de TE-009 (#11) cubren CSRF válido, faltante e inválido y Origin permitido, ausente y hostil, con rechazo antes del dominio, almacenamiento o upgrade WebSocket." → TE-014: no ingress exists; no own primitive.
+- "CTRL-READY-01 — pruebas de proceso de TE-009 (#11) distinguen vida y preparación durante inicio, caída de dependencias y cierre, y confirman que no se acepta trabajo cuando no está preparado." → TE-016: the manager has no external dependency; `ErrClosed` after `Close` is the only not-ready state it owns.
+
+### Non-goals
+
+"Ordenar comandos multimedia o persistir bloqueos." Also: WebSocket transport, broadcasting lease changes to replicas, HTTP routes.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S1–S6 | inline, test-first | done | see L3 |
+| T2 | S7 | inline, test-first | pending | |
+| T3 | S8, S9 | inline, test-first | pending | |
+| T4 | all | docs, independent verify, RDD assess | pending | |
+
+## Log
+
+- **L1** (user, 2026-10-18): "empieza el desarrollo del issue 11 en su respectivo worktree"
+- **L2** (scope from roadmap): stage 2 marks TE-009 "Paralelo seguro" beside US-001 and TE-008; rule 1 gives US-001 the stage's `go.mod` change, so TE-009 stays stdlib-only. Control owners per rule 2: IDEM owner TE-007 is closed (prove complete); WEB TE-014, TRACE TE-015, READY/SHUTDOWN TE-016 are open (defer, with primitives where this slice can build them).
+- **L3** (T1 evidence): RED `go test -race ./internal/locking` failed to build (`no non-test Go files`). GREEN `ok .../internal/locking 1.009s`; `-count=20` passed; full `go test -race ./...` passed. Mutation: expiring at `now.After(deadline)` instead of `!now.Before(deadline)` failed the exact-expiry, deadline-heartbeat, and independence tests. Decisions: a session is bound to its connection context with `context.AfterFunc`, so disconnect and a TE-002 cut release every lease before the cut returns (proven with a real `revocation.Registry`); leases compare by session pointer, so a reconnection with the same IDs never touches old leases; expiry is both a timer and a lazy check at every access, so it is exact even before the timer runs; the authorizer runs outside the manager lock before every acquire and for every lease on heartbeat, and any error ends the lease as `unauthorized`; a heartbeat renews every held lease (connection-level) and reports leases lost since the previous one; release is never authorized (it only reduces access) and accepts only `finished` or `cancelled`; denied acquires name the holder.
