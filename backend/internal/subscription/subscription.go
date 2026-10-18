@@ -58,6 +58,7 @@ type Tenant struct {
 // the SHA-256 of the operator ID and the normalized email.
 type Record struct {
 	OperationID   string
+	OperatorID    access.AccountID
 	Fingerprint   [32]byte
 	Result        Activation
 	CorrelationID string

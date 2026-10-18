@@ -92,8 +92,8 @@ func TestActivationCreatesOneActiveTenantWithOneDefaultCanvas(t *testing.T) {
 	if role, ok := store.Membership(got.TenantID, streamerA); !ok || role != access.RoleOwner {
 		t.Fatalf("owner membership = %q, %v", role, ok)
 	}
-	if records := store.Records(); len(records) != 1 || records[opID].CorrelationID != "corr-"+opID {
-		t.Fatalf("records = %+v, want one with the request correlation", records)
+	if records := store.Records(); len(records) != 1 || records[opID].CorrelationID != "corr-"+opID || records[opID].OperatorID != operator {
+		t.Fatalf("records = %+v, want one with the operator and the request correlation", records)
 	}
 }
 

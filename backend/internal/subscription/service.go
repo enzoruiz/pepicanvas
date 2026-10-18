@@ -126,6 +126,7 @@ func (s *Service) activate(ctx context.Context, request ActivateRequest, email s
 		result = Activation{AccountID: account, TenantID: tenant.ID, CanvasID: tenant.CanvasID, Created: created}
 		err = tx.RecordActivation(ctx, Record{
 			OperationID:   request.OperationID,
+			OperatorID:    request.OperatorID,
 			Fingerprint:   fingerprint,
 			Result:        result,
 			CorrelationID: request.CorrelationID,

@@ -122,8 +122,6 @@ func ownedTenant(ctx context.Context, q *db.Queries, account access.AccountID) (
 type subscriptionTx struct {
 	store *SubscriptionStore
 	q     *db.Queries
-	// operator is the grant locked by IsOperator; the record names it.
-	operator access.AccountID
 }
 
 func (t *subscriptionTx) IsOperator(ctx context.Context, account access.AccountID) (bool, error) {
@@ -134,7 +132,6 @@ func (t *subscriptionTx) IsOperator(ctx context.Context, account access.AccountI
 	if err != nil {
 		return false, err
 	}
-	t.operator = account
 	return true, nil
 }
 
@@ -213,7 +210,7 @@ func (t *subscriptionTx) RecordActivation(ctx context.Context, record subscripti
 	err := t.q.InsertActivation(ctx, db.InsertActivationParams{
 		OperationID:       record.OperationID,
 		Fingerprint:       record.Fingerprint[:],
-		OperatorAccountID: string(t.operator),
+		OperatorAccountID: string(record.OperatorID),
 		AccountID:         string(record.Result.AccountID),
 		TenantID:          record.Result.TenantID,
 		CanvasID:          record.Result.CanvasID,
