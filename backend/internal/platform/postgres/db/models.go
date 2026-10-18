@@ -58,6 +58,25 @@ type CanvasOperation struct {
 	AcceptedAt    pgtype.Timestamptz
 }
 
+type CanvasOutbox struct {
+	ID            int64
+	TenantID      string
+	CanvasID      string
+	Revision      int64
+	OperationID   string
+	CorrelationID pgtype.Text
+	Kind          string
+	Mutation      []byte
+	ObjectID      string
+	Z             int64
+	CreatedAt     pgtype.Timestamptz
+	Attempts      int32
+	NextAttemptAt pgtype.Timestamptz
+	LastError     pgtype.Text
+	SettledAt     pgtype.Timestamptz
+	Outcome       pgtype.Text
+}
+
 type Membership struct {
 	TenantID  string
 	AccountID string
