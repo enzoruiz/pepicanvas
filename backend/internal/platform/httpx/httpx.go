@@ -89,19 +89,25 @@ type ErrorCode string
 const (
 	ErrBadRequest   ErrorCode = "bad_request"
 	ErrUnauthorized ErrorCode = "unauthorized"
+	ErrForbidden    ErrorCode = "forbidden"
 	ErrNotFound     ErrorCode = "not_found"
 	ErrConflict     ErrorCode = "conflict"
-	ErrRateLimited  ErrorCode = "rate_limited"
-	ErrInternal     ErrorCode = "internal"
+	// ErrIdentityTaken reports a registration for an email that already has
+	// an account (US-001); without email verification it cannot be hidden.
+	ErrIdentityTaken ErrorCode = "identity_taken"
+	ErrRateLimited   ErrorCode = "rate_limited"
+	ErrInternal      ErrorCode = "internal"
 )
 
 var errorStatus = map[ErrorCode]int{
-	ErrBadRequest:   http.StatusBadRequest,
-	ErrUnauthorized: http.StatusUnauthorized,
-	ErrNotFound:     http.StatusNotFound,
-	ErrConflict:     http.StatusConflict,
-	ErrRateLimited:  http.StatusTooManyRequests,
-	ErrInternal:     http.StatusInternalServerError,
+	ErrBadRequest:    http.StatusBadRequest,
+	ErrUnauthorized:  http.StatusUnauthorized,
+	ErrForbidden:     http.StatusForbidden,
+	ErrNotFound:      http.StatusNotFound,
+	ErrConflict:      http.StatusConflict,
+	ErrIdentityTaken: http.StatusConflict,
+	ErrRateLimited:   http.StatusTooManyRequests,
+	ErrInternal:      http.StatusInternalServerError,
 }
 
 // Responder writes public errors. The internal error is logged through the

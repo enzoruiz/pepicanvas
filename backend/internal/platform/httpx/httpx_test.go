@@ -96,6 +96,8 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 	}{
 		{httpx.ErrBadRequest, http.StatusBadRequest},
 		{httpx.ErrUnauthorized, http.StatusUnauthorized},
+		{httpx.ErrForbidden, http.StatusForbidden},
+		{httpx.ErrIdentityTaken, http.StatusConflict},
 		{httpx.ErrNotFound, http.StatusNotFound},
 		{httpx.ErrConflict, http.StatusConflict},
 		{httpx.ErrRateLimited, http.StatusTooManyRequests},
