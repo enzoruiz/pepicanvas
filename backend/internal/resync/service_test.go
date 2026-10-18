@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -143,13 +144,13 @@ func (f *fixture) cut(t *testing.T, version uint64) {
 	}
 }
 
-func correlated(t *testing.T) (context.Context, string) {
+func newCorrelationID(t *testing.T) string {
 	t.Helper()
 	id, err := correlation.New()
 	if err != nil {
 		t.Fatalf("correlation.New: %v", err)
 	}
-	return correlation.WithID(context.Background(), id), id.String()
+	return id.String()
 }
 
 // requireNothing asserts that a failed resync delivered no state.
@@ -176,8 +177,8 @@ func TestAuthorizedResyncDeliversTheCommittedState(t *testing.T) {
 	for _, role := range []access.Role{access.RoleOwner, access.RoleModerator, access.RoleOBS} {
 		t.Run(string(role), func(t *testing.T) {
 			f := newFixture(t, viewer(role, "tenant-a", "tenant-a"))
-			ctx, id := correlated(t)
-			got, err := f.service.Snapshot(ctx, f.lease, keyA)
+			id := newCorrelationID(t)
+			got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA, CorrelationID: id})
 			if err != nil {
 				t.Fatalf("Snapshot: %v", err)
 			}
@@ -196,7 +197,7 @@ func TestAuthorizedResyncDeliversTheCommittedState(t *testing.T) {
 
 func TestResyncWithoutCorrelationCarriesNone(t *testing.T) {
 	f := newFixture(t)
-	got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestDeniedAccessReadsNothing(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, request)
-			got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+			got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 			requireNothing(t, got, err, access.ErrAccessDenied)
 			if loads := f.store.loads.Load(); loads != 0 {
 				t.Fatalf("store read %d times after denial", loads)
@@ -236,7 +237,7 @@ func TestDeniedAccessReadsNothing(t *testing.T) {
 func TestOtherTenantCanvasIsNeverDelivered(t *testing.T) {
 	// The actor belongs to tenant A and asks for the equal canvas ID of tenant B.
 	f := newFixture(t, viewer(access.RoleOwner, "tenant-a", "tenant-b"))
-	got, err := f.service.Snapshot(context.Background(), f.lease, keyB)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyB})
 	requireNothing(t, got, err, access.ErrAccessDenied)
 	if loads := f.store.loads.Load(); loads != 0 {
 		t.Fatalf("store read %d times", loads)
@@ -246,7 +247,7 @@ func TestOtherTenantCanvasIsNeverDelivered(t *testing.T) {
 func TestFactsFailureDenies(t *testing.T) {
 	f := newFixture(t)
 	f.facts.err = errors.New("membership store unavailable")
-	got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 	requireNothing(t, got, err, access.ErrAccessDenied)
 	if f.store.loads.Load() != 0 {
 		t.Fatal("store was read without facts")
@@ -257,7 +258,7 @@ func TestRevocationBetweenReadAndDeliveryDeliversNothing(t *testing.T) {
 	revoked := viewer(access.RoleModerator, "tenant-a", "tenant-a")
 	revoked.Membership = access.MembershipInactive
 	f := newFixture(t, viewer(access.RoleModerator, "tenant-a", "tenant-a"), revoked)
-	got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 	requireNothing(t, got, err, access.ErrAccessDenied)
 	if loads := f.store.loads.Load(); loads != 1 {
 		t.Fatalf("loads = %d, want 1", loads)
@@ -268,7 +269,7 @@ func TestCutLeaseReceivesNoState(t *testing.T) {
 	t.Run("cut before resync", func(t *testing.T) {
 		f := newFixture(t)
 		f.cut(t, 6)
-		got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+		got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 		requireNothing(t, got, err, revocation.ErrAccessRevoked)
 		if f.store.loads.Load() != 0 || f.facts.calls.Load() != 0 {
 			t.Fatalf("loads = %d, checks = %d after the cut", f.store.loads.Load(), f.facts.calls.Load())
@@ -281,7 +282,7 @@ func TestCutLeaseReceivesNoState(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+		got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 		requireNothing(t, got, err, revocation.ErrAccessRevoked)
 	})
 	t.Run("cut during a read that ignores cancellation", func(t *testing.T) {
@@ -290,7 +291,7 @@ func TestCutLeaseReceivesNoState(t *testing.T) {
 			f.cut(t, 6)
 			return nil
 		}
-		got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+		got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 		requireNothing(t, got, err, revocation.ErrAccessRevoked)
 	})
 }
@@ -307,7 +308,7 @@ func TestReconnection(t *testing.T) {
 	fresh := editorGrant
 	fresh.Version = 7
 	lease := f.register(t, fresh)
-	got, err := f.service.Snapshot(context.Background(), lease, keyA)
+	got, err := f.service.Snapshot(context.Background(), lease, resync.Request{Key: keyA})
 	if err != nil {
 		t.Fatalf("Snapshot after authorized reconnection: %v", err)
 	}
@@ -319,7 +320,7 @@ func TestReconnection(t *testing.T) {
 func TestReleasedLeaseReceivesNoState(t *testing.T) {
 	f := newFixture(t)
 	f.lease.Release()
-	got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 	requireNothing(t, got, err, revocation.ErrReleased)
 }
 
@@ -329,7 +330,7 @@ func TestShutdown(t *testing.T) {
 		if err := f.registry.Close(context.Background()); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+		got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 		requireNothing(t, got, err, revocation.ErrClosed)
 		if f.store.loads.Load() != 0 {
 			t.Fatal("store read after shutdown")
@@ -342,16 +343,23 @@ func TestShutdown(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		got, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+		got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 		requireNothing(t, got, err, revocation.ErrClosed)
 	})
 }
 
 func TestInvalidRequestsAreRejectedFirst(t *testing.T) {
 	f := newFixture(t)
-	got, err := f.service.Snapshot(context.Background(), f.lease, canvas.Key{TenantID: "tenant-a"})
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: canvas.Key{TenantID: "tenant-a"}})
 	requireNothing(t, got, err, canvas.ErrInvalid)
-	got, err = f.service.Snapshot(context.Background(), nil, keyA)
+	if !errors.Is(err, resync.ErrInvalidRequest) {
+		t.Fatalf("invalid key error = %v, want ErrInvalidRequest", err)
+	}
+	for _, id := range []string{"has space", strings.Repeat("c", 129), "tab\t"} {
+		got, err = f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA, CorrelationID: id})
+		requireNothing(t, got, err, resync.ErrInvalidRequest)
+	}
+	got, err = f.service.Snapshot(context.Background(), nil, resync.Request{Key: keyA})
 	requireNothing(t, got, err, access.ErrAccessDenied)
 	if f.store.loads.Load() != 0 || f.facts.calls.Load() != 0 {
 		t.Fatal("an invalid request reached access or the store")
@@ -361,7 +369,7 @@ func TestInvalidRequestsAreRejectedFirst(t *testing.T) {
 func TestMissingCanvasIsNotFound(t *testing.T) {
 	f := newFixture(t)
 	missing := canvas.Key{TenantID: "tenant-a", CanvasID: "canvas-9"}
-	got, err := f.service.Snapshot(context.Background(), f.lease, missing)
+	got, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: missing})
 	requireNothing(t, got, err, canvas.ErrNotFound)
 }
 
@@ -378,15 +386,15 @@ func TestRetriesReturnTheSameSnapshot(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	got, err := f.service.Snapshot(ctx, f.lease, keyA)
+	got, err := f.service.Snapshot(ctx, f.lease, resync.Request{Key: keyA})
 	requireNothing(t, got, err, context.DeadlineExceeded)
 
 	close(block)
-	first, err := f.service.Snapshot(context.Background(), f.lease, keyA)
+	first, err := f.service.Snapshot(context.Background(), f.lease, resync.Request{Key: keyA})
 	if err != nil {
 		t.Fatalf("retry after timeout: %v", err)
 	}
-	second, err := f.service.Snapshot(context.Background(), f.register(t, editorGrant), keyA)
+	second, err := f.service.Snapshot(context.Background(), f.register(t, editorGrant), resync.Request{Key: keyA})
 	if err != nil {
 		t.Fatalf("retry after reconnection: %v", err)
 	}

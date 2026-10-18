@@ -3,14 +3,43 @@ package resync
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
-	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 )
 
-// ErrInvalidConfig reports a service that cannot fail closed.
-var ErrInvalidConfig = errors.New("resync: invalid config")
+var (
+	// ErrInvalidConfig reports a service that cannot fail closed.
+	ErrInvalidConfig = errors.New("resync: invalid config")
+	// ErrInvalidRequest reports a resync request rejected before access or the store.
+	ErrInvalidRequest = errors.New("resync: invalid request")
+)
+
+// MaxCorrelationBytes bounds the correlation ID a request carries.
+const MaxCorrelationBytes = 128
+
+// Request asks for the committed state of one canvas. CorrelationID, when
+// set, is bounded printable ASCII and is echoed in the snapshot.
+type Request struct {
+	Key           canvas.Key
+	CorrelationID string
+}
+
+func (r Request) validate() error {
+	if err := canvas.ValidateKey(r.Key); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
+	if len(r.CorrelationID) > MaxCorrelationBytes {
+		return fmt.Errorf("%w: correlation identifier exceeds %d bytes", ErrInvalidRequest, MaxCorrelationBytes)
+	}
+	for i := 0; i < len(r.CorrelationID); i++ {
+		if c := r.CorrelationID[i]; c <= ' ' || c > '~' {
+			return fmt.Errorf("%w: malformed correlation identifier", ErrInvalidRequest)
+		}
+	}
+	return nil
+}
 
 // Loader reads the committed state of a canvas; canvas.Store satisfies it.
 // Load must read one consistent revision and honor ctx.
@@ -46,14 +75,15 @@ func NewService(loader Loader, facts Access) (*Service, error) {
 }
 
 // Snapshot reauthorizes the lease's actor and returns the committed state of
-// key, never replayed commands or ephemeral state. Access is checked before
+// the requested canvas, never replayed commands or ephemeral state. Access is checked before
 // the read and again immediately before delivery, and the read runs under
 // the lease: a denied, cut, released, or shut-down connection receives the
-// zero Snapshot and an error. The snapshot carries ctx's correlation ID.
-func (s *Service) Snapshot(ctx context.Context, lease Lease, key canvas.Key) (Snapshot, error) {
-	if err := canvas.ValidateKey(key); err != nil {
+// zero Snapshot and an error. The snapshot carries the request's correlation ID.
+func (s *Service) Snapshot(ctx context.Context, lease Lease, request Request) (Snapshot, error) {
+	if err := request.validate(); err != nil {
 		return Snapshot{}, err
 	}
+	key := request.Key
 	if lease == nil {
 		return Snapshot{}, access.ErrAccessDenied
 	}
@@ -81,8 +111,7 @@ func (s *Service) Snapshot(ctx context.Context, lease Lease, key canvas.Key) (Sn
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			id, _ := correlation.FromContext(ctx)
-			snapshot = NewSnapshot(committed, id.String())
+			snapshot = NewSnapshot(committed, request.CorrelationID)
 			return nil
 		}
 		return s.leaseErr(lease, access.GuardReadDelivery(facts, deliver))
