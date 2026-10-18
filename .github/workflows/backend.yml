@@ -48,6 +48,9 @@ jobs:
           test "$(/usr/bin/ffmpeg -version | sed -n '1p')" = "ffmpeg version ${tool_version} Copyright (c) 2000-2023 the FFmpeg developers"
           test "$(/usr/bin/ffprobe -version | sed -n '1p')" = "ffprobe version ${tool_version} Copyright (c) 2007-2023 the FFmpeg developers"
 
+      - name: Check generated SQL code
+        run: ./scripts/sqlc.sh diff
+
       - name: Run backend race tests
         working-directory: backend
         env:

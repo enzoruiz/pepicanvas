@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
+	tclog "github.com/testcontainers/testcontainers-go/log"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
@@ -31,6 +33,7 @@ func Start(t testing.TB) *Server {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	container, err := tcpostgres.Run(ctx, Image,
+		testcontainers.WithLogger(tclog.TestLogger(t)),
 		tcpostgres.WithDatabase("pepicanvas"),
 		tcpostgres.WithUsername("pepicanvas"),
 		tcpostgres.WithPassword("pepicanvas"),
@@ -60,7 +63,9 @@ func (s *Server) DSN(t testing.TB) string {
 }
 
 // Restart stops the server process and starts it again on the same data
-// directory, which drops every open connection.
+// directory, which drops every open connection. It returns once the server
+// accepts connections again; the log-based wait strategy cannot tell, because
+// the ready messages of the previous run are still in the container log.
 func (s *Server) Restart(t testing.TB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -71,5 +76,18 @@ func (s *Server) Restart(t testing.TB) {
 	}
 	if err := s.container.Start(ctx); err != nil {
 		t.Fatalf("start PostgreSQL container: %v", err)
+	}
+	dsn := s.DSN(t)
+	for {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err == nil {
+			_ = conn.Close(ctx)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("PostgreSQL did not accept connections after restart: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
