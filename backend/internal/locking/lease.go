@@ -36,7 +36,10 @@ type Key struct {
 }
 
 // Holder identifies who holds a lease: the account other clients see as the
-// owner, and the connection session the lease belongs to.
+// owner, and the connection session the lease belongs to. Answers to other
+// sessions include the full Holder, so SessionID must be an opaque
+// connection ID, never a session token, and transports show other clients
+// only the account.
 type Holder struct {
 	TenantID  string
 	AccountID string

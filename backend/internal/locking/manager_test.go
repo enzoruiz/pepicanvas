@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -291,6 +292,64 @@ func TestDisconnectReleasesEveryLeaseAndReconnectDoesNotRestore(t *testing.T) {
 			t.Fatalf("Attach with an ended connection: err = %v, want ErrDetached", err)
 		}
 	})
+}
+
+// endingConn is a connection context that ends right after Attach's
+// liveness check, before its hook registration: only the first Err call
+// reports it live.
+type endingConn struct {
+	context.Context
+	checked atomic.Bool
+	done    chan struct{}
+}
+
+func newEndingConn() *endingConn {
+	done := make(chan struct{})
+	close(done)
+	return &endingConn{Context: context.Background(), done: done}
+}
+
+func (c *endingConn) Done() <-chan struct{} { return c.done }
+
+func (c *endingConn) Err() error {
+	if c.checked.CompareAndSwap(false, true) {
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestConnectionEndingDuringAttachDetachesTheSession(t *testing.T) {
+	manager := newManager(t, locking.Config{})
+	for range 100 {
+		session, err := manager.Attach(newEndingConn(), holder("tenant-a", "alice", "s-alice"))
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			_, err := session.Heartbeat(context.Background())
+			if errors.Is(err, locking.ErrDetached) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("session still live after its connection ended: err = %v", err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestAttachSurvivesAConnectionEndingConcurrently(t *testing.T) {
+	manager := newManager(t, locking.Config{})
+	for range 5000 {
+		conn, cancel := context.WithCancel(context.Background())
+		go cancel()
+		if session, err := manager.Attach(conn, holder("tenant-a", "alice", "s-alice")); err == nil {
+			session.Detach()
+		} else if !errors.Is(err, locking.ErrDetached) {
+			t.Fatalf("Attach: err = %v, want nil or ErrDetached", err)
+		}
+	}
 }
 
 func TestDetachReleasesEveryLease(t *testing.T) {

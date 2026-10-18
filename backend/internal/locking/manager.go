@@ -121,9 +121,9 @@ type Session struct {
 	manager *Manager
 	holder  Holder
 	ctx     context.Context
-	stop    func() bool
 
 	// Guarded by manager.mu.
+	stop     func() bool
 	detached bool
 	held     map[Key]*entry
 	lost     map[Key]Reason
@@ -156,7 +156,8 @@ func (m *Manager) Attach(conn context.Context, holder Holder) (*Session, error) 
 	return session, nil
 }
 
-// Lookup returns the current lease on key, if any.
+// Lookup returns the current lease on key, if any. It does not scope key
+// to a tenant: callers must pass a key of the caller's own tenant.
 func (m *Manager) Lookup(key Key) (Lease, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -193,6 +194,11 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.inflight.Wait()
 		close(drained)
 	}()
+	select {
+	case <-drained:
+		return nil
+	default:
+	}
 	select {
 	case <-drained:
 		return nil
@@ -343,10 +349,12 @@ func (s *Session) Release(ctx context.Context, request Request) (Result, error) 
 // session's connection context ending calls it; transports may call it
 // directly on disconnect. It is idempotent.
 func (s *Session) Detach() {
-	s.stop()
 	m := s.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Attach assigns stop under the lock, and the hook may run Detach
+	// before Attach returns.
+	s.stop()
 	if s.detached {
 		return
 	}
