@@ -22,6 +22,7 @@
     "browser:matrix:test": "node --test scripts/browser-matrix.node-test.mjs",
     "privacy:matrix": "node scripts/privacy-runner.mjs --download",
     "privacy:matrix:offline": "node scripts/privacy-runner.mjs --offline",
+    "privacy:evidence:test": "node --test scripts/privacy-evidence.node-test.mjs",
     "playwright:list": "playwright test --list --pass-with-no-tests"
   },
   "dependencies": {

@@ -18,14 +18,18 @@ const matrixBrowsers = JSON.parse(
 ) as MatrixBrowser[];
 
 export const fixtureOrigin = "http://127.0.0.1:4174";
-export const fixtureLogPath = resolve(
+// The privacy runner collects everything under this directory as evidence
+// after each slot: the fixture log, Playwright output, and recorded decoys.
+export const privacyCachePath = resolve(
   import.meta.dirname,
-  ".cache/privacy-fixture/fixture.log",
+  ".cache/privacy-fixture",
 );
+export const fixtureLogPath = resolve(privacyCachePath, "fixture.log");
 
 export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.privacy.mjs",
+  outputDir: resolve(privacyCachePath, "test-results"),
   fullyParallel: false,
   projects: matrixBrowsers.map((browser) => ({
     name: browser.slot,

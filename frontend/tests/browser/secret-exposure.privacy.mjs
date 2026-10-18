@@ -1,14 +1,29 @@
 /* global fetch, URL, window, performance */
 
+import { mkdir, writeFile } from "node:fs/promises";
+
 import { expect, test } from "@playwright/test";
 
 const fixture = "http://127.0.0.1:4174";
+const decoysPath = new URL(
+  "../../.cache/privacy-fixture/decoys.json",
+  import.meta.url,
+);
 
 async function loadDecoys(request) {
   const response = await request.get(`${fixture}/__fixture/decoys`);
   expect(response.ok()).toBe(true);
   return response.json();
 }
+
+// The fixture generates fresh decoys on every start; record them so the
+// privacy runner can scan this run's evidence and prove rotation.
+test.beforeAll(async () => {
+  const response = await fetch(`${fixture}/__fixture/decoys`);
+  expect(response.ok).toBe(true);
+  await mkdir(new URL(".", decoysPath), { recursive: true });
+  await writeFile(decoysPath, await response.text(), { mode: 0o600 });
+});
 
 test.beforeEach(async ({ request }) => {
   await request.post(`${fixture}/__fixture/restore`);
