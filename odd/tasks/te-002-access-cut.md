@@ -1,0 +1,46 @@
+# TE-002 access cut and connection closure
+
+Issue #7 (TE-002). Branch `feat/te-002-access-cut`, worktree `/home/enzo/projects/pepicanvas-te-002`, base `beee2b1`.
+Scope: stdlib-only core in `backend/internal/revocation` (roadmap stage 1, rule 1: TE-004 owns this stage's `go.mod` changes), with a connection port the future WebSocket adapter implements. Read every section up to `## Log`.
+
+## Specs
+
+- **S1 — Confirmed cut.** Issue: "Un mecanismo común aplica revocación, desactivación y rotación desde la confirmación del servidor y cierra conexiones afectadas en ≤2 segundos." One registry applies the three cut types; a cut is applied only when it carries a server confirmation (a nonzero confirmed version).
+- **S2 — Close clock.** Issue: "Reloj de confirmación y cierre para editor y OBS." Every affected editor and OBS connection is closed within 2 s of the confirmed cut reaching the registry; a connection that does not close gracefully in time is aborted; the cut reports each close latency.
+- **S3 — Confirmation order.** Issue: "Carreras ordenadas por confirmación." A cut affects only grants observed at an earlier confirmed version, regardless of arrival order.
+- **S4 — Rejection after cut.** Issue: "Rechazo de lecturas, escrituras y comandos no confirmados." Once a cut is applied, every read, write, and command through an affected connection is rejected, even before its transport finishes closing; an unconfirmed cut is rejected as invalid.
+- **S5 — No restore.** Issue: "Reconexión y caché no restauran acceso." Registering again with a grant observed before the cut is rejected; a grant older than the retained cut history is rejected as stale.
+- **S6 — Two tenants.** Issue: "Todos los tipos de corte cumplen ≤2 segundos bajo prueba concurrente de dos tenants; cualquier exceso falla." Concurrent cuts of every type in two tenants close within 2 s, never touch the other tenant, and any excess fails the test.
+- **S7 — Idempotency (CTRL-IDEM-01).** Issue: "reintentos de TE-002 (#7) de una misma revocación, desactivación o rotación producen un único corte y la misma respuesta; un payload distinto con el mismo identificador de operación se rechaza."
+- **S8 — Shutdown primitive (CTRL-SHUTDOWN-01, deferred to TE-016).** Issue: "el registro de conexiones expone un cierre con el contrato de `Hub.Close` de TE-007: rechaza conexiones nuevas, cierra las existentes con motivo reintentable dentro del presupuesto y no deja goroutines ni temporizadores."
+- **S9 — Correlation primitive (CTRL-TRACE-01, deferred to TE-015).** Issue: "la confirmación y el cierre de cada conexión afectada registran el mismo `correlation_id` (TE-003), con redacción verificada."
+
+### Deferred to their owners
+
+- CTRL-CONS-01 → TE-012: this slice enforces only "the cut applies from a confirmation"; the outbox and commit-to-registry delivery belong to TE-012.
+- CTRL-WEB-01 → TE-014; CTRL-RESTORE-01 → TE-017: no own primitive.
+
+### Non-goals
+
+"Definir la matriz de permisos o generar credenciales." Also: WebSocket transport, HTTP routes, persistence of cuts.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S1–S6 | inline, test-first | done | `ad394e5` |
+| T2 | S7 | inline, test-first | done | `4a1effa` |
+| T3 | S8, S9 | inline, test-first | done | `44f4464` |
+| T4 | all | docs, independent verify, RDD assess | done | `a30f608`, see L6 |
+
+## Log
+
+- **L1** (user, 2026-10-18): "empieza el desarrollo del issue 7 en su respectivo worktree"
+- **L2** (scope from roadmap): stage 1 marks TE-002 "Paralelo seguro" beside TE-004, and rule 1 allows only one issue per stage to add dependencies, so TE-002 stays stdlib-only, like TE-007.
+- **L3** (T1 evidence): RED `go test -race ./internal/revocation` failed to build (`undefined: Reason`, `Registry`, `Grant`, `Conn`, `Lease`). GREEN `ok .../internal/revocation 1.010s`; `-count=3` passed; full `go test -race ./...` passed. Mutation: dropping the `grant.Version < cut.Version` check failed `TestCutsApplyInConfirmationOrderNotArrivalOrder`. Decisions: the clock starts when the confirmed cut reaches `Apply` (commit-to-registry delay belongs to TE-012); graceful close gets 3/4 of the 2 s budget, then `Abort`; any close over budget returns `ErrBudgetExceeded` with the full report; cut history is per tenant (default 4096) and eviction raises a per-tenant floor that makes older grants `ErrStaleGrant`; every cut is tenant-scoped, so a session revocation names its tenant.
+  Slice note: T1 is 1084 lines (about 550 implementation, the rest tests and tracker), above the ~400 advisory, kept as one behavior unit.
+- **L4** (T2 evidence): RED build failure (`undefined: ErrOperationConflict`, unknown `Config.Retention`). GREEN `ok .../internal/revocation 1.013s`, `-count=3` passed. Decisions: results are retained per tenant by operation ID; the intent covers type, target, and version but not the correlation ID; concurrent retries wait for the first cut; the budget failure is retained like any answer; invalid and conflicting cuts are not retained; defaults 10m and 4096, and the TTL must not be shorter than the budget.
+- **L5** (T3 evidence): RED build failure (`registry.Close undefined`, `undefined: ErrClosed`). GREEN `ok .../internal/revocation 1.015s`; `-count=20` passed; full `go vet ./...` and `go test -race ./...` passed. Contract: `Close` rejects `Register` and `Apply` with `ErrClosed` at once, ends every live lease with `ErrClosed`, closes with the retryable `ReasonShutdown` within the budget (abort included), waits for cuts in progress, and on ctx deadline aborts every pending close and returns ctx's error after all returned; idempotent; the synctest bubble proves no goroutines or timers remain. Correlation: `revocation` does not import `platform` (domain rule); it logs with `*Context` so the TE-003 handler adds `correlation_id`; the test proves the confirmation and every closure share it and that session, credential, and account decoys never reach the logs (target IDs are not logged). Budget excess logs at ERROR.
+- **L6** (T4 evidence): docs `a30f608` (`docs/stack.md` decision and structure line; `scripts/check-control-contract.sh` OK). `gentle_review assess` over `beee2b1..a30f608`: `risk: medium`, `reviewDue: false` (`under_budget`); no native review. Independent `gentle-ai-verify` (security and concurrency are named high-risk items): S1–S7 and S9 PASS, **S8 FAIL** blocker: on the abort paths `closeOne` returned without waiting for the transport `Close` goroutine, so `Close` and `Apply` could return with goroutines alive (the fake returned exactly at `Abort`, hiding it). Fix: RED `TestCloseAndCutWaitForAbortedTransportClose` ("deadlock: main bubble goroutine has exited but blocked goroutines remain"); after `Abort` the registry now waits for `Close`, cancels the graceful ctx when shutdown runs out of time (exposed by `TestCloseDeadlineAbortsRemainingConnections` once waiting), and measures latency after `Close` returns. Added `TestEveryCutTypeStaysInsideItsTenant` for the S6 gap the verifier noted (the concurrent test fully deactivated tenant-b). GREEN `-count=20` and full `go test -race ./...`; `git diff --check` clean. Differential check: not applicable, `internal/revocation` is a new package and no existing command or helper shares its code.
+- Per-S verdicts: S1–S7 PASS and S9 PASS (verifier); S8 PASS after the fix (self-verified, RED→GREEN observed).
+- Known limits: the `Conn` port must make `Close` return promptly after `Abort`; a hung transport blocks the cut or shutdown (documented on the port). `Guard` checks then runs: an operation already running when the cut lands only sees its ctx cancelled. Tenant entries are never evicted. After `Close`, retries return `ErrClosed` instead of the retained answer. An in-flight operation evicted by the count bound (more than 4096 in flight per tenant) could be cut twice.
