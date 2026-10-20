@@ -40,6 +40,7 @@ type MemoryStore struct {
 	mu             sync.Mutex
 	state          state
 	failures       map[string]error
+	beforeRecord   func()
 	transactions   int
 	accountLookups int
 }
@@ -96,6 +97,15 @@ func (m *MemoryStore) FailOnce(step string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failures[step] = err
+}
+
+// BeforeRecordOnce runs fn at the start of the next RecordActivation with the
+// store unlocked, as a concurrent transaction that commits before that
+// activation inserts its record.
+func (m *MemoryStore) BeforeRecordOnce(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.beforeRecord = fn
 }
 
 // Tenants returns the committed tenants.
@@ -251,6 +261,12 @@ func (t *memoryTx) ActivateTenant(_ context.Context, tenantID string) error {
 }
 
 func (t *memoryTx) RecordActivation(_ context.Context, record subscription.Record, purgeBefore time.Time) error {
+	if fn := t.store.beforeRecord; fn != nil {
+		t.store.beforeRecord = nil
+		t.store.mu.Unlock()
+		fn()
+		t.store.mu.Lock()
+	}
 	if err := t.store.fail("RecordActivation"); err != nil {
 		return err
 	}
@@ -258,6 +274,10 @@ func (t *memoryTx) RecordActivation(_ context.Context, record subscription.Recor
 		if !r.AcceptedAt.After(purgeBefore) {
 			delete(t.state.records, id)
 		}
+	}
+	// The primary key also sees rows other transactions committed meanwhile.
+	if r, ok := t.store.state.records[record.OperationID]; ok && r.AcceptedAt.After(purgeBefore) {
+		return subscription.ErrOperationRetained
 	}
 	if _, ok := t.state.records[record.OperationID]; ok {
 		return subscription.ErrOperationRetained

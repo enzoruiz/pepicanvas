@@ -243,11 +243,13 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 	}
 	principal, err := a.Accounts.Authenticate(r.Context(), session.Token)
 	if err != nil {
+		a.abandonSession(r, session.Token)
 		a.responder.Error(w, r, httpx.ErrInternal, err)
 		return
 	}
 	operator, err := a.Subscriptions.IsOperator(r.Context(), principal.AccountID)
 	if err != nil {
+		a.abandonSession(r, session.Token)
 		a.responder.Error(w, r, httpx.ErrInternal, err)
 		return
 	}
@@ -267,6 +269,15 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 		CSRFToken: session.CSRF.Reveal(),
 		Operator:  operator,
 	})
+}
+
+// abandonSession ends a session whose token the browser never received, so a
+// failed sign-in leaves no usable server-side session. It is best-effort: a
+// failure is logged and the session expires on its own.
+func (a *api) abandonSession(r *http.Request, token secret.Value) {
+	if err := a.Accounts.SignOut(r.Context(), token); err != nil {
+		a.Logger.ErrorContext(r.Context(), "undelivered session not ended", slog.String("error", err.Error()))
+	}
 }
 
 func (a *api) currentSession(w http.ResponseWriter, r *http.Request) {

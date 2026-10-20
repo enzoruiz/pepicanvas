@@ -278,6 +278,8 @@ func TestOperatorGrantIsHeldUntilCommit(t *testing.T) {
 	// While the activation waits to commit, a revocation cannot remove the
 	// grant the activation was authorized with.
 	reached, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
 	postgres.SetSubscriptionFault(s.store, func(_ context.Context, step string) error {
 		if step == "commit" {
 			close(reached)
@@ -285,9 +287,23 @@ func TestOperatorGrantIsHeldUntilCommit(t *testing.T) {
 		}
 		return nil
 	})
-	done := make(chan error, 1)
-	go func() { _, err := activate(s, operator, "op-held-grant-00001", "alice@example.com"); done <- err }()
-	<-reached
+	done, finished := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := activate(s, operator, "op-held-grant-00001", "alice@example.com")
+		done <- err
+	}()
+	// On every exit path, including a failure below, the held activation is
+	// released and drained before the pool cleanup closes the pool.
+	t.Cleanup(func() {
+		releaseHeld()
+		<-finished
+	})
+	select {
+	case <-reached:
+	case err := <-done:
+		t.Fatalf("activation ended before commit: %v", err)
+	}
 
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '200ms'"); err != nil {
@@ -300,7 +316,7 @@ func TestOperatorGrantIsHeldUntilCommit(t *testing.T) {
 	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
 		t.Fatalf("revocation during activation: error = %v, want lock_not_available", err)
 	}
-	close(release)
+	releaseHeld()
 	if err := <-done; err != nil {
 		t.Fatalf("activation: %v", err)
 	}

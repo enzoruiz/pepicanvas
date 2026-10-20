@@ -30,6 +30,25 @@ CREATE TABLE subscription_activations (
 CREATE INDEX subscription_activations_accepted_at ON subscription_activations (accepted_at);
 
 -- +goose Down
+-- Rolling back would drop the owner and canvas of activated tenants and every
+-- operator grant, so it is refused while any exist; legacy rows are kept.
+-- +goose StatementBegin
+DO $$
+DECLARE
+    activated bigint;
+    grants bigint;
+BEGIN
+    SELECT count(*) INTO activated FROM tenants WHERE owner_account_id IS NOT NULL;
+    IF activated > 0 THEN
+        RAISE EXCEPTION '00004_activation down refused: % activated tenant(s) would lose their owner and canvas', activated;
+    END IF;
+    SELECT count(*) INTO grants FROM operators;
+    IF grants > 0 THEN
+        RAISE EXCEPTION '00004_activation down refused: % operator grant(s) would be lost', grants;
+    END IF;
+END
+$$;
+-- +goose StatementEnd
 DROP TABLE subscription_activations;
 ALTER TABLE tenants
     DROP CONSTRAINT tenants_owner_canvas_check,

@@ -87,6 +87,7 @@ func (b *syncBuffer) String() string {
 
 type env struct {
 	t        *testing.T
+	faults   *faults
 	store    *accesstest.MemoryStore
 	hasher   *accesstest.PlainHasher
 	clock    *accesstest.Clock
@@ -104,6 +105,7 @@ func newEnv(t *testing.T, limits httpapi.Limits) *env {
 		store:  accesstest.NewMemoryStore(),
 		hasher: &accesstest.PlainHasher{},
 		clock:  accesstest.NewClock(),
+		faults: &faults{},
 		subs:   subscriptiontest.NewMemoryStore(),
 		logs:   &syncBuffer{},
 	}
@@ -113,10 +115,10 @@ func newEnv(t *testing.T, limits httpapi.Limits) *env {
 		t.Fatal(err)
 	}
 	handler, err := httpapi.New(httpapi.Config{
-		Accounts:      svc,
+		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults},
 		Memberships:   memberships{activated: e.subs, seeded: e.store},
 		Canvases:      e.canvases,
-		Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)),
+		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults},
 		AllowedOrigin: origin,
 		Logger:        slog.New(logging.NewHandler(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
 		Now:           e.clock.Now,

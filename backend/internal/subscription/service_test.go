@@ -435,3 +435,60 @@ func TestIsOperatorReadsTheCurrentGrant(t *testing.T) {
 		t.Fatal("revoked operator still reported as operator")
 	}
 }
+
+// A concurrent activation that commits the same operation ID between this
+// activation's record lookup and its record insert is replayed.
+func TestAConcurrentCommitOfTheSameOperationIDIsReplayed(t *testing.T) {
+	service, store, _ := fixture(t)
+	var winner subscription.Activation
+	store.BeforeRecordOnce(func() {
+		var err error
+		if winner, err = service.Activate(context.Background(), activate(opID, "a@example.com")); err != nil {
+			t.Errorf("concurrent Activate: %v", err)
+		}
+	})
+
+	got, err := service.Activate(context.Background(), activate(opID, "A@example.com"))
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if got != winner {
+		t.Fatalf("replay = %+v, want the committed answer %+v", got, winner)
+	}
+	records := store.Records()
+	if len(records) != 1 || records[opID].Result != got {
+		t.Fatalf("records = %+v, want one record with %+v", records, got)
+	}
+	if tenant := onlyTenant(t, store, streamerA); tenant.ID != got.TenantID || tenant.CanvasID != got.CanvasID {
+		t.Fatalf("tenant = %+v, answer = %+v", tenant, got)
+	}
+	if len(store.Canvases()) != 1 {
+		t.Fatalf("canvases = %d, want 1", len(store.Canvases()))
+	}
+	// The concurrent transaction, the one that lost the insert, and its replay.
+	if n := store.Transactions(); n != 3 {
+		t.Fatalf("transactions = %d, want 3", n)
+	}
+}
+
+func TestAConcurrentCommitOfTheSameOperationIDWithAnotherPayloadIsAConflict(t *testing.T) {
+	service, store, _ := fixture(t)
+	var winner subscription.Activation
+	store.BeforeRecordOnce(func() {
+		var err error
+		if winner, err = service.Activate(context.Background(), activate(opID, "b@example.com")); err != nil {
+			t.Errorf("concurrent Activate: %v", err)
+		}
+	})
+
+	if _, err := service.Activate(context.Background(), activate(opID, "a@example.com")); !errors.Is(err, subscription.ErrOperationConflict) {
+		t.Fatalf("err = %v, want ErrOperationConflict", err)
+	}
+	if records := store.Records(); len(records) != 1 || records[opID].Result != winner {
+		t.Fatalf("records = %+v, want only the concurrent %+v", records, winner)
+	}
+	tenants := store.Tenants()
+	if len(tenants) != 1 || tenants[0].Owner != streamerB {
+		t.Fatalf("tenants = %+v, want only B's", tenants)
+	}
+}
