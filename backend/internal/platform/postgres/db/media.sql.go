@@ -164,6 +164,38 @@ func (q *Queries) ExpireReservations(ctx context.Context, arg ExpireReservations
 	return released, err
 }
 
+const getAbandonOperation = `-- name: GetAbandonOperation :one
+SELECT asset_id, abandon_reason, rejection_code
+FROM media_operations
+WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3
+    AND abandon_reason IS NOT NULL AND accepted_at > $4
+`
+
+type GetAbandonOperationParams struct {
+	TenantID    string
+	CanvasID    string
+	OperationID string
+	ExpiredAt   pgtype.Timestamptz
+}
+
+type GetAbandonOperationRow struct {
+	AssetID       string
+	AbandonReason pgtype.Text
+	RejectionCode pgtype.Text
+}
+
+func (q *Queries) GetAbandonOperation(ctx context.Context, arg GetAbandonOperationParams) (GetAbandonOperationRow, error) {
+	row := q.db.QueryRow(ctx, getAbandonOperation,
+		arg.TenantID,
+		arg.CanvasID,
+		arg.OperationID,
+		arg.ExpiredAt,
+	)
+	var i GetAbandonOperationRow
+	err := row.Scan(&i.AssetID, &i.AbandonReason, &i.RejectionCode)
+	return i, err
+}
+
 const getMediaOperation = `-- name: GetMediaOperation :one
 SELECT fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes
 FROM media_operations
@@ -252,8 +284,8 @@ func (q *Queries) GetReference(ctx context.Context, arg GetReferenceParams) (str
 }
 
 const insertMediaOperation = `-- name: InsertMediaOperation :exec
-INSERT INTO media_operations (tenant_id, canvas_id, operation_id, fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO media_operations (tenant_id, canvas_id, operation_id, fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at, abandon_reason, rejection_code)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 `
 
 type InsertMediaOperationParams struct {
@@ -268,6 +300,8 @@ type InsertMediaOperationParams struct {
 	ReservedBytes int64
 	CorrelationID pgtype.Text
 	AcceptedAt    pgtype.Timestamptz
+	AbandonReason pgtype.Text
+	RejectionCode pgtype.Text
 }
 
 func (q *Queries) InsertMediaOperation(ctx context.Context, arg InsertMediaOperationParams) error {
@@ -283,6 +317,8 @@ func (q *Queries) InsertMediaOperation(ctx context.Context, arg InsertMediaOpera
 		arg.ReservedBytes,
 		arg.CorrelationID,
 		arg.AcceptedAt,
+		arg.AbandonReason,
+		arg.RejectionCode,
 	)
 	return err
 }

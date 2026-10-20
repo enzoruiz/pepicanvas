@@ -132,6 +132,12 @@ func (s *fakeStorage) block(method string) {
 	s.blocks[method] = true
 }
 
+func (s *fakeStorage) unblock(method string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.blocks, method)
+}
+
 func (s *fakeStorage) object(key string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -684,43 +690,84 @@ func TestUploadPipeline(t *testing.T) {
 		f.wantServed(t, first.AssetID, "hello")
 	})
 
-	t.Run("retry after a failure leaves nothing behind", func(t *testing.T) {
-		f := srv.fixture(t)
-		req := f.request("hello", "ref-1")
-		f.storage.fail("put", failWith(errStorage))
-		_, err := f.uploads.Upload(ctx, req)
-		wantFailed(t, err, errStorage)
-		f.storage.fail("put", nil)
-		retry := req
-		retry.Body = strings.NewReader("hello")
-		if _, err := f.uploads.Upload(ctx, retry); !errors.Is(err, media.ErrNotFound) {
-			t.Fatalf("retry = %v, want ErrNotFound (the reservation was abandoned)", err)
-		}
-		f.wantUsage(t, 0, 0)
-		f.wantGone(t, f.reservation(t, req))
-		if f.storage.objectCount() != 0 {
-			t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
-		}
-	})
-
-	t.Run("retry after a rejection with another outcome leaves nothing behind", func(t *testing.T) {
-		f := srv.fixture(t)
-		req := f.request("hello", "ref-1")
-		f.inspector.reject(dimensionsRejection(t))
-		_, err := f.uploads.Upload(ctx, req)
-		wantRejection(t, err, media.RejectionDimensionsExceeded)
-		f.inspector.set(nil)
-		retry := req
-		retry.Body = strings.NewReader("hello")
-		if _, err := f.uploads.Upload(ctx, retry); !errors.Is(err, media.ErrNotFound) {
-			t.Fatalf("retry = %v, want ErrNotFound (the reservation was abandoned)", err)
-		}
-		f.wantUsage(t, 0, 0)
-		f.wantGone(t, f.reservation(t, req))
-		if f.storage.objectCount() != 0 {
-			t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
-		}
-	})
+	// S9: a retry after an abandoned upload repeats the recorded response
+	// without a new reservation or a second write, even when the stage that
+	// failed would now succeed.
+	retries := []struct {
+		name   string
+		setup  func(t *testing.T, f *fixture) context.Context
+		heal   func(f *fixture)
+		first  func(t *testing.T, err error)
+		verify func(t *testing.T, err error)
+	}{
+		{
+			name: "retry after a failure repeats ErrUploadFailed",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.storage.fail("put", failWith(errStorage))
+				return ctx
+			},
+			heal:  func(f *fixture) { f.storage.fail("put", nil) },
+			first: func(t *testing.T, err error) { wantFailed(t, err, errStorage) },
+			verify: func(t *testing.T, err error) {
+				if !errors.Is(err, media.ErrUploadFailed) || errors.Is(err, errStorage) {
+					t.Fatalf("retry = %v, want ErrUploadFailed", err)
+				}
+			},
+		},
+		{
+			name: "retry after a rejection with another outcome repeats the rejection",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.inspector.reject(dimensionsRejection(t))
+				return ctx
+			},
+			heal:  func(f *fixture) { f.inspector.set(nil) },
+			first: func(t *testing.T, err error) { wantRejection(t, err, media.RejectionDimensionsExceeded) },
+			verify: func(t *testing.T, err error) {
+				wantRejection(t, err, media.RejectionDimensionsExceeded)
+				if _, unchanged := err.(*media.Rejection); !unchanged {
+					t.Fatalf("retry = %#v, want a *Rejection returned unwrapped", err)
+				}
+			},
+		},
+		{
+			name: "retry after a cancellation repeats ErrUploadFailed",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.storage.block("put")
+				return cancelWhenStarted(t, f.storage.started)
+			},
+			heal:  func(f *fixture) { f.storage.unblock("put") },
+			first: wantCancelled,
+			verify: func(t *testing.T, err error) {
+				if !errors.Is(err, media.ErrUploadFailed) || errors.Is(err, context.Canceled) {
+					t.Fatalf("retry = %v, want ErrUploadFailed", err)
+				}
+			},
+		},
+	}
+	for _, tc := range retries {
+		t.Run(tc.name, func(t *testing.T) {
+			f := srv.fixture(t)
+			req := f.request("hello", "ref-1")
+			_, err := f.uploads.Upload(tc.setup(t, f), req)
+			tc.first(t, err)
+			tc.heal(f)
+			for range 2 {
+				retry := req
+				retry.Body = strings.NewReader("hello")
+				_, err := f.uploads.Upload(ctx, retry)
+				tc.verify(t, err)
+			}
+			reserved := f.reservation(t, req)
+			f.wantUsage(t, 0, 0)
+			f.wantGone(t, reserved)
+			if keys := f.storage.putKeys(); len(keys) != 1 || keys[0] != reserved.StorageKey {
+				t.Fatalf("storage puts = %v, want only the first under %s", keys, reserved.StorageKey)
+			}
+			if f.storage.objectCount() != 0 {
+				t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
+			}
+		})
+	}
 
 	// A retry after the asset was released and purged replays the response
 	// but must not leave the rewritten bytes orphaned in storage.
@@ -793,6 +840,55 @@ func TestConcurrentDuplicateKeepsValidatedBytes(t *testing.T) {
 	f.wantUsage(t, 5, 0)
 	if f.storage.objectCount() != 1 {
 		t.Fatalf("storage holds %d objects, want one", f.storage.objectCount())
+	}
+}
+
+// S9: a concurrent duplicate that fails after the original was rejected
+// repeats the recorded rejection and leaves no bytes behind.
+func TestConcurrentDuplicateRepeatsTheRecordedAbandon(t *testing.T) {
+	srv := startServer(t)
+	f := srv.fixture(t)
+	req := f.request("hello", "ref-1")
+	duplicate := req
+	duplicate.Body = strings.NewReader("hello")
+	f.inspector.reject(dimensionsRejection(t))
+	// The original's Put succeeds; the duplicate's, which runs after the
+	// original abandoned the upload, fails.
+	var puts atomic.Int64
+	f.storage.fail("put", func(string) error {
+		if puts.Add(1) > 1 {
+			return errStorage
+		}
+		return nil
+	})
+	// The duplicate passes its lookup and reservation, then stalls before
+	// writing while the original is rejected.
+	stalled, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	f.storage.beforePut = func() {
+		if first.CompareAndSwap(false, true) {
+			close(stalled)
+			<-release
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.uploads.Upload(context.Background(), duplicate)
+		done <- err
+	}()
+	<-stalled
+	_, err := f.uploads.Upload(context.Background(), req)
+	wantRejection(t, err, media.RejectionDimensionsExceeded)
+	close(release)
+	err = <-done
+	wantRejection(t, err, media.RejectionDimensionsExceeded)
+	if _, unchanged := err.(*media.Rejection); !unchanged {
+		t.Fatalf("duplicate = %#v, want a *Rejection returned unwrapped", err)
+	}
+	f.wantUsage(t, 0, 0)
+	f.wantGone(t, f.reservation(t, req))
+	if f.storage.objectCount() != 0 {
+		t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
 	}
 }
 

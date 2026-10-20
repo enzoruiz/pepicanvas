@@ -71,7 +71,7 @@ func TestValidateCommandAcceptsWellFormedCommands(t *testing.T) {
 		media.Complete{AssetID: "asset-1", ReferenceID: "object-1", Kind: media.KindVideo},
 		media.Abandon{AssetID: "asset-1", Reason: media.AbandonCancelled},
 		media.Abandon{AssetID: "asset-1", Reason: media.AbandonFailed},
-		media.Abandon{AssetID: "asset-1", Reason: media.AbandonRejected},
+		media.Abandon{AssetID: "asset-1", Reason: media.AbandonRejected, Rejection: media.RejectionDimensionsExceeded},
 		media.Attach{AssetID: "asset-1", ReferenceID: "object-2"},
 		media.Detach{ReferenceID: "object-2"},
 	}
@@ -109,6 +109,10 @@ func TestValidateCommandRejectsMalformedInput(t *testing.T) {
 		{"complete with unknown kind", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: "svg"}},
 		{"abandon without asset", key, operation, media.Abandon{Reason: media.AbandonFailed}},
 		{"abandon with unknown reason", key, operation, media.Abandon{AssetID: "a", Reason: "lost"}},
+		{"rejected abandon without code", key, operation, media.Abandon{AssetID: "a", Reason: media.AbandonRejected}},
+		{"rejected abandon with unknown code", key, operation, media.Abandon{AssetID: "a", Reason: media.AbandonRejected, Rejection: "lost"}},
+		{"failed abandon with code", key, operation, media.Abandon{AssetID: "a", Reason: media.AbandonFailed, Rejection: media.RejectionInvalidMetadata}},
+		{"cancelled abandon with code", key, operation, media.Abandon{AssetID: "a", Reason: media.AbandonCancelled, Rejection: media.RejectionInvalidMetadata}},
 		{"attach without reference", key, operation, media.Attach{AssetID: "a"}},
 		{"detach without reference", key, operation, media.Detach{}},
 	}
@@ -138,7 +142,8 @@ func TestFingerprintSeparatesIntentAndIgnoresCorrelation(t *testing.T) {
 		media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindGIF},
 		media.Complete{AssetID: "ao", ReferenceID: "", Kind: media.KindImage},
 		media.Abandon{AssetID: "a", Reason: media.AbandonFailed},
-		media.Abandon{AssetID: "a", Reason: media.AbandonRejected},
+		media.Abandon{AssetID: "a", Reason: media.AbandonRejected, Rejection: media.RejectionDimensionsExceeded},
+		media.Abandon{AssetID: "a", Reason: media.AbandonRejected, Rejection: media.RejectionInvalidMetadata},
 		media.Attach{AssetID: "a", ReferenceID: "o"},
 		media.Detach{ReferenceID: "o"},
 	}

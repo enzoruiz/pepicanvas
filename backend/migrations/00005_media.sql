@@ -57,6 +57,10 @@ CREATE TABLE media_operations (
     reserved_bytes bigint NOT NULL,
     correlation_id text CHECK (correlation_id <> '' AND octet_length(correlation_id) <= 128),
     accepted_at timestamptz NOT NULL,
+    -- The outcome of an Abandon, so a retry of the upload repeats its response.
+    abandon_reason text CHECK (abandon_reason IN ('cancelled', 'failed', 'rejected')),
+    rejection_code text CHECK (rejection_code <> '' AND octet_length(rejection_code) <= 64),
+    CHECK ((rejection_code IS NOT NULL) = (abandon_reason IS NOT DISTINCT FROM 'rejected')),
     PRIMARY KEY (tenant_id, canvas_id, operation_id),
     FOREIGN KEY (tenant_id, canvas_id) REFERENCES media_usage (tenant_id, canvas_id)
 );

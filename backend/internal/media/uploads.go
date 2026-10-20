@@ -76,7 +76,11 @@ func NewUploads(store Store, storage Storage, inspector Inspector) *Uploads {
 
 // Upload stores and validates one asset. A *Rejection is returned unchanged,
 // a cancelled request returns the context error, storage and inspection
-// failures wrap ErrUploadFailed, and domain errors pass through.
+// failures wrap ErrUploadFailed, and domain errors pass through. A retry of an
+// abandoned upload, while its operation is retained, repeats the recorded
+// response without reserving or writing: a rejection returns a *Rejection with
+// the same code, and a failure or cancellation an error wrapping
+// ErrUploadFailed.
 func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, error) {
 	replaces := ""
 	if req.Replace {
@@ -85,6 +89,12 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 	reserve := Reserve{DeclaredBytes: req.DeclaredBytes, ReplacesReference: replaces}
 	if err := validateUpload(req, reserve); err != nil {
 		return UploadResult{}, err
+	}
+	switch abandon, err := u.store.Abandoned(ctx, req.Key, stage(req.Operation, abandonSuffix).ID); {
+	case err == nil:
+		return UploadResult{}, abandonedError(abandon)
+	case !errors.Is(err, ErrNotFound):
+		return UploadResult{}, requestError(ctx, err)
 	}
 	reserved, err := u.store.Apply(ctx, req.Key, stage(req.Operation, reserveSuffix), reserve)
 	if err != nil {
@@ -208,20 +218,20 @@ func (u *Uploads) inspect(ctx context.Context, storageKey string) (Inspection, e
 // abort releases the reservation of a failed upload, deletes its stored
 // bytes, and purges the asset, on a context detached from the request. A
 // failed delete leaves the asset quarantined or deleting for Sweep. It returns
-// the error the caller sees.
+// the error the caller sees: the recorded response when another attempt of
+// this upload abandoned it first, else the cause.
 func (u *Uploads) abort(ctx context.Context, req UploadRequest, reserved Result, cause error) error {
-	_, rejected := cause.(*Rejection)
-	reason := AbandonFailed
-	switch {
-	case rejected:
-		reason = AbandonRejected
-	case ctx.Err() != nil:
-		reason = AbandonCancelled
+	abandon := Abandon{AssetID: reserved.AssetID, Reason: AbandonFailed}
+	if rejection, rejected := cause.(*Rejection); rejected {
+		abandon.Reason, abandon.Rejection = AbandonRejected, rejection.Code()
+	} else if ctx.Err() != nil {
+		abandon.Reason = AbandonCancelled
 		cause = ctx.Err()
 	}
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	_, err := u.store.Apply(cleanup, req.Key, stage(req.Operation, abandonSuffix), Abandon{AssetID: reserved.AssetID, Reason: reason})
+	operation := stage(req.Operation, abandonSuffix)
+	_, err := u.store.Apply(cleanup, req.Key, operation, abandon)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrOperationConflict):
@@ -230,16 +240,36 @@ func (u *Uploads) abort(ctx context.Context, req UploadRequest, reserved Result,
 		if _, err := u.store.Ready(cleanup, req.Key, reserved.AssetID); !errors.Is(err, ErrNotFound) {
 			return cause
 		}
+		u.discard(cleanup, req.Key, reserved)
+		if recorded, err := u.store.Abandoned(cleanup, req.Key, operation.ID); err == nil {
+			return abandonedError(recorded)
+		}
+		return cause
 	default:
 		// The asset stays pending until its reservation expires and Sweep
 		// deletes its bytes.
 		return cause
 	}
-	if err := u.storage.Delete(cleanup, reserved.StorageKey); err != nil {
-		return cause
-	}
-	_ = u.store.Purge(cleanup, req.Key, reserved.AssetID)
+	u.discard(cleanup, req.Key, reserved)
 	return cause
+}
+
+// discard deletes the stored bytes of an asset that left pending and purges
+// it once they are gone.
+func (u *Uploads) discard(ctx context.Context, key CanvasKey, reserved Result) {
+	if err := u.storage.Delete(ctx, reserved.StorageKey); err != nil {
+		return
+	}
+	_ = u.store.Purge(ctx, key, reserved.AssetID)
+}
+
+// abandonedError is the response of an abandoned upload: the rejection with
+// its code, or an upload failure for a failed or cancelled one.
+func abandonedError(abandon Abandon) error {
+	if abandon.Reason == AbandonRejected {
+		return newRejection(abandon.Rejection)
+	}
+	return fmt.Errorf("%w: the upload was abandoned", ErrUploadFailed)
 }
 
 func validateUpload(req UploadRequest, reserve Reserve) error {

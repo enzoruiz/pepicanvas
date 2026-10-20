@@ -119,6 +119,12 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		if err := setUsage(ctx, q, key, result.Usage); err != nil {
 			return err
 		}
+		// An Abandon retains its outcome, so a retry repeats its response.
+		var reason, rejection pgtype.Text
+		if abandon, ok := command.(media.Abandon); ok {
+			reason = pgtype.Text{String: string(abandon.Reason), Valid: true}
+			rejection = pgtype.Text{String: string(abandon.Rejection), Valid: abandon.Rejection != ""}
+		}
 		if err := q.InsertMediaOperation(ctx, db.InsertMediaOperationParams{
 			TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operation.ID,
 			Fingerprint: fingerprint[:],
@@ -126,6 +132,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 			QuotaBytes: result.Usage.QuotaBytes, UsedBytes: result.Usage.UsedBytes, ReservedBytes: result.Usage.ReservedBytes,
 			CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
 			AcceptedAt:    pgtype.Timestamptz{Time: now, Valid: true},
+			AbandonReason: reason, RejectionCode: rejection,
 		}); err != nil {
 			return err
 		}
@@ -238,6 +245,33 @@ func (s *MediaStore) Purge(ctx context.Context, key media.CanvasKey, assetID str
 		return nil
 	})
 	return wrapMedia("purge asset", err)
+}
+
+// Abandoned returns the Abandon committed under operationID while that
+// operation is retained, with the same cutoff as replay. It purges nothing:
+// expired rows are purged by the next Apply on the canvas.
+func (s *MediaStore) Abandoned(ctx context.Context, key media.CanvasKey, operationID string) (media.Abandon, error) {
+	if err := media.ValidateKey(key); err != nil {
+		return media.Abandon{}, err
+	}
+	if operationID == "" || len(operationID) > media.MaxIdentifierBytes {
+		return media.Abandon{}, fmt.Errorf("%w: operation identifier must have 1 to %d bytes", media.ErrInvalid, media.MaxIdentifierBytes)
+	}
+	row, err := db.New(s.pool).GetAbandonOperation(ctx, db.GetAbandonOperationParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operationID,
+		ExpiredAt: pgtype.Timestamptz{Time: s.now().Add(-s.retention), Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return media.Abandon{}, media.ErrNotFound
+	}
+	if err != nil {
+		return media.Abandon{}, wrapMedia("read abandoned upload", err)
+	}
+	return media.Abandon{
+		AssetID:   row.AssetID,
+		Reason:    media.AbandonReason(row.AbandonReason.String),
+		Rejection: media.RejectionCode(row.RejectionCode.String),
+	}, nil
 }
 
 // lock creates the quota row of an existing canvas, locks it, and returns its

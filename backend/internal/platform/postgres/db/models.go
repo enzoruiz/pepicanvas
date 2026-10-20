@@ -82,6 +82,8 @@ type MediaOperation struct {
 	ReservedBytes int64
 	CorrelationID pgtype.Text
 	AcceptedAt    pgtype.Timestamptz
+	AbandonReason pgtype.Text
+	RejectionCode pgtype.Text
 }
 
 type MediaReference struct {

@@ -104,8 +104,14 @@ FROM media_operations
 WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3;
 
 -- name: InsertMediaOperation :exec
-INSERT INTO media_operations (tenant_id, canvas_id, operation_id, fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+INSERT INTO media_operations (tenant_id, canvas_id, operation_id, fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at, abandon_reason, rejection_code)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+
+-- name: GetAbandonOperation :one
+SELECT asset_id, abandon_reason, rejection_code
+FROM media_operations
+WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3
+    AND abandon_reason IS NOT NULL AND accepted_at > sqlc.arg(expired_at);
 
 -- name: CanvasExists :one
 SELECT EXISTS (

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,8 +32,8 @@ func mediaSnapshot(t *testing.T, pool *pgxpool.Pool, key media.CanvasKey) mediaS
 				FROM media_assets WHERE tenant_id = $1 AND canvas_id = $2), ''),
 			COALESCE((SELECT string_agg(reference_id || '>' || asset_id, ',' ORDER BY reference_id)
 				FROM media_references WHERE tenant_id = $1 AND canvas_id = $2), ''),
-			COALESCE((SELECT string_agg(format('%s %s %s %s %s/%s/%s %s %s', operation_id, encode(fingerprint, 'hex'), asset_id, storage_key,
-					quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at), ',' ORDER BY operation_id)
+			COALESCE((SELECT string_agg(format('%s %s %s %s %s/%s/%s %s %s %s %s', operation_id, encode(fingerprint, 'hex'), asset_id, storage_key,
+					quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at, abandon_reason, rejection_code), ',' ORDER BY operation_id)
 				FROM media_operations WHERE tenant_id = $1 AND canvas_id = $2), '')`,
 		key.TenantID, key.CanvasID).Scan(&state.usage, &state.assets, &state.references, &state.operations)
 	if err != nil {
@@ -408,5 +409,66 @@ func TestMediaRetentionExpiresOperations(t *testing.T) {
 	}
 	if rows := mediaOperationRows(t, pool, mediaA); rows != 1 {
 		t.Fatalf("operations after expiry = %d, want only the new one", rows)
+	}
+}
+
+// S9: the outcome of an abandoned upload is retained with its operation, so a
+// retry can repeat the same response.
+func TestMediaAbandonedReturnsTheCommittedAbandon(t *testing.T) {
+	store, _ := openMedia(t, pgtest.Start(t), []media.CanvasKey{mediaA, mediaB})
+	ctx := context.Background()
+	abandons := []media.Abandon{
+		{Reason: media.AbandonRejected, Rejection: media.RejectionDimensionsExceeded},
+		{Reason: media.AbandonFailed},
+		{Reason: media.AbandonCancelled},
+	}
+	for _, abandon := range abandons {
+		reserve := nextMediaOperation()
+		reserved := mustApplyMedia(t, store, mediaA, reserve, media.Reserve{DeclaredBytes: 10})
+		abandon.AssetID = reserved.AssetID
+		operation := nextMediaOperation()
+		mustApplyMedia(t, store, mediaA, operation, abandon)
+		if got, err := store.Abandoned(ctx, mediaA, operation.ID); err != nil || got != abandon {
+			t.Fatalf("Abandoned(%s) = %+v, %v; want %+v", operation.ID, got, err, abandon)
+		}
+		if got, err := store.Abandoned(ctx, mediaA, reserve.ID); !errors.Is(err, media.ErrNotFound) {
+			t.Fatalf("Abandoned(reserve operation) = %+v, %v; want ErrNotFound", got, err)
+		}
+		if got, err := store.Abandoned(ctx, mediaB, operation.ID); !errors.Is(err, media.ErrNotFound) {
+			t.Fatalf("Abandoned(other tenant) = %+v, %v; want ErrNotFound", got, err)
+		}
+	}
+	if got, err := store.Abandoned(ctx, mediaA, "unknown-operation"); !errors.Is(err, media.ErrNotFound) {
+		t.Fatalf("Abandoned(unknown) = %+v, %v; want ErrNotFound", got, err)
+	}
+	for name, id := range map[string]string{"empty": "", "oversized": strings.Repeat("o", media.MaxIdentifierBytes+1)} {
+		if got, err := store.Abandoned(ctx, mediaA, id); !errors.Is(err, media.ErrInvalid) {
+			t.Fatalf("Abandoned(%s identifier) = %+v, %v; want ErrInvalid", name, got, err)
+		}
+	}
+	if got, err := store.Abandoned(ctx, media.CanvasKey{CanvasID: "canvas-1"}, "op"); !errors.Is(err, media.ErrInvalid) {
+		t.Fatalf("Abandoned(invalid key) = %+v, %v; want ErrInvalid", got, err)
+	}
+}
+
+func TestMediaAbandonedExpiresWithRetention(t *testing.T) {
+	const ttl = time.Minute
+	start := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	clock := &testClock{now: start}
+	store, _ := openMedia(t, pgtest.Start(t), []media.CanvasKey{mediaA},
+		postgres.WithMediaClock(clock.Now), postgres.WithMediaRetention(ttl), postgres.WithReservationTTL(time.Hour))
+	ctx := context.Background()
+	reserved := run(t, store, mediaA, media.Reserve{DeclaredBytes: 10})
+	operation := nextMediaOperation()
+	abandon := media.Abandon{AssetID: reserved.AssetID, Reason: media.AbandonRejected, Rejection: media.RejectionInvalidMetadata}
+	mustApplyMedia(t, store, mediaA, operation, abandon)
+
+	clock.Set(start.Add(ttl - time.Microsecond))
+	if got, err := store.Abandoned(ctx, mediaA, operation.ID); err != nil || got != abandon {
+		t.Fatalf("Abandoned just before expiry = %+v, %v; want %+v", got, err, abandon)
+	}
+	clock.Set(start.Add(ttl))
+	if got, err := store.Abandoned(ctx, mediaA, operation.ID); !errors.Is(err, media.ErrNotFound) {
+		t.Fatalf("Abandoned at expiry = %+v, %v; want ErrNotFound", got, err)
 	}
 }

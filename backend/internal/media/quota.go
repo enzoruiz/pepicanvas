@@ -136,10 +136,14 @@ const (
 	AbandonRejected AbandonReason = "rejected"
 )
 
-// Abandon releases the reservation of a pending asset.
+// Abandon releases the reservation of a pending asset. Rejection is the
+// inspection rejection code: required exactly when Reason is AbandonRejected.
+// The committed Abandon is retained with its operation, so a retry of the
+// upload can repeat the same response.
 type Abandon struct {
-	AssetID string
-	Reason  AbandonReason
+	AssetID   string
+	Reason    AbandonReason
+	Rejection RejectionCode
 }
 
 // Attach adds a reference to a ready asset.
@@ -196,6 +200,9 @@ type Store interface {
 	// Purge forgets a quarantined or deleting asset once its bytes are gone.
 	// Purging an asset that is already gone succeeds.
 	Purge(ctx context.Context, key CanvasKey, assetID string) error
+	// Abandoned returns the Abandon committed under operationID while that
+	// operation is retained, or ErrNotFound when no such Abandon is retained.
+	Abandoned(ctx context.Context, key CanvasKey, operationID string) (Abandon, error)
 }
 
 // Fingerprint identifies the intent of a command, so a retry under the same
@@ -269,7 +276,15 @@ func (c Abandon) validate() error {
 		return err
 	}
 	switch c.Reason {
-	case AbandonCancelled, AbandonFailed, AbandonRejected:
+	case AbandonRejected:
+		if _, known := rejectionMessages[c.Rejection]; !known {
+			return fmt.Errorf("%w: a rejected abandon needs a known rejection code", ErrInvalid)
+		}
+		return nil
+	case AbandonCancelled, AbandonFailed:
+		if c.Rejection != "" {
+			return fmt.Errorf("%w: only a rejected abandon has a rejection code", ErrInvalid)
+		}
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown abandon reason", ErrInvalid)
@@ -296,7 +311,7 @@ func (c Complete) fields() []string {
 }
 
 func (c Abandon) fields() []string {
-	return []string{"abandon", c.AssetID, string(c.Reason)}
+	return []string{"abandon", c.AssetID, string(c.Reason), string(c.Rejection)}
 }
 
 func (c Attach) fields() []string {

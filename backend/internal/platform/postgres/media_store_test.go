@@ -218,7 +218,11 @@ func TestSuccessConsumesQuotaAndEveryAbandonReleasesIt(t *testing.T) {
 	for reason, state := range wantStates {
 		abandoned := run(t, store, mediaA, media.Reserve{DeclaredBytes: 50})
 		wantUsage(t, store, pool, mediaA, 100, 50)
-		result := run(t, store, mediaA, media.Abandon{AssetID: abandoned.AssetID, Reason: reason})
+		abandon := media.Abandon{AssetID: abandoned.AssetID, Reason: reason}
+		if reason == media.AbandonRejected {
+			abandon.Rejection = media.RejectionDimensionsExceeded
+		}
+		result := run(t, store, mediaA, abandon)
 		if result.Usage.ReservedBytes != 0 {
 			t.Fatalf("Abandon(%s) usage = %+v, want reservation released", reason, result.Usage)
 		}
