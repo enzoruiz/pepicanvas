@@ -112,6 +112,13 @@ func assertDeliveredInOrder(t *testing.T, events []realtime.Event, first, last i
 
 func allowAll(context.Context, realtime.Command) error { return nil }
 
+// submitOnly is an actor without resync support.
+type submitOnly struct{ hub *realtime.Hub }
+
+func (a submitOnly) Submit(ctx context.Context, command realtime.Command) (realtime.Result, error) {
+	return a.hub.Submit(ctx, command)
+}
+
 func TestCrashBetweenCommitAndPublishIsDeliveredAfterRestart(t *testing.T) {
 	server := pgtest.Start(t)
 	now := &clock{now: t0}
@@ -180,7 +187,8 @@ func TestCrashDuringPublishDeliversTheRestAfterRestart(t *testing.T) {
 		}
 		return nil
 	}})
-	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(first), PollInterval: 10 * time.Millisecond, AttemptTimeout: time.Hour})
+	// submitOnly hides RequireResync, so the crashed hub's log stays readable.
+	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(submitOnly{first}), PollInterval: 10 * time.Millisecond, AttemptTimeout: time.Hour})
 	<-blocked
 	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()

@@ -29,7 +29,10 @@ type HubSink struct {
 	actor Actor
 }
 
-var _ Sink = (*HubSink)(nil)
+var (
+	_ Sink     = (*HubSink)(nil)
+	_ Resyncer = (*HubSink)(nil)
+)
 
 // NewHubSink returns a sink over actor.
 func NewHubSink(actor Actor) *HubSink {
@@ -61,6 +64,14 @@ func (s *HubSink) Deliver(ctx context.Context, record Record) error {
 		return err
 	}
 	return nil
+}
+
+// RequireResync marks the actor's event stream as no longer following the
+// commits, when the actor supports it, as *realtime.Hub does.
+func (s *HubSink) RequireResync() {
+	if resyncer, ok := s.actor.(Resyncer); ok {
+		resyncer.RequireResync()
+	}
 }
 
 func hubCommand(record Record) (realtime.Command, error) {

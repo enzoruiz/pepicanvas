@@ -87,7 +87,9 @@ func TestReplicaFollowsTheOutboxAndResyncsWhileThePublisherIsStopped(t *testing.
 	pgApply(t, store, key, canvas.SetTransform{ObjectID: created.ObjectID, Transform: canvas.Transform{X: -5, Y: 6, Width: 7, Height: 8, Rotation: 90}})
 	waitFor(t, "the replica to follow the outbox to revision 3", converged)
 
-	// Stopping the publisher keeps later records pending and forces resync.
+	// Stopping the publisher keeps later records pending; a replica that
+	// learns of the later commits resyncs (the hub signal is proven in
+	// outbox.TestStoppingThePublisherForcesClientsToResync).
 	if err := publisher.Close(ctx); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

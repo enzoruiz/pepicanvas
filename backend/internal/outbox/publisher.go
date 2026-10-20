@@ -53,6 +53,13 @@ type Sink interface {
 	Deliver(ctx context.Context, record Record) error
 }
 
+// Resyncer is implemented by a sink whose clients must resynchronize once the
+// publisher stops, because their event stream no longer follows the commits.
+// Close calls RequireResync once, after the last delivery.
+type Resyncer interface {
+	RequireResync()
+}
+
 // Defaults applied when a Config field is zero.
 const (
 	DefaultPollInterval   = time.Second
@@ -211,7 +218,8 @@ func (p *Publisher) Counters() Counters {
 // delivery starts, the delivery in flight finishes, and Close waits for the
 // loop to exit. If ctx ends first, the delivery in flight is cancelled and
 // ctx's error is returned once the loop exited. Undelivered records stay
-// pending for the next start. Close is idempotent.
+// pending for the next start, and a sink that is a Resyncer is told once
+// that its clients must resync. Close is idempotent.
 func (p *Publisher) Close(ctx context.Context) error {
 	p.mu.Lock()
 	first := !p.closed
@@ -219,10 +227,15 @@ func (p *Publisher) Close(ctx context.Context) error {
 	started := p.started
 	p.mu.Unlock()
 	if !started {
+		if first {
+			p.requireResync()
+		}
 		return nil
 	}
 	if first {
 		close(p.stop)
+		// Both branches below return only after the loop exited.
+		defer p.requireResync()
 	}
 	select {
 	case <-p.done:
@@ -231,6 +244,12 @@ func (p *Publisher) Close(ctx context.Context) error {
 		p.cancelAbort()
 		<-p.done
 		return ctx.Err()
+	}
+}
+
+func (p *Publisher) requireResync() {
+	if resyncer, ok := p.config.Sink.(Resyncer); ok {
+		resyncer.RequireResync()
 	}
 }
 

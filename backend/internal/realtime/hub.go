@@ -54,6 +54,9 @@ type Hub struct {
 	mu     sync.Mutex
 	actors map[Key]*actor
 	closed bool
+	// resync is set by RequireResync; canvases without an actor then have
+	// sequence 0 at the mark.
+	resync bool
 }
 
 type request struct {
@@ -124,12 +127,29 @@ func (h *Hub) Submit(ctx context.Context, command Command) (Result, error) {
 // Events returns the retained accepted events after the given sequence.
 func (h *Hub) Events(_ context.Context, key Key, after uint64) ([]Event, error) {
 	h.mu.Lock()
-	target := h.actors[key]
+	target, resync := h.actors[key], h.resync
 	h.mu.Unlock()
 	if target == nil {
+		if resync {
+			return nil, ErrResyncRequired
+		}
 		return nil, nil
 	}
 	return target.events(after)
+}
+
+// RequireResync tells clients that the event stream stopped following the
+// committed state, for example because the outbox publisher stopped. From
+// then on, every replay at or below a canvas's sequence at the time of the
+// call returns ErrResyncRequired, so the client adopts a committed snapshot;
+// replay after that sequence and new commands are unaffected.
+func (h *Hub) RequireResync() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resync = true
+	for _, target := range h.actors {
+		target.markResync()
+	}
 }
 
 // Close stops accepting work, drains every queued command, and waits for the
@@ -182,6 +202,7 @@ func (h *Hub) admit(key Key) (*actor, error) {
 			inbox:  make(chan request, h.config.QueueSize),
 			state:  NewState(),
 			ops:    newOperations(h.config.Retention),
+			resync: h.resync,
 		}
 		h.actors[key] = target
 		h.actorWG.Add(1)
