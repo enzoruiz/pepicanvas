@@ -27,8 +27,8 @@ Exactly-once delivery and multi-instance coordination (docs/stack.md CTRL-CONS-0
 | T2a | S2, S4, S7, S8 (TRACE, READY, SHUTDOWN) | inline, test-first: `internal/outbox` publisher (per-canvas head-of-line, bounded backoff, attempt timeout, purge, counters, `Running`, `Close`) | done | see L6 |
 | T2b | S2, S4, S6, S7 | delegated worker (context backstop), test-first: `postgres.OutboxStore` implements `outbox.Store` (`Heads`, `Settle`, `Retry`, `Purge`) plus tenant-scoped and global `Stats` (pending, oldest age, retrying, attempts, rejected) | done | see L7 |
 | T3 | S1, S3, S5, S6 | delegated worker (context backstop), test-first: `outbox.HubSink`, crash-between-commit-and-publish and restart test, redelivery idempotence, two-tenant isolation | done | see L8 |
-| T5 | S7, S6 | inline, test-first: stopping the publisher forces resync (`Hub.RequireResync`, `outbox.Resyncer`, `HubSink`), poison head row settles rejected instead of stalling every canvas | done | `198e759` (resync on stop), see L14-L16 |
-| T4 | S9, all | retroactive proof, docs, assess, verification, per-S verdicts | partial: independent verify found S7 PARTIAL (L12); native review approved | `19bd7ef`, see L10-L11 |
+| T5 | S7, S6 | inline, test-first: stopping the publisher forces resync (`Hub.RequireResync`, `outbox.Resyncer`, `HubSink`), poison head row settles rejected instead of stalling every canvas | done | `198e759` (resync on stop), `2f370a6` (malformed rows), see L14-L16 |
+| T4 | S9, all | retroactive proof, docs, assess, verification, per-S verdicts | done: native review approved (L12); S7 gap closed by T5 (L16); correction assess `8d7f6f5..2f370a6` medium, review not due | `19bd7ef`, see L10-L11 |
 
 ## Log
 
