@@ -35,7 +35,8 @@ const MaxErrorBytes = 512
 // already settled.
 type Store interface {
 	// Heads returns the oldest pending record of up to limit canvases, the
-	// records due soonest first.
+	// records due soonest first. A record that cannot be decoded is returned
+	// with Malformed set, so it never fails the batch.
 	Heads(ctx context.Context, limit int) ([]Record, error)
 	// Settle marks a pending record delivered or rejected.
 	Settle(ctx context.Context, id int64, outcome Outcome, at time.Time, reason string) error
@@ -314,14 +315,18 @@ func (p *Publisher) pass() (bool, time.Duration) {
 }
 
 // deliver runs one attempt and records its outcome. It returns whether the
-// record settled, or the backoff before its next attempt.
+// record settled, or the backoff before its next attempt. A malformed record
+// is rejected without reaching the sink.
 func (p *Publisher) deliver(record Record) (bool, time.Duration) {
-	ctx, cancel := context.WithTimeout(p.abort, p.config.AttemptTimeout)
-	err := p.config.Sink.Deliver(ctx, record)
-	cancel()
-	if p.abort.Err() != nil {
-		// Close ran out of time: the record stays pending as it was.
-		return false, 0
+	err := record.Malformed
+	if err == nil {
+		ctx, cancel := context.WithTimeout(p.abort, p.config.AttemptTimeout)
+		err = p.config.Sink.Deliver(ctx, record)
+		cancel()
+		if p.abort.Err() != nil {
+			// Close ran out of time: the record stays pending as it was.
+			return false, 0
+		}
 	}
 	log := p.config.Logger.With(
 		slog.Int64("outbox_id", record.ID),
@@ -338,7 +343,7 @@ func (p *Publisher) deliver(record Record) (bool, time.Duration) {
 			log.Info("outbox record delivered")
 			return true, 0
 		}
-	case errors.Is(err, ErrUndeliverable):
+	case errors.Is(err, ErrUndeliverable) || record.Malformed != nil:
 		if p.settle(record, OutcomeRejected, now, err.Error()) {
 			p.rejected.Add(1)
 			log.Warn("outbox record rejected", slog.String("error", truncate(err.Error())))

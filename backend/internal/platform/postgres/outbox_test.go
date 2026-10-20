@@ -535,3 +535,56 @@ func TestOutboxStatsAndPendingAreScopedToOneTenant(t *testing.T) {
 		t.Fatalf("Pending(tenant-b) after the rejection = %d records, want 3", got)
 	}
 }
+
+func TestOutboxHeadsReturnsAnUndecodableRecordAsMalformed(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	now := &clock{now: t0}
+	store, pool := openStore(t, pgtest.Start(t), postgres.WithClock(now.Now))
+	events := postgres.NewOutboxStore(pool)
+	a := canvas.Key{TenantID: "tenant-a", CanvasID: "main"}
+	b := canvas.Key{TenantID: "tenant-b", CanvasID: "main"}
+	for i, key := range []canvas.Key{a, b} {
+		mustCreate(t, store, key)
+		now.Set(t0.Add(time.Duration(i) * time.Second))
+		mustApply(t, store, key, canvas.Operation{ID: "op-1", CorrelationID: "corr-" + key.TenantID}, createText)
+	}
+	headA, headB := mustPending(t, events, a)[0], mustPending(t, events, b)[0]
+	if err := events.Retry(ctx, headA.ID, 2, t0, "boom"); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	headA.Attempts, headA.LastError = 2, "boom"
+
+	if _, err := pool.Exec(ctx, `UPDATE canvas_outbox SET mutation = '{"width":0}'::jsonb WHERE id = $1`, headA.ID); err != nil {
+		t.Fatalf("corrupt record: %v", err)
+	}
+
+	heads, err := events.Heads(ctx, 10)
+	if err != nil {
+		t.Fatalf("Heads with an undecodable record: %v", err)
+	}
+	if len(heads) != 2 {
+		t.Fatalf("Heads = %#v, want both canvases", heads)
+	}
+	malformed := heads[0]
+	if !errors.Is(malformed.Malformed, outbox.ErrMalformed) || !strings.Contains(malformed.Malformed.Error(), "outbox record") {
+		t.Fatalf("malformed head error = %v, want ErrMalformed naming the record", malformed.Malformed)
+	}
+	if malformed.Event.Mutation != nil {
+		t.Fatalf("malformed head mutation = %#v, want nil", malformed.Event.Mutation)
+	}
+	// Everything but the mutation is what the row holds.
+	want := headA
+	want.Event.Mutation, want.Malformed = nil, malformed.Malformed
+	sameRecords(t, "malformed head", heads[:1], []outbox.Record{want})
+	sameRecords(t, "other tenant head", heads[1:], []outbox.Record{headB})
+	if headB.Malformed != nil {
+		t.Fatalf("decodable record Malformed = %v, want nil", headB.Malformed)
+	}
+
+	// Pending shares the decoding: it reports the record instead of failing.
+	pending := mustPending(t, events, a)
+	if len(pending) != 1 || !errors.Is(pending[0].Malformed, outbox.ErrMalformed) || pending[0].ID != headA.ID {
+		t.Fatalf("Pending of the corrupt canvas = %#v, want the record marked malformed", pending)
+	}
+}

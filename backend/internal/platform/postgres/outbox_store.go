@@ -44,18 +44,15 @@ func (s *OutboxStore) Pending(ctx context.Context, key canvas.Key, limit int) ([
 	}
 	records := make([]outbox.Record, 0, len(rows))
 	for _, row := range rows {
-		record, err := toRecord(row)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
+		records = append(records, toRecord(row))
 	}
 	return records, nil
 }
 
 // Heads returns the oldest pending record of up to limit canvases, the
 // records due soonest first. A canvas whose head backs off never hides the
-// heads of other canvases.
+// heads of other canvases. A record that cannot be decoded is returned with
+// Malformed set instead of failing the batch.
 func (s *OutboxStore) Heads(ctx context.Context, limit int) ([]outbox.Record, error) {
 	rows, err := db.New(s.pool).ListOutboxHeads(ctx, pageSize(limit))
 	if err != nil {
@@ -63,11 +60,7 @@ func (s *OutboxStore) Heads(ctx context.Context, limit int) ([]outbox.Record, er
 	}
 	records := make([]outbox.Record, 0, len(rows))
 	for _, row := range rows {
-		record, err := toRecord(db.ListPendingOutboxRow(row))
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
+		records = append(records, toRecord(db.ListPendingOutboxRow(row)))
 	}
 	return records, nil
 }
@@ -160,12 +153,13 @@ func toStats(row db.AllOutboxStatsRow) outbox.Stats {
 	return stats
 }
 
-// toRecord decodes a stored record. Head rows convert to the pending row
-// type, so both queries must keep the same columns.
-func toRecord(row db.ListPendingOutboxRow) (outbox.Record, error) {
+// toRecord decodes a stored record. A mutation that cannot be decoded leaves
+// the event without a mutation and sets Malformed. Head rows convert to the
+// pending row type, so both queries must keep the same columns.
+func toRecord(row db.ListPendingOutboxRow) outbox.Record {
 	mutation, err := outbox.DecodeMutation(row.Kind, row.Mutation)
 	if err != nil {
-		return outbox.Record{}, fmt.Errorf("postgres: outbox record %d: %w", row.ID, err)
+		err = fmt.Errorf("postgres: outbox record %d: %w", row.ID, err)
 	}
 	return outbox.Record{
 		ID: row.ID,
@@ -179,7 +173,8 @@ func toRecord(row db.ListPendingOutboxRow) (outbox.Record, error) {
 		Attempts:    int(row.Attempts),
 		NextAttempt: row.NextAttemptAt.Time,
 		LastError:   row.LastError.String,
-	}, nil
+		Malformed:   err,
+	}
 }
 
 // pageSize clamps a requested page to [1, MaxOutboxPage].

@@ -14,6 +14,8 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/pgtest"
+	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/resync"
 )
 
@@ -67,6 +69,16 @@ func (s *memStore) add(key canvas.Key, revision int64, correlationID string, at 
 		CreatedAt: at, NextAttempt: at,
 	}})
 	return s.nextID
+}
+
+// addMalformed adds a record the store could not decode.
+func (s *memStore) addMalformed(key canvas.Key, revision int64, at time.Time, reason error) int64 {
+	id := s.add(key, revision, "", at)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.find(id)
+	r.record.Event.Mutation, r.record.Malformed = nil, reason
+	return id
 }
 
 func (s *memStore) addSettled(at time.Time) int64 {
@@ -312,6 +324,53 @@ func TestPublisherSettlesUndeliverableRecordsWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestPublisherRejectsMalformedRecordsWithoutDeliveringThem(t *testing.T) {
+	store, out, now := &memStore{}, &sink{}, &clock{now: t0}
+	var buffer bytes.Buffer
+	var mu sync.Mutex
+	logger := slog.New(slog.NewJSONHandler(&lockedWriter{w: &buffer, mu: &mu}, nil))
+	reason := fmt.Errorf("postgres: outbox record 1: %w: unknown kind", outbox.ErrMalformed)
+	poison := store.addMalformed(canvasA, 1, t0, reason)
+	next := store.add(canvasA, 2, "", t0)
+	other := store.add(canvasB, 1, "", t0)
+	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour, Logger: logger})
+
+	eventually(t, "every record settled", func() bool {
+		return store.get(next).outcome != "" && store.get(other).outcome != ""
+	})
+	if r := store.get(poison); r.outcome != outbox.OutcomeRejected || r.lastError != reason.Error() || r.record.Attempts != 0 || !r.settledAt.Equal(t0) {
+		t.Fatalf("malformed record = %+v, want rejected at %v with %q and no retry", r, t0, reason)
+	}
+	for _, id := range []int64{next, other} {
+		if r := store.get(id); r.outcome != outbox.OutcomeDelivered {
+			t.Fatalf("record %d = %+v, want delivered", id, r)
+		}
+	}
+	if got := out.calls(canvasA); !slices.Equal(got, []int64{2}) {
+		t.Fatalf("canvas A calls = %v, want only revision 2: a malformed record never reaches the sink", got)
+	}
+	if got := out.calls(canvasB); !slices.Equal(got, []int64{1}) {
+		t.Fatalf("canvas B calls = %v, want [1]", got)
+	}
+	if c := publisher.Counters(); c != (outbox.Counters{Delivered: 2, Rejected: 1}) {
+		t.Fatalf("Counters = %+v, want 2 delivered, 1 rejected, no retries or store errors", c)
+	}
+	mu.Lock()
+	logs := buffer.String()
+	mu.Unlock()
+	var line string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, fmt.Sprintf(`"outbox_id":%d`, poison)) {
+			line = l
+		}
+	}
+	for _, want := range []string{`"level":"WARN"`, `"msg":"outbox record rejected"`, `"error":"` + reason.Error() + `"`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log of the malformed record %q lacks %s", line, want)
+		}
+	}
+}
+
 func TestPublisherBoundsEachAttempt(t *testing.T) {
 	store, now := &memStore{}, &clock{now: t0}
 	var mu sync.Mutex
@@ -505,5 +564,40 @@ func TestNewPublisherRejectsInvalidConfig(t *testing.T) {
 	}
 	if err := publisher.Close(context.Background()); err != nil {
 		t.Fatalf("Close before Start = %v", err)
+	}
+}
+
+func TestUndecodableRecordIsRejectedWithoutStallingOtherCanvases(t *testing.T) {
+	server := pgtest.Start(t)
+	ctx := context.Background()
+	store, events, pool := openPG(t, server)
+	for _, key := range []canvas.Key{canvasA, canvasB} {
+		if _, err := store.Create(ctx, key); err != nil {
+			t.Fatalf("Create(%v): %v", key, err)
+		}
+		mustCommit(t, store, key, canvas.Operation{ID: "op-1"}, canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 1280, Height: 720}})
+	}
+	mustCommit(t, store, canvasA, canvas.Operation{ID: "op-2"}, canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 640, Height: 480}})
+	poison := mustPendingRecords(t, events, canvasA)[0]
+	if _, err := pool.Exec(ctx, `UPDATE canvas_outbox SET mutation = '{"width":0}'::jsonb WHERE id = $1`, poison.ID); err != nil {
+		t.Fatalf("corrupt record: %v", err)
+	}
+
+	hub := newHub(t, realtime.Config{Authorize: allowAll})
+	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(hub), PollInterval: time.Hour})
+	eventually(t, "both canvases to drain", func() bool {
+		return mustStats(t, events, canvasA.TenantID).Pending == 0 && mustStats(t, events, canvasB.TenantID).Pending == 0
+	})
+
+	assertDeliveredInOrder(t, hubEvents(t, hub, canvasB), 1, 1)
+	assertDeliveredInOrder(t, hubEvents(t, hub, canvasA), 2, 2)
+	if stats := mustStats(t, events, canvasA.TenantID); stats.Rejected != 1 {
+		t.Fatalf("tenant A stats = %+v, want the corrupt record rejected", stats)
+	}
+	if stats := mustStats(t, events, canvasB.TenantID); stats.Rejected != 0 {
+		t.Fatalf("tenant B stats = %+v, want nothing rejected", stats)
+	}
+	if c := publisher.Counters(); c != (outbox.Counters{Delivered: 2, Rejected: 1}) {
+		t.Fatalf("Counters = %+v, want 2 delivered, 1 rejected, no store errors", c)
 	}
 }

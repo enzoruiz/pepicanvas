@@ -34,6 +34,10 @@ type Record struct {
 	NextAttempt time.Time
 	// LastError is the reason of the last failed delivery, or "".
 	LastError string
+	// Malformed is set, wrapping ErrMalformed, when the stored record cannot
+	// be decoded. Event then holds no mutation and as much of its key and
+	// result as the record has. Such a record is never delivered.
+	Malformed error
 }
 
 // Mutation kinds as stored in the outbox.
