@@ -95,6 +95,19 @@ func (r *stallingReader) Read(p []byte) (int, error) {
 	return 0, errors.New("client went away")
 }
 
+// failingTail returns its data, then fails instead of ending.
+type failingTail struct {
+	data *bytes.Reader
+	err  error
+}
+
+func (r *failingTail) Read(p []byte) (int, error) {
+	if r.data.Len() > 0 {
+		return r.data.Read(p)
+	}
+	return 0, r.err
+}
+
 func TestStorage(t *testing.T) {
 	server := s3test.Start(t)
 	storage := open(t, server)
@@ -184,6 +197,28 @@ func TestStorage(t *testing.T) {
 				t.Fatalf("Put of %d of %d bytes = nil, want an error", n+1, n)
 			}
 			wantNoObject(t, server, storage, key)
+		}
+	})
+
+	t.Run("a Put whose body fails after its size leaves nothing", func(t *testing.T) {
+		key := "assets/failing-tail"
+		body := &failingTail{data: bytes.NewReader(random(t, 1000)), err: errors.New("body is too long")}
+		if err := storage.Put(ctx, key, body, 1000); err == nil {
+			t.Fatal("Put = nil, want the body's error")
+		}
+		wantNoObject(t, server, storage, key)
+	})
+
+	t.Run("a Put never replaces an existing object", func(t *testing.T) {
+		key := "assets/conditional"
+		if err := storage.Put(ctx, key, strings.NewReader("first"), 5); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if err := storage.Put(ctx, key, strings.NewReader("other"), 5); !errors.Is(err, media.ErrObjectExists) {
+			t.Fatalf("second Put = %v, want ErrObjectExists", err)
+		}
+		if got := read(t, storage, key); string(got) != "first" {
+			t.Fatalf("Open(%s) = %q, want %q", key, got, "first")
 		}
 	})
 }

@@ -24,12 +24,16 @@ const (
 // released and the stored bytes are deleted or isolated for Sweep.
 var ErrUploadFailed = errors.New("media: upload failed")
 
+// ErrObjectExists reports a Put to a key that already holds an object.
+var ErrObjectExists = errors.New("media: stored object already exists")
+
 var (
 	errBodyShort = errors.New("body is shorter than the declared size")
 	errBodyLong  = errors.New("body is longer than the declared size")
 )
 
-// Storage holds asset bytes under internal keys. Open of a missing key returns
+// Storage holds asset bytes under internal keys. Put never replaces an
+// existing object: it returns ErrObjectExists. Open of a missing key returns
 // ErrNotFound; Delete of a missing key succeeds.
 type Storage interface {
 	Put(ctx context.Context, key string, body io.Reader, size int64) error
@@ -89,18 +93,21 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 	// A retry after success finds the asset ready: replay the completion
 	// without touching the stored bytes.
 	if asset, err := u.store.Ready(ctx, req.Key, reserved.AssetID); err == nil {
-		completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix),
-			Complete{AssetID: asset.ID, ReferenceID: req.ReferenceID, Kind: asset.Kind})
-		if err != nil {
-			return UploadResult{}, requestError(ctx, err)
-		}
-		return UploadResult{AssetID: asset.ID, Kind: asset.Kind, Usage: completed.Usage}, nil
+		return u.replay(ctx, req, asset)
 	} else if !errors.Is(err, ErrNotFound) {
 		return UploadResult{}, u.abort(ctx, req, reserved, err)
 	}
 
 	body := &exactReader{r: req.Body, remaining: req.DeclaredBytes}
 	if err := u.storage.Put(ctx, reserved.StorageKey, body, req.DeclaredBytes); err != nil {
+		// A concurrent attempt of this upload stored its bytes first, and
+		// storage never replaces them. Once that attempt completed, this
+		// one receives its result.
+		if errors.Is(err, ErrObjectExists) {
+			if asset, readyErr := u.store.Ready(ctx, req.Key, reserved.AssetID); readyErr == nil {
+				return u.replay(ctx, req, asset)
+			}
+		}
 		return UploadResult{}, u.abort(ctx, req, reserved, fmt.Errorf("%w: store bytes: %w", ErrUploadFailed, err))
 	}
 	// Storage may stop reading at the declared size; the body must end there.
@@ -127,6 +134,16 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 		_ = u.storage.Delete(cleanup, reserved.StorageKey)
 	}
 	return UploadResult{AssetID: reserved.AssetID, Kind: inspection.Kind, Usage: completed.Usage}, nil
+}
+
+// replay repeats the completion of an asset that is already ready.
+func (u *Uploads) replay(ctx context.Context, req UploadRequest, asset Asset) (UploadResult, error) {
+	completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix),
+		Complete{AssetID: asset.ID, ReferenceID: req.ReferenceID, Kind: asset.Kind})
+	if err != nil {
+		return UploadResult{}, requestError(ctx, err)
+	}
+	return UploadResult{AssetID: asset.ID, Kind: asset.Kind, Usage: completed.Usage}, nil
 }
 
 // Open returns a ready asset and its bytes. Any other state is ErrNotFound.
@@ -229,6 +246,10 @@ func validateUpload(req UploadRequest, reserve Reserve) error {
 	if len(req.Operation.ID) > MaxIdentifierBytes-len(completeSuffix) {
 		return fmt.Errorf("%w: upload operation identifier must have at most %d bytes", ErrInvalid, MaxIdentifierBytes-len(completeSuffix))
 	}
+	// The stage suffix would make an empty identifier valid.
+	if err := validateIdentifier("operation", req.Operation.ID); err != nil {
+		return err
+	}
 	if err := ValidateCommand(req.Key, stage(req.Operation, reserveSuffix), reserve); err != nil {
 		return err
 	}
@@ -258,13 +279,18 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // exactReader passes through exactly remaining bytes and fails when the body
-// ends early or continues past them.
+// ends early or continues past them. A failure is final: a later Read or
+// finish reports it again, even though the byte that revealed it was consumed.
 type exactReader struct {
 	r         io.Reader
 	remaining int64
+	err       error
 }
 
 func (e *exactReader) Read(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
 	if e.remaining == 0 {
 		if err := e.finish(); err != nil {
 			return 0, err
@@ -278,7 +304,8 @@ func (e *exactReader) Read(p []byte) (int, error) {
 	e.remaining -= int64(n)
 	if errors.Is(err, io.EOF) {
 		if e.remaining > 0 {
-			return n, errBodyShort
+			e.err = errBodyShort
+			return n, e.err
 		}
 		err = nil
 	}
@@ -287,20 +314,26 @@ func (e *exactReader) Read(p []byte) (int, error) {
 
 // finish reports whether the body ends exactly at the declared size.
 func (e *exactReader) finish() error {
+	if e.err != nil {
+		return e.err
+	}
 	if e.remaining > 0 {
-		return errBodyShort
+		e.err = errBodyShort
+		return e.err
 	}
 	var probe [1]byte
 	for {
 		n, err := e.r.Read(probe[:])
 		if n > 0 {
-			return errBodyLong
+			e.err = errBodyLong
+			return e.err
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return err
+			e.err = err
+			return e.err
 		}
 	}
 }

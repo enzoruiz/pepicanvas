@@ -225,6 +225,15 @@ func TestUploadsOverS3LeaveNothingRecoverable(t *testing.T) {
 		p.wantNothingRecoverable(t, "", p.storage.last(t), baseline)
 	})
 
+	t.Run("body one byte longer than declared", func(t *testing.T) {
+		mode = "accept"
+		longer := append(bytes.Clone(data), 'x')
+		if _, err := p.uploads.Upload(context.Background(), p.request(data, bytes.NewReader(longer))); !errors.Is(err, media.ErrUploadFailed) {
+			t.Fatalf("Upload = %v, want ErrUploadFailed", err)
+		}
+		p.wantNothingRecoverable(t, "", p.storage.last(t), baseline)
+	})
+
 	t.Run("inspection times out", func(t *testing.T) {
 		mode = "timeout"
 		if _, err := p.uploads.Upload(context.Background(), p.request(data, nil)); err == nil {

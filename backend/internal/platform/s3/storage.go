@@ -21,6 +21,10 @@ import (
 // credentials.
 var ErrUnavailable = errors.New("s3: storage unavailable")
 
+// conditionalRequestConflict is the S3 error for a conditional write that
+// raced another write to the same key.
+const conditionalRequestConflict = "ConditionalRequestConflict"
+
 var (
 	errBodyTooShort = errors.New("s3: body is shorter than its declared size")
 	errBodyTooLong  = errors.New("s3: body is longer than its declared size")
@@ -67,9 +71,10 @@ func Open(ctx context.Context, config Config) (*Storage, error) {
 }
 
 // Put stores exactly size bytes in a single PUT, so a failed, cancelled, short,
-// or long upload never leaves a readable object or orphan multipart parts. Put
-// returns when ctx is done even if body is blocked; the copy goroutine then
-// ends when body returns from Read.
+// or long upload never leaves a readable object or orphan multipart parts. The
+// PUT is conditional: an existing object is never replaced and Put returns
+// media.ErrObjectExists. Put returns when ctx is done even if body is blocked;
+// the copy goroutine then ends when body returns from Read.
 func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("s3: negative size")
@@ -86,22 +91,32 @@ func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int6
 		// The transport reads past Content-Length to detect a longer body,
 		// so this verdict reaches it before the request completes.
 		var extra [1]byte
-		if n, _ := body.Read(extra[:]); n > 0 {
+		n, err := body.Read(extra[:])
+		switch {
+		case n > 0:
 			writer.CloseWithError(errBodyTooLong)
-			return
+		case err != nil && !errors.Is(err, io.EOF):
+			writer.CloseWithError(err)
+		default:
+			writer.Close()
 		}
-		writer.Close()
 	}()
 	stop := context.AfterFunc(ctx, func() { writer.CloseWithError(ctx.Err()) })
 	defer stop()
-	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, minio.PutObjectOptions{
+	options := minio.PutObjectOptions{
 		DisableMultipart: true,
 		// Stream the body instead of buffering it to sign its hash.
 		DisableContentSha256: true,
-	})
+	}
+	// If-None-Match: * makes the store refuse to replace an existing object.
+	options.SetMatchETagExcept("*")
+	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, options)
 	reader.Close()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
+	}
+	if code := minio.ToErrorResponse(err).Code; code == minio.PreconditionFailed || code == conditionalRequestConflict {
+		return media.ErrObjectExists
 	}
 	if err != nil {
 		return fmt.Errorf("s3: put object: %w", err)

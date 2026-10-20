@@ -35,6 +35,11 @@ type fakeStorage struct {
 	faults  map[string]func(key string) error
 	blocks  map[string]bool
 	started chan struct{}
+	// beforePut runs before Put reads the body.
+	beforePut func()
+	// overread makes Put read one byte past size and ignore the result, like
+	// an S3 transport probing for a longer body.
+	overread bool
 }
 
 func newFakeStorage() *fakeStorage {
@@ -49,13 +54,26 @@ func newFakeStorage() *fakeStorage {
 func (s *fakeStorage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
 	s.mu.Lock()
 	s.puts = append(s.puts, key)
+	beforePut, overread := s.beforePut, s.overread
 	s.mu.Unlock()
+	if beforePut != nil {
+		beforePut()
+	}
 	// Like an S3 client given the object size, read exactly size bytes.
 	data := make([]byte, size)
 	if _, err := io.ReadFull(body, data); err != nil {
 		return err
 	}
+	if overread {
+		var extra [1]byte
+		_, _ = body.Read(extra[:])
+	}
 	s.mu.Lock()
+	// Like a conditional PUT, an existing object is never replaced.
+	if _, exists := s.objects[key]; exists {
+		s.mu.Unlock()
+		return media.ErrObjectExists
+	}
 	s.objects[key] = data
 	s.mu.Unlock()
 	// A fault or cancellation after the write leaves an ambiguous object behind.
@@ -472,7 +490,9 @@ func TestUploadPipeline(t *testing.T) {
 		noBody.Body = nil
 		badReference := f.request("hello", "bad reference")
 		zero := f.request("", "ref-3")
-		for name, req := range map[string]media.UploadRequest{"operation too long": tooLong, "nil body": noBody, "bad reference": badReference, "zero bytes": zero} {
+		emptyOperation := f.request("hello", "ref-4")
+		emptyOperation.Operation.ID = ""
+		for name, req := range map[string]media.UploadRequest{"operation too long": tooLong, "nil body": noBody, "bad reference": badReference, "zero bytes": zero, "empty operation": emptyOperation} {
 			if _, err := f.uploads.Upload(ctx, req); !errors.Is(err, media.ErrInvalid) {
 				t.Fatalf("%s: Upload = %v, want ErrInvalid", name, err)
 			}
@@ -501,6 +521,15 @@ func TestUploadPipeline(t *testing.T) {
 		{
 			name:   "body longer than declared",
 			body:   "hello!",
+			verify: func(t *testing.T, err error) { wantFailed(t, err, media.ErrUploadFailed) },
+		},
+		{
+			name: "body one byte longer than declared, storage reads past the size",
+			body: "hello!",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.storage.overread = true
+				return ctx
+			},
 			verify: func(t *testing.T, err error) { wantFailed(t, err, media.ErrUploadFailed) },
 		},
 		{
@@ -718,6 +747,53 @@ func TestUploadPipeline(t *testing.T) {
 		f.wantUsage(t, 0, 0)
 		f.wantGone(t, reserved)
 	})
+}
+
+// S8, S9, S10: a concurrent duplicate of an upload never replaces the bytes
+// the original validated; it receives the original's result instead.
+func TestConcurrentDuplicateKeepsValidatedBytes(t *testing.T) {
+	srv := startServer(t)
+	f := srv.fixture(t)
+	req := f.request("hello", "ref-1")
+	duplicate := req
+	duplicate.Body = strings.NewReader("evil!")
+	f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) {
+		if string(data) != "hello" {
+			return media.Inspection{}, dimensionsRejection(t)
+		}
+		return imageOf(data), nil
+	})
+	// The duplicate passes its reservation and readiness check, then stalls
+	// before writing while the original completes.
+	stalled, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	f.storage.beforePut = func() {
+		if first.CompareAndSwap(false, true) {
+			close(stalled)
+			<-release
+		}
+	}
+	type outcome struct {
+		result media.UploadResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := f.uploads.Upload(context.Background(), duplicate)
+		done <- outcome{result, err}
+	}()
+	<-stalled
+	original := f.mustUpload(t, req)
+	close(release)
+	got := <-done
+	if got.err != nil || got.result != original {
+		t.Fatalf("duplicate = %+v, %v; want the original %+v", got.result, got.err, original)
+	}
+	f.wantServed(t, original.AssetID, "hello")
+	f.wantUsage(t, 5, 0)
+	if f.storage.objectCount() != 1 {
+		t.Fatalf("storage holds %d objects, want one", f.storage.objectCount())
+	}
 }
 
 // S5, S8: a successful replacement releases the old asset, whose bytes are
