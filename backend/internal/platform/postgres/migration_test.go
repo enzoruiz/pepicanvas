@@ -98,6 +98,11 @@ func TestActivationRollbackRefusesToLoseActivationsAndGrants(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	provider := migrationProvider(t, pool)
+	// The test exercises 00004 as the latest applied migration, so later
+	// migrations never change what it observes.
+	if _, err := provider.DownTo(ctx, 4); err != nil {
+		t.Fatalf("DownTo(4): %v", err)
+	}
 
 	for _, account := range []string{legacyAccount, streamerAccount, operatorAccount} {
 		exec(t, pool, "INSERT INTO accounts (account_id, email, password_hash, created_at) VALUES ($1, $1 || '@example.com', 'stub', now())", account)
@@ -150,8 +155,8 @@ func TestActivationRollbackRefusesToLoseActivationsAndGrants(t *testing.T) {
 	}
 
 	// Migrating up again restores the schema around the same legacy rows.
-	if err := postgres.Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate after the rollback: %v", err)
+	if _, err := provider.UpTo(ctx, 4); err != nil {
+		t.Fatalf("UpTo(4) after the rollback: %v", err)
 	}
 	if got := readActivationSchema(t, pool); got != intact {
 		t.Fatalf("after re-applying %+v, want %+v", got, intact)
