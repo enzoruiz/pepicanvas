@@ -49,6 +49,8 @@ type stored struct {
 
 // memStore is an in-memory outbox.Store with the PostgreSQL semantics.
 type memStore struct {
+	// reads counts Heads calls.
+	reads    int
 	mu       sync.Mutex
 	records  []*stored
 	nextID   int64
@@ -111,6 +113,7 @@ func (s *memStore) get(id int64) stored {
 func (s *memStore) Heads(_ context.Context, limit int) ([]outbox.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reads++
 	if s.failRead > 0 {
 		s.failRead--
 		return nil, errors.New("store unavailable")
@@ -401,10 +404,44 @@ func TestPublisherBoundsEachAttempt(t *testing.T) {
 func TestPublisherNotifyWakesBeforeThePollInterval(t *testing.T) {
 	store, out, now := &memStore{}, &sink{}, &clock{now: t0}
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour})
-	time.Sleep(20 * time.Millisecond) // let the first pass find nothing
+	// The first pass finds nothing; the record is added only after it.
+	eventually(t, "the first pass", func() bool { return store.headReads() > 0 })
 	id := store.add(canvasA, 1, "", t0)
 	publisher.Notify()
 	eventually(t, "notified record delivered", func() bool { return store.get(id).outcome == outbox.OutcomeDelivered })
+}
+
+func (s *memStore) headReads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+func TestPublisherCountsAndLogsEventsInvalidForTheActor(t *testing.T) {
+	store, now := &memStore{}, &clock{now: t0}
+	out := &sink{deliver: func(context.Context, outbox.Record) error {
+		return fmt.Errorf("%w: %w: realtime: invalid command", outbox.ErrUndeliverable, outbox.ErrInvalidEvent)
+	}}
+	var buffer bytes.Buffer
+	var mu sync.Mutex
+	logger := slog.New(slog.NewJSONHandler(&lockedWriter{w: &buffer, mu: &mu}, nil))
+	id := store.add(canvasA, 3, "corr-3", t0)
+	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour, Logger: logger})
+	eventually(t, "the record settled", func() bool { return store.get(id).outcome != "" })
+	if r := store.get(id); r.outcome != outbox.OutcomeRejected || r.record.Attempts != 0 {
+		t.Fatalf("record = %+v, want rejected without retry", r)
+	}
+	if c := publisher.Counters(); c != (outbox.Counters{Rejected: 1, Invalid: 1}) {
+		t.Fatalf("Counters = %+v, want 1 rejected and 1 invalid", c)
+	}
+	mu.Lock()
+	line := buffer.String()
+	mu.Unlock()
+	for _, want := range []string{`"level":"ERROR"`, `"msg":"outbox record invalid for the actor"`, fmt.Sprintf(`"outbox_id":%d`, id), `"correlation_id":"corr-3"`, `"revision":3`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log %q lacks %s", line, want)
+		}
+	}
 }
 
 func TestPublisherKeepsRunningThroughStoreFailures(t *testing.T) {

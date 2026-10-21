@@ -75,16 +75,12 @@ func mustPendingRecords(t *testing.T, events *postgres.OutboxStore, key canvas.K
 	return records
 }
 
-// payloadRevision returns the revision a hub event carries: its payload for
-// set commands, its operation ID for deletes.
+// payloadRevision returns the revision a set event carries in its payload,
+// or 0 for a delete, which carries no payload.
 func payloadRevision(t *testing.T, event realtime.Event) int64 {
 	t.Helper()
 	if event.Kind == realtime.KindDelete {
-		var revision int64
-		if _, err := fmt.Sscanf(event.OperationID, "canvas-revision-%d", &revision); err != nil {
-			t.Fatalf("delete event operation ID %q: %v", event.OperationID, err)
-		}
-		return revision
+		return 0
 	}
 	var payload struct {
 		Revision int64 `json:"revision"`
@@ -96,16 +92,23 @@ func payloadRevision(t *testing.T, event realtime.Event) int64 {
 }
 
 // assertDeliveredInOrder checks that events are exactly revisions first..last
-// in revision order, each once.
+// in revision order, each once: operation IDs name increasing outbox records,
+// and set events carry their revision.
 func assertDeliveredInOrder(t *testing.T, events []realtime.Event, first, last int64) {
 	t.Helper()
 	if want := int(last - first + 1); len(events) != want {
 		t.Fatalf("hub has %d events, want %d: %+v", len(events), want, events)
 	}
+	var previous int64
 	for i, event := range events {
 		revision := first + int64(i)
-		if event.OperationID != fmt.Sprintf("canvas-revision-%d", revision) || payloadRevision(t, event) != revision {
-			t.Fatalf("event %d = operation %s payload revision %d, want revision %d", i, event.OperationID, payloadRevision(t, event), revision)
+		var id int64
+		if _, err := fmt.Sscanf(event.OperationID, "outbox-%d", &id); err != nil || id <= previous {
+			t.Fatalf("event %d operation %s, want an outbox record after %d", i, event.OperationID, previous)
+		}
+		previous = id
+		if got := payloadRevision(t, event); event.Kind == realtime.KindSet && got != revision {
+			t.Fatalf("event %d payload revision %d, want %d", i, got, revision)
 		}
 	}
 }
@@ -180,7 +183,7 @@ func TestCrashDuringPublishDeliversTheRestAfterRestart(t *testing.T) {
 	// The first process stops while the delivery of revision 4 hangs.
 	blocked := make(chan struct{})
 	first := newHub(t, realtime.Config{Authorize: func(ctx context.Context, command realtime.Command) error {
-		if command.OperationID == "canvas-revision-4" {
+		if command.OperationID == "outbox-4" { // revision 4 of the only canvas
 			close(blocked)
 			<-ctx.Done()
 			return ctx.Err()

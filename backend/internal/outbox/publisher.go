@@ -18,6 +18,11 @@ var (
 	// settles as rejected and is not retried; clients recover its state by
 	// resynchronization.
 	ErrUndeliverable = errors.New("outbox: undeliverable")
+	// ErrInvalidEvent marks a committed event the actor rejects as an invalid
+	// command. It is undeliverable and signals that the canvas and actor
+	// limits disagree, so the publisher counts it apart and logs it as an
+	// error.
+	ErrInvalidEvent = errors.New("outbox: event invalid for the actor")
 )
 
 // Outcome is how a record settled.
@@ -102,6 +107,8 @@ type Counters struct {
 	Rejected  uint64
 	Retries   uint64
 	Purged    uint64
+	// Invalid counts rejected records the actor found invalid; any is a bug.
+	Invalid uint64
 	// StoreErrors counts failed store calls; records stay pending.
 	StoreErrors uint64
 }
@@ -121,7 +128,7 @@ type Publisher struct {
 	started bool
 	closed  bool
 
-	delivered, rejected, retries, purged, storeErrors atomic.Uint64
+	delivered, rejected, retries, purged, invalid, storeErrors atomic.Uint64
 }
 
 // NewPublisher validates the configuration. Start runs it.
@@ -211,6 +218,7 @@ func (p *Publisher) Counters() Counters {
 		Rejected:    p.rejected.Load(),
 		Retries:     p.retries.Load(),
 		Purged:      p.purged.Load(),
+		Invalid:     p.invalid.Load(),
 		StoreErrors: p.storeErrors.Load(),
 	}
 }
@@ -346,6 +354,11 @@ func (p *Publisher) deliver(record Record) (bool, time.Duration) {
 	case errors.Is(err, ErrUndeliverable) || record.Malformed != nil:
 		if p.settle(record, OutcomeRejected, now, err.Error()) {
 			p.rejected.Add(1)
+			if errors.Is(err, ErrInvalidEvent) {
+				p.invalid.Add(1)
+				log.Error("outbox record invalid for the actor", slog.String("error", truncate(err.Error())))
+				return true, 0
+			}
 			log.Warn("outbox record rejected", slog.String("error", truncate(err.Error())))
 			return true, 0
 		}

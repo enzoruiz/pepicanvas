@@ -74,7 +74,7 @@ func TestHubSinkSubmitsTheCommittedEventUnderItsOwnKey(t *testing.T) {
 			name:   "create_object",
 			record: record(canvasA, canvas.CreateObject{Kind: canvas.KindText, Content: "hi", Transform: transform}, canvas.Result{Revision: 1, ObjectID: objectA, Z: 1}, "corr-1"),
 			want: realtime.Command{
-				OperationID: "canvas-revision-1", ObjectID: objectA, Kind: realtime.KindSet, CorrelationID: "corr-1",
+				OperationID: "outbox-1", ObjectID: objectA, Kind: realtime.KindSet, CorrelationID: "corr-1",
 				Payload: []byte(`{"kind":"create_object","mutation":{"kind":"text","content":"hi","transform":{"x":-9,"y":8,"w":7,"h":6,"rotation":12.5}},"revision":1,"object_id":"` + objectA + `","z":1}`),
 			},
 		},
@@ -82,7 +82,7 @@ func TestHubSinkSubmitsTheCommittedEventUnderItsOwnKey(t *testing.T) {
 			name:   "set_dimensions",
 			record: record(canvasA, canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: 1280, Height: 720}}, canvas.Result{Revision: 2}, "corr-2"),
 			want: realtime.Command{
-				OperationID: "canvas-revision-2", ObjectID: "canvas", Kind: realtime.KindSet, CorrelationID: "corr-2",
+				OperationID: "outbox-2", ObjectID: "canvas", Kind: realtime.KindSet, CorrelationID: "corr-2",
 				Payload: []byte(`{"kind":"set_dimensions","mutation":{"width":1280,"height":720},"revision":2,"object_id":"","z":0}`),
 			},
 		},
@@ -90,7 +90,7 @@ func TestHubSinkSubmitsTheCommittedEventUnderItsOwnKey(t *testing.T) {
 			name:   "set_content",
 			record: record(canvasA, canvas.SetContent{ObjectID: objectA, Content: "twice"}, canvas.Result{Revision: 3, ObjectID: objectA}, ""),
 			want: realtime.Command{
-				OperationID: "canvas-revision-3", ObjectID: objectA, Kind: realtime.KindSet,
+				OperationID: "outbox-3", ObjectID: objectA, Kind: realtime.KindSet,
 				Payload: []byte(`{"kind":"set_content","mutation":{"object_id":"` + objectA + `","content":"twice"},"revision":3,"object_id":"` + objectA + `","z":0}`),
 			},
 		},
@@ -98,14 +98,14 @@ func TestHubSinkSubmitsTheCommittedEventUnderItsOwnKey(t *testing.T) {
 			name:   "set_transform",
 			record: record(canvasA, canvas.SetTransform{ObjectID: objectA, Transform: transform}, canvas.Result{Revision: 4, ObjectID: objectA, Z: 2}, "corr-4"),
 			want: realtime.Command{
-				OperationID: "canvas-revision-4", ObjectID: objectA, Kind: realtime.KindSet, CorrelationID: "corr-4",
+				OperationID: "outbox-4", ObjectID: objectA, Kind: realtime.KindSet, CorrelationID: "corr-4",
 				Payload: []byte(`{"kind":"set_transform","mutation":{"object_id":"` + objectA + `","transform":{"x":-9,"y":8,"w":7,"h":6,"rotation":12.5}},"revision":4,"object_id":"` + objectA + `","z":2}`),
 			},
 		},
 		{
 			name:   "delete_object",
 			record: record(canvasA, canvas.DeleteObject{ObjectID: objectA}, canvas.Result{Revision: 5, ObjectID: objectA}, "corr-5"),
-			want:   realtime.Command{OperationID: "canvas-revision-5", ObjectID: objectA, Kind: realtime.KindDelete, CorrelationID: "corr-5"},
+			want:   realtime.Command{OperationID: "outbox-5", ObjectID: objectA, Kind: realtime.KindDelete, CorrelationID: "corr-5"},
 		},
 	}
 	for _, tt := range tests {
@@ -230,7 +230,7 @@ func TestHubSinkRedeliveryProducesOneEffectAndTheSameAnswer(t *testing.T) {
 		t.Fatalf("actor answers = %+v, want three equal accepted answers with sequence 1", results)
 	}
 	events := hubEvents(t, hub, canvasA)
-	if len(events) != 1 || events[0].Sequence != 1 || events[0].OperationID != "canvas-revision-1" {
+	if len(events) != 1 || events[0].Sequence != 1 || events[0].OperationID != "outbox-1" {
 		t.Fatalf("hub events = %+v, want one event with sequence 1", events)
 	}
 }
@@ -278,7 +278,7 @@ func TestHubSinkRedeliveryAfterRetentionIsANewOperation(t *testing.T) {
 		t.Fatalf("Deliver at expiry: %v", err)
 	}
 	events := hubEvents(t, hub, canvasA)
-	if len(events) != 2 || events[1].Sequence != 2 || events[1].OperationID != "canvas-revision-1" {
+	if len(events) != 2 || events[1].Sequence != 2 || events[1].OperationID != "outbox-1" {
 		t.Fatalf("hub events at expiry = %+v, want a second operation with sequence 2", events)
 	}
 	if results := actor.list(); len(results) != 3 || results[1].Sequence != 1 || results[2].Sequence != 2 {

@@ -23,8 +23,10 @@ type Actor interface {
 
 // HubSink delivers outbox records to the realtime actor. Each record is
 // submitted under its own tenant and canvas with the operation ID
-// canvas-revision-<n>, which is stable per canvas, so the actor recognizes a
-// redelivery within its retention and answers it without a second effect.
+// outbox-<record ID>. It is stable across redeliveries, so the actor
+// recognizes a redelivery within its retention and answers it without a
+// second effect, and unique across the outbox, so a canvas whose revisions
+// start again (recreated or restored) never collides with an earlier event.
 type HubSink struct {
 	actor Actor
 }
@@ -58,7 +60,10 @@ func (s *HubSink) Deliver(ctx context.Context, record Record) error {
 		return fmt.Errorf("%w: %w", ErrUndeliverable, err)
 	}
 	if _, err := s.actor.Submit(ctx, command); err != nil {
-		if errors.Is(err, realtime.ErrInvalidCommand) || errors.Is(err, realtime.ErrOperationConflict) || errors.Is(err, access.ErrAccessDenied) {
+		if errors.Is(err, realtime.ErrInvalidCommand) {
+			return fmt.Errorf("%w: %w: %w", ErrUndeliverable, ErrInvalidEvent, err)
+		}
+		if errors.Is(err, realtime.ErrOperationConflict) || errors.Is(err, access.ErrAccessDenied) {
 			return fmt.Errorf("%w: %w", ErrUndeliverable, err)
 		}
 		return err
@@ -82,7 +87,7 @@ func hubCommand(record Record) (realtime.Command, error) {
 	}
 	command := realtime.Command{
 		Key:           realtime.Key{TenantID: event.Key.TenantID, CanvasID: event.Key.CanvasID},
-		OperationID:   fmt.Sprintf("canvas-revision-%d", event.Result.Revision),
+		OperationID:   fmt.Sprintf("outbox-%d", record.ID),
 		ObjectID:      event.Result.ObjectID,
 		Kind:          realtime.KindSet,
 		CorrelationID: event.CorrelationID,
