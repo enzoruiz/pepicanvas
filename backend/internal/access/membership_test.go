@@ -31,3 +31,29 @@ func TestCanvasRequestGrantsOnlyActiveMembersOfTheTenant(t *testing.T) {
 		})
 	}
 }
+
+func TestOperatorRequestGrantsOnlyOperatorsSubscriptionActions(t *testing.T) {
+	cases := map[string]struct {
+		operator bool
+		action   access.Action
+		want     bool
+	}{
+		"operator activates":     {true, access.ActionActivate, true},
+		"operator deactivates":   {true, access.ActionDeactivate, true},
+		"operator views":         {true, access.ActionView, true},
+		"operator administers":   {true, access.ActionAdminister, false},
+		"non-operator activates": {false, access.ActionActivate, false},
+		"non-operator views":     {false, access.ActionView, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := access.Check(access.OperatorRequest(c.operator, "tenant-a", c.action))
+			if got := err == nil; got != c.want {
+				t.Fatalf("allowed = %v, want %v", got, c.want)
+			}
+		})
+	}
+	if access.Check(access.OperatorRequest(true, "", access.ActionActivate)) == nil {
+		t.Fatal("an operator request without a tenant was allowed")
+	}
+}

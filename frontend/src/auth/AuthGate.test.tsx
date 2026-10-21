@@ -66,6 +66,7 @@ const session = {
   account_id: "0123456789abcdef0123456789abcdef",
   email: "alice@example.com",
   csrf_token: "csrf-token-value",
+  operator: false,
 };
 
 function renderGate(newOperationId?: () => string) {
