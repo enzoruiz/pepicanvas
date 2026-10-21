@@ -55,7 +55,9 @@ type memStore struct {
 	records  []*stored
 	nextID   int64
 	failRead int
-	cutoffs  []time.Time
+	// failWrite fails that many Settle and Retry calls.
+	failWrite int
+	cutoffs   []time.Time
 }
 
 func (s *memStore) add(key canvas.Key, revision int64, correlationID string, at time.Time) int64 {
@@ -134,6 +136,10 @@ func (s *memStore) Heads(_ context.Context, limit int) ([]outbox.Record, error) 
 func (s *memStore) Settle(_ context.Context, id int64, outcome outbox.Outcome, at time.Time, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failWrite > 0 {
+		s.failWrite--
+		return errors.New("store write failed")
+	}
 	if r := s.find(id); r != nil && r.outcome == "" {
 		r.outcome, r.settledAt = outcome, at
 		if reason != "" {
@@ -146,6 +152,10 @@ func (s *memStore) Settle(_ context.Context, id int64, outcome outbox.Outcome, a
 func (s *memStore) Retry(_ context.Context, id int64, attempts int, next time.Time, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failWrite > 0 {
+		s.failWrite--
+		return errors.New("store write failed")
+	}
 	if r := s.find(id); r != nil && r.outcome == "" {
 		r.record.Attempts, r.record.NextAttempt, r.lastError = attempts, next, reason
 	}

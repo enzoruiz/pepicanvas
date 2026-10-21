@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 )
 
 var (
@@ -43,6 +45,9 @@ type Store interface {
 	// records due soonest first. A record that cannot be decoded is returned
 	// with Malformed set, so it never fails the batch.
 	Heads(ctx context.Context, limit int) ([]Record, error)
+	// Pending returns up to limit pending records of one canvas, oldest
+	// first.
+	Pending(ctx context.Context, key canvas.Key, limit int) ([]Record, error)
 	// Settle marks a pending record delivered or rejected.
 	Settle(ctx context.Context, id int64, outcome Outcome, at time.Time, reason string) error
 	// Retry records a failed delivery and when to try again.
@@ -93,7 +98,8 @@ type Config struct {
 	// doubles per attempt.
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
-	// BatchSize bounds the canvases served per pass.
+	// BatchSize bounds the canvases served per pass and the records of one
+	// canvas delivered per pass.
 	BatchSize int
 	// Retention is how long settled records are kept before purge.
 	Retention time.Duration
@@ -117,9 +123,12 @@ type Counters struct {
 // record that fails blocks only the later records of its canvas.
 type Publisher struct {
 	config Config
-	wake   chan struct{}
-	stop   chan struct{}
-	done   chan struct{}
+	// held delays records whose outcome the store could not record. Only the
+	// loop goroutine uses it, and it keeps only current heads.
+	held map[int64]hold
+	wake chan struct{}
+	stop chan struct{}
+	done chan struct{}
 	// abort cancels the delivery in flight when Close runs out of time.
 	abort       context.Context
 	cancelAbort context.CancelFunc
@@ -173,6 +182,7 @@ func NewPublisher(config Config) (*Publisher, error) {
 	abort, cancelAbort := context.WithCancel(context.Background())
 	return &Publisher{
 		config: config,
+		held:   map[int64]hold{},
 		wake:   make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -294,7 +304,7 @@ func (p *Publisher) stopping() bool {
 	}
 }
 
-// pass delivers every due head once. It reports whether any record settled
+// pass serves every canvas once. It reports whether any record settled
 // and how long to wait for the next due record.
 func (p *Publisher) pass() (bool, time.Duration) {
 	wait := p.config.PollInterval
@@ -303,23 +313,62 @@ func (p *Publisher) pass() (bool, time.Duration) {
 		p.storeFailed("read pending records", err)
 		return false, wait
 	}
+	p.keepHeld(heads)
 	progressed := false
-	for _, record := range heads {
+	for _, head := range heads {
 		if p.stopping() {
 			break
 		}
-		now := p.config.Now()
-		if due := record.NextAttempt.Sub(now); due > 0 {
-			wait = min(wait, due)
-			continue
-		}
-		settled, retryIn := p.deliver(record)
+		settled, retryIn := p.drain(head)
 		progressed = progressed || settled
 		if retryIn > 0 {
 			wait = min(wait, retryIn)
 		}
 	}
 	return progressed, wait
+}
+
+// drain delivers the head of a canvas and, while each record settles, the
+// next records of that canvas, up to BatchSize per pass, so a backlog does
+// not take one pass per record. It reports whether any record settled and
+// the wait before the canvas is due again.
+func (p *Publisher) drain(head Record) (bool, time.Duration) {
+	if settled, retryIn := p.attempt(head); !settled {
+		return false, retryIn
+	}
+	for served := 1; served < p.config.BatchSize; {
+		next, err := p.config.Store.Pending(p.abort, head.Event.Key, p.config.BatchSize-served)
+		if err != nil {
+			p.storeFailed("read pending records", err)
+			return true, 0
+		}
+		if len(next) == 0 {
+			return true, 0
+		}
+		for _, record := range next {
+			if p.stopping() {
+				return true, 0
+			}
+			if settled, retryIn := p.attempt(record); !settled {
+				return true, retryIn
+			}
+			served++
+		}
+	}
+	return true, 0
+}
+
+// attempt delivers a record once it is due. It returns whether the record
+// settled, or the wait before its next attempt.
+func (p *Publisher) attempt(record Record) (bool, time.Duration) {
+	due := record.NextAttempt
+	if held, ok := p.held[record.ID]; ok && held.until.After(due) {
+		due = held.until
+	}
+	if wait := due.Sub(p.config.Now()); wait > 0 {
+		return false, wait
+	}
+	return p.deliver(record)
 }
 
 // deliver runs one attempt and records its outcome. It returns whether the
@@ -369,13 +418,16 @@ func (p *Publisher) deliver(record Record) (bool, time.Duration) {
 		defer cancel()
 		if storeErr := p.config.Store.Retry(storeCtx, record.ID, attempts, now.Add(backoff), truncate(err.Error())); storeErr != nil {
 			p.storeFailed("record retry", storeErr)
-			return false, p.config.MinBackoff
+			return false, p.hold(record.ID, now)
 		}
+		delete(p.held, record.ID)
 		p.retries.Add(1)
 		log.Warn("outbox delivery failed", slog.Int("attempts", attempts), slog.Duration("backoff", backoff), slog.String("error", truncate(err.Error())))
 		return false, backoff
 	}
-	return false, p.config.MinBackoff
+	// The store could not record the outcome: the record stays pending, and
+	// a redelivery is answered without a second effect.
+	return false, p.hold(record.ID, now)
 }
 
 func (p *Publisher) settle(record Record, outcome Outcome, at time.Time, reason string) bool {
@@ -385,7 +437,43 @@ func (p *Publisher) settle(record Record, outcome Outcome, at time.Time, reason 
 		p.storeFailed("settle record", err)
 		return false
 	}
+	delete(p.held, record.ID)
 	return true
+}
+
+// hold is the local delay of a record whose outcome the store could not
+// record.
+type hold struct {
+	failures int
+	until    time.Time
+}
+
+// hold delays a record after a failed store write, doubling per consecutive
+// failure, so a failing store does not get a delivery at a fixed rate.
+func (p *Publisher) hold(id int64, now time.Time) time.Duration {
+	held := p.held[id]
+	held.failures++
+	delay := p.backoff(held.failures)
+	held.until = now.Add(delay)
+	p.held[id] = held
+	return delay
+}
+
+// keepHeld forgets delays of records that are no longer heads, which bounds
+// them by BatchSize.
+func (p *Publisher) keepHeld(heads []Record) {
+	if len(p.held) == 0 {
+		return
+	}
+	current := make(map[int64]bool, len(heads))
+	for _, head := range heads {
+		current[head.ID] = true
+	}
+	for id := range p.held {
+		if !current[id] {
+			delete(p.held, id)
+		}
+	}
 }
 
 func (p *Publisher) purge() {
