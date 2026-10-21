@@ -1,6 +1,16 @@
 // Command server is the PepiCanvas backend: it migrates PostgreSQL, serves
 // the HTTP API, and serves the built frontend from one origin.
 //
+// Usage:
+//
+//	server                         serve the API and the frontend
+//	server grant-operator <email>  give the account of email the operator
+//	                               role (US-002); granting again is a no-op
+//
+// grant-operator reads only PEPICANVAS_DATABASE_URL, applies pending
+// migrations, prints "operator granted: <account_id>", and exits 0. It exits
+// 1 when no account has the email or the database fails, and 2 on bad usage.
+//
 // Configuration (environment):
 //
 //	PEPICANVAS_DATABASE_URL    PostgreSQL connection string (required)
@@ -13,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,6 +40,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 const (
@@ -42,10 +54,52 @@ func main() {
 	logger := slog.New(logging.NewHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "grant-operator" {
+		code := grantOperator(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, logger)
+		stop()
+		os.Exit(code)
+	}
 	if err := run(ctx, os.Getenv, logger); err != nil {
 		logger.Error("server stopped", slog.Any("error", err))
 		os.Exit(1)
 	}
+}
+
+// grantOperator runs the grant-operator subcommand and returns the exit code.
+// Errors go through the redacting logger, which never sees the DSN.
+func grantOperator(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, logger *slog.Logger) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: server grant-operator <email>")
+		return 2
+	}
+	dsn := getenv("PEPICANVAS_DATABASE_URL")
+	if dsn == "" {
+		logger.Error("grant operator failed", slog.String("error", "PEPICANVAS_DATABASE_URL is required"))
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(ctx, startupTimeout)
+	defer cancel()
+	pool, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		logger.Error("grant operator failed", slog.Any("error", err))
+		return 1
+	}
+	defer pool.Close()
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		logger.Error("grant operator failed", slog.Any("error", err))
+		return 1
+	}
+	account, err := postgres.NewSubscriptionStore(pool).GrantOperator(ctx, args[0])
+	if errors.Is(err, subscription.ErrAccountNotFound) {
+		logger.Error("grant operator failed", slog.String("error", "no account has that email"))
+		return 1
+	}
+	if err != nil {
+		logger.Error("grant operator failed", slog.Any("error", err))
+		return 1
+	}
+	fmt.Fprintf(stdout, "operator granted: %s\n", account)
+	return 0
 }
 
 func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) error {
@@ -79,9 +133,11 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 	api, err := httpapi.New(httpapi.Config{
-		Accounts:      accounts,
+		Accounts: accounts,
+		// Activation writes the memberships and tenants rows MembershipOf reads.
 		Memberships:   store,
 		Canvases:      postgres.NewCanvasStore(pool),
+		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(pool)),
 		AllowedOrigin: origin,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,

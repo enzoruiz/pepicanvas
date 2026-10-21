@@ -20,6 +20,8 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription/subscriptiontest"
 )
 
 const (
@@ -28,19 +30,42 @@ const (
 	clientIP = "192.0.2.10"
 )
 
+// canvases serves seeded canvases and the empty canvases activations created.
 type canvases struct {
-	mu   sync.Mutex
-	byID map[canvas.Key]canvas.Canvas
+	mu        sync.Mutex
+	byID      map[canvas.Key]canvas.Canvas
+	activated *subscriptiontest.MemoryStore
 }
 
 func (c *canvases) Load(_ context.Context, key canvas.Key) (canvas.Canvas, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if dimensions, ok := c.activated.Canvases()[key]; ok {
+		return canvas.Canvas{Key: key, Dimensions: dimensions}, nil
+	}
 	found, ok := c.byID[key]
 	if !ok {
 		return canvas.Canvas{}, canvas.ErrNotFound
 	}
 	return found, nil
+}
+
+// memberships reads the owner memberships activations created, as the
+// PostgreSQL memberships and tenants tables do, then the seeded ones.
+type memberships struct {
+	activated *subscriptiontest.MemoryStore
+	seeded    access.MembershipStore
+}
+
+func (m memberships) MembershipOf(ctx context.Context, account access.AccountID, tenantID string) (access.Membership, bool, error) {
+	if role, ok := m.activated.Membership(tenantID, account); ok {
+		for _, tenant := range m.activated.Tenants() {
+			if tenant.ID == tenantID {
+				return access.Membership{TenantID: tenantID, Role: role, Subscription: tenant.Status}, true, nil
+			}
+		}
+	}
+	return m.seeded.MembershipOf(ctx, account, tenantID)
 }
 
 type syncBuffer struct {
@@ -62,10 +87,12 @@ func (b *syncBuffer) String() string {
 
 type env struct {
 	t        *testing.T
+	faults   *faults
 	store    *accesstest.MemoryStore
 	hasher   *accesstest.PlainHasher
 	clock    *accesstest.Clock
 	canvases *canvases
+	subs     *subscriptiontest.MemoryStore
 	logs     *syncBuffer
 	handler  http.Handler
 	bodies   []string
@@ -74,21 +101,24 @@ type env struct {
 func newEnv(t *testing.T, limits httpapi.Limits) *env {
 	t.Helper()
 	e := &env{
-		t:        t,
-		store:    accesstest.NewMemoryStore(),
-		hasher:   &accesstest.PlainHasher{},
-		clock:    accesstest.NewClock(),
-		canvases: &canvases{byID: map[canvas.Key]canvas.Canvas{}},
-		logs:     &syncBuffer{},
+		t:      t,
+		store:  accesstest.NewMemoryStore(),
+		hasher: &accesstest.PlainHasher{},
+		clock:  accesstest.NewClock(),
+		faults: &faults{},
+		subs:   subscriptiontest.NewMemoryStore(),
+		logs:   &syncBuffer{},
 	}
+	e.canvases = &canvases{byID: map[canvas.Key]canvas.Canvas{}, activated: e.subs}
 	svc, err := access.NewService(e.store, e.store, e.hasher, access.WithClock(e.clock.Now))
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler, err := httpapi.New(httpapi.Config{
-		Accounts:      svc,
-		Memberships:   e.store,
+		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults},
+		Memberships:   memberships{activated: e.subs, seeded: e.store},
 		Canvases:      e.canvases,
+		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults},
 		AllowedOrigin: origin,
 		Logger:        slog.New(logging.NewHandler(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
 		Now:           e.clock.Now,
@@ -107,6 +137,13 @@ func withOrigin(o string) option { return func(r *http.Request) { r.Header.Set("
 func withoutOrigin() option      { return func(r *http.Request) { r.Header.Del("Origin") } }
 func fromIP(ip string) option    { return func(r *http.Request) { r.RemoteAddr = ip + ":40000" } }
 func withCSRF(v string) option   { return func(r *http.Request) { r.Header.Set(httpapi.CSRFHeader, v) } }
+func withBody(contentType, body string) option {
+	return func(r *http.Request) {
+		r.Body = io.NopCloser(strings.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Set("Content-Type", contentType)
+	}
+}
 func withSession(token string) option {
 	return func(r *http.Request) { r.AddCookie(&http.Cookie{Name: httpapi.SessionCookie, Value: token}) }
 }
@@ -186,7 +223,11 @@ func (e *env) register(op, email string) access.AccountID {
 	if res.StatusCode != http.StatusCreated {
 		e.t.Fatalf("register %s: status %d", email, res.StatusCode)
 	}
-	return access.AccountID(decode(e.t, res)["account_id"].(string))
+	id := access.AccountID(decode(e.t, res)["account_id"].(string))
+	// Both stores read one accounts table in PostgreSQL.
+	normalized, _ := access.NormalizeEmail(email)
+	e.subs.AddAccount(id, normalized)
+	return id
 }
 
 type signedIn struct {
