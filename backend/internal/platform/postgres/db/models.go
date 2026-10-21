@@ -58,6 +58,49 @@ type CanvasOperation struct {
 	AcceptedAt    pgtype.Timestamptz
 }
 
+type MediaAsset struct {
+	TenantID          string
+	CanvasID          string
+	AssetID           string
+	State             string
+	Kind              pgtype.Text
+	DeclaredBytes     int64
+	StorageKey        string
+	ReplacesReference pgtype.Text
+	ReservedAt        pgtype.Timestamptz
+}
+
+type MediaOperation struct {
+	TenantID      string
+	CanvasID      string
+	OperationID   string
+	Fingerprint   []byte
+	AssetID       string
+	StorageKey    string
+	QuotaBytes    int64
+	UsedBytes     int64
+	ReservedBytes int64
+	CorrelationID pgtype.Text
+	AcceptedAt    pgtype.Timestamptz
+	AbandonReason pgtype.Text
+	RejectionCode pgtype.Text
+}
+
+type MediaReference struct {
+	TenantID    string
+	CanvasID    string
+	ReferenceID string
+	AssetID     string
+}
+
+type MediaUsage struct {
+	TenantID      string
+	CanvasID      string
+	QuotaBytes    int64
+	UsedBytes     int64
+	ReservedBytes int64
+}
+
 type Membership struct {
 	TenantID  string
 	AccountID string
