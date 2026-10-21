@@ -80,29 +80,26 @@ func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int6
 		return fmt.Errorf("s3: negative size")
 	}
 	reader, writer := io.Pipe()
+	verdict := make(chan error, 1)
 	go func() {
-		if _, err := io.CopyN(writer, body, size); err != nil {
-			if errors.Is(err, io.EOF) {
-				err = errBodyTooShort
-			}
-			writer.CloseWithError(err)
-			return
-		}
-		// The transport reads past Content-Length to detect a longer body,
-		// so this verdict reaches it before the request completes.
-		var extra [1]byte
-		n, err := body.Read(extra[:])
-		switch {
-		case n > 0:
-			writer.CloseWithError(errBodyTooLong)
-		case err != nil && !errors.Is(err, io.EOF):
-			writer.CloseWithError(err)
-		default:
-			writer.Close()
-		}
+		err := copyExact(writer, body, size)
+		verdict <- err
+		writer.CloseWithError(err)
 	}()
 	stop := context.AfterFunc(ctx, func() { writer.CloseWithError(ctx.Err()) })
 	defer stop()
+	if size == 0 {
+		// The transport sends no body for Content-Length 0, so nothing
+		// holds the request back: wait for the body to prove it is empty.
+		select {
+		case err := <-verdict:
+			if err != nil {
+				return fmt.Errorf("s3: put object: %w", err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	options := minio.PutObjectOptions{
 		DisableMultipart: true,
 		// Stream the body instead of buffering it to sign its hash.
@@ -122,6 +119,39 @@ func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int6
 		return fmt.Errorf("s3: put object: %w", err)
 	}
 	return nil
+}
+
+// copyExact writes exactly size bytes of body to w and fails a shorter or
+// longer body. It holds back the last byte until body proves it has no more:
+// the transport may stop reading at Content-Length, and the store keeps no
+// object until every declared byte arrives.
+func copyExact(w io.Writer, body io.Reader, size int64) error {
+	var last int64
+	if size > 0 {
+		last = 1
+		if _, err := io.CopyN(w, body, size-1); err != nil {
+			if errors.Is(err, io.EOF) {
+				return errBodyTooShort
+			}
+			return err
+		}
+	}
+	var tail [2]byte
+	n, err := io.ReadFull(body, tail[:last+1])
+	switch {
+	case int64(n) > last:
+		return errBodyTooLong
+	case err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF):
+		return err
+	case int64(n) < last:
+		return errBodyTooShort
+	}
+	if last == 0 {
+		// An empty pipe write still waits for a reader.
+		return nil
+	}
+	_, err = w.Write(tail[:last])
+	return err
 }
 
 // Open returns the stored bytes, or media.ErrNotFound for a missing key.
