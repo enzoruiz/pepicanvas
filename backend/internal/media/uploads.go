@@ -24,6 +24,10 @@ const (
 // released and the stored bytes are deleted or isolated for Sweep.
 var ErrUploadFailed = errors.New("media: upload failed")
 
+// ErrUploadInProgress reports a retry of an upload whose earlier attempt
+// stored its bytes and has not finished. The client may retry later.
+var ErrUploadInProgress = errors.New("media: upload in progress")
+
 // ErrObjectExists reports a Put to a key that already holds an object.
 var ErrObjectExists = errors.New("media: stored object already exists")
 
@@ -110,13 +114,11 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 
 	body := &exactReader{r: req.Body, remaining: req.DeclaredBytes}
 	if err := u.storage.Put(ctx, reserved.StorageKey, body, req.DeclaredBytes); err != nil {
-		// A concurrent attempt of this upload stored its bytes first, and
-		// storage never replaces them. Once that attempt completed, this
-		// one receives its result.
+		// Another attempt of this upload stored its bytes first, and storage
+		// never replaces them. This attempt never aborts that one: it receives
+		// its result once completed, its recorded abandon, or ErrUploadInProgress.
 		if errors.Is(err, ErrObjectExists) {
-			if asset, readyErr := u.store.Ready(ctx, req.Key, reserved.AssetID); readyErr == nil {
-				return u.replay(ctx, req, asset)
-			}
+			return u.collided(ctx, req, reserved)
 		}
 		return UploadResult{}, u.abort(ctx, req, reserved, fmt.Errorf("%w: store bytes: %w", ErrUploadFailed, err))
 	}
@@ -144,6 +146,25 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 		_ = u.storage.Delete(cleanup, reserved.StorageKey)
 	}
 	return UploadResult{AssetID: reserved.AssetID, Kind: inspection.Kind, Usage: completed.Usage}, nil
+}
+
+// collided answers an attempt whose bytes another attempt of the same upload
+// stored first, without touching the reservation or the stored bytes.
+func (u *Uploads) collided(ctx context.Context, req UploadRequest, reserved Result) (UploadResult, error) {
+	asset, err := u.store.Ready(ctx, req.Key, reserved.AssetID)
+	if err == nil {
+		return u.replay(ctx, req, asset)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return UploadResult{}, requestError(ctx, err)
+	}
+	switch abandon, err := u.store.Abandoned(ctx, req.Key, stage(req.Operation, abandonSuffix).ID); {
+	case err == nil:
+		return UploadResult{}, abandonedError(abandon)
+	case !errors.Is(err, ErrNotFound):
+		return UploadResult{}, requestError(ctx, err)
+	}
+	return UploadResult{}, ErrUploadInProgress
 }
 
 // replay repeats the completion of an asset that is already ready.

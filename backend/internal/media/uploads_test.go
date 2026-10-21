@@ -843,6 +843,53 @@ func TestConcurrentDuplicateKeepsValidatedBytes(t *testing.T) {
 	}
 }
 
+// S9: a retry that arrives while the original is still inspecting its stored
+// bytes reports the upload in progress and leaves the original untouched, which
+// then completes and is replayed by a later retry.
+func TestConcurrentRetryDuringInspectionKeepsTheOriginal(t *testing.T) {
+	srv := startServer(t)
+	f := srv.fixture(t)
+	req := f.request("hello", "ref-1")
+	inspecting, release := make(chan struct{}), make(chan struct{})
+	f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) {
+		close(inspecting)
+		<-release
+		return imageOf(data), nil
+	})
+	type outcome struct {
+		result media.UploadResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := f.uploads.Upload(context.Background(), req)
+		done <- outcome{result, err}
+	}()
+	<-inspecting
+	retry := req
+	retry.Body = strings.NewReader("hello")
+	if _, err := f.uploads.Upload(context.Background(), retry); !errors.Is(err, media.ErrUploadInProgress) {
+		close(release)
+		t.Fatalf("retry during inspection = %v, want ErrUploadInProgress", err)
+	}
+	f.wantUsage(t, 0, 5)
+	close(release)
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("original = %v, want success", got.err)
+	}
+	f.wantServed(t, got.result.AssetID, "hello")
+	f.wantUsage(t, 5, 0)
+	later := req
+	later.Body = strings.NewReader("hello")
+	if replayed := f.mustUpload(t, later); replayed != got.result {
+		t.Fatalf("later retry = %+v, want the original %+v", replayed, got.result)
+	}
+	if f.storage.objectCount() != 1 {
+		t.Fatalf("storage holds %d objects, want the original's only", f.storage.objectCount())
+	}
+}
+
 // S9: a concurrent duplicate that fails after the original was rejected
 // repeats the recorded rejection and leaves no bytes behind.
 func TestConcurrentDuplicateRepeatsTheRecordedAbandon(t *testing.T) {
