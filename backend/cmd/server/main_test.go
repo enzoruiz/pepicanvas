@@ -95,6 +95,13 @@ func (p *process) stop(t *testing.T) {
 
 func request(t *testing.T, p *process, method, path, body, cookie string) *http.Response {
 	t.Helper()
+	return requestWith(t, p, method, path, body, cookie, "")
+}
+
+// requestWith sends a request from the allowed origin with an optional
+// session cookie and CSRF token.
+func requestWith(t *testing.T, p *process, method, path, body, cookie, csrf string) *http.Response {
+	t.Helper()
 	r, err := http.NewRequestWithContext(context.Background(), method, "http://"+p.addr+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +112,9 @@ func request(t *testing.T, p *process, method, path, body, cookie string) *http.
 	}
 	if cookie != "" {
 		r.Header.Set("Cookie", cookie)
+	}
+	if csrf != "" {
+		r.Header.Set("X-CSRF-Token", csrf)
 	}
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(r)
@@ -256,4 +266,218 @@ func errorsAs(err error, target **exec.ExitError) bool {
 		*target = e
 	}
 	return ok
+}
+
+type session struct {
+	cookie   string
+	csrf     string
+	operator bool
+}
+
+func decodeBody(t *testing.T, res *http.Response) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	return body
+}
+
+func registerAndSignIn(t *testing.T, p *process, op, email string) session {
+	t.Helper()
+	if res := request(t, p, http.MethodPost, "/api/accounts", `{"operation_id":"`+op+`","email":"`+email+`","password":"correct horse battery"}`, ""); res.StatusCode != http.StatusCreated {
+		t.Fatalf("register %s = %d", email, res.StatusCode)
+	}
+	return signIn(t, p, email)
+}
+
+func signIn(t *testing.T, p *process, email string) session {
+	t.Helper()
+	res := request(t, p, http.MethodPost, "/api/sessions", `{"email":"`+email+`","password":"correct horse battery"}`, "")
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("sign in %s = %d", email, res.StatusCode)
+	}
+	s := session{}
+	for _, c := range res.Cookies() {
+		if c.Name == "__Host-pcs" {
+			s.cookie = c.Name + "=" + c.Value
+		}
+	}
+	body := decodeBody(t, res)
+	s.csrf, _ = body["csrf_token"].(string)
+	s.operator, _ = body["operator"].(bool)
+	if s.cookie == "" || s.csrf == "" {
+		t.Fatalf("sign in %s: no session", email)
+	}
+	return s
+}
+
+// grantOperator runs the grant-operator subcommand and returns its exit code
+// and combined output.
+func grantOperator(t *testing.T, bin string, env []string, args ...string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, append([]string{"grant-operator"}, args...)...)
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("grant-operator %v did not exit\n%s", args, out)
+	}
+	var exit *exec.ExitError
+	if err != nil && !errorsAs(err, &exit) {
+		t.Fatalf("grant-operator %v: %v", args, err)
+	}
+	if exit != nil {
+		return exit.ExitCode(), string(out)
+	}
+	return 0, string(out)
+}
+
+func activate(t *testing.T, p *process, s session, op, email string) (*http.Response, map[string]any) {
+	t.Helper()
+	res := requestWith(t, p, http.MethodPost, "/api/activations", `{"operation_id":"`+op+`","email":"`+email+`"}`, s.cookie, s.csrf)
+	if res.StatusCode != http.StatusOK {
+		return res, nil
+	}
+	return res, decodeBody(t, res)
+}
+
+func TestOperatorActivatesStreamersAcrossRestart(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	operator := registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	bob := registerAndSignIn(t, server, "op-process-bob-001", "bob@example.com")
+	if operator.operator || alice.operator {
+		t.Fatal("an account is an operator before the grant")
+	}
+
+	// S13: the host grants the operator role.
+	code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "Operator@Example.com")
+	if code != 0 || !strings.Contains(out, "operator granted: ") {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	if code, again := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 || again != out {
+		t.Fatalf("repeated grant-operator = %d %q, want 0 %q", code, again, out)
+	}
+	operator = signIn(t, server, "operator@example.com")
+	if !operator.operator {
+		t.Fatal("sign-in does not report the operator role")
+	}
+	res := request(t, server, http.MethodGet, "/api/session", "", operator.cookie)
+	if body := decodeBody(t, res); body["operator"] != true {
+		t.Fatalf("session body = %v", body)
+	}
+	if body := decodeBody(t, request(t, server, http.MethodGet, "/api/session", "", alice.cookie)); body["operator"] != false {
+		t.Fatalf("streamer session body = %v", body)
+	}
+
+	// S4: a non-operator cannot activate.
+	if res, _ := activate(t, server, alice, "op-process-deny-01", "alice@example.com"); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-operator activation = %d, want 403", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/canvas", "", alice.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("canvas before activation = %d, want 403", res.StatusCode)
+	}
+
+	res, a := activate(t, server, operator, "op-process-act-a01", "alice@example.com")
+	if res.StatusCode != http.StatusOK || a["created"] != true {
+		t.Fatalf("activate alice = %d %v", res.StatusCode, a)
+	}
+	_, b := activate(t, server, operator, "op-process-act-b01", "bob@example.com")
+	if b == nil || b["tenant_id"] == a["tenant_id"] || b["canvas_id"] == a["canvas_id"] {
+		t.Fatalf("activate bob = %v, alice %v", b, a)
+	}
+	// A repeated activation, by replay or by a new operation, keeps the canvas.
+	for _, op := range []string{"op-process-act-a01", "op-process-act-a02"} {
+		if _, again := activate(t, server, operator, op, "alice@example.com"); again == nil || again["tenant_id"] != a["tenant_id"] || again["canvas_id"] != a["canvas_id"] {
+			t.Fatalf("repeat %s = %v, want %v", op, again, a)
+		}
+	}
+
+	ownCanvas := func(p *process, s session, want map[string]any) {
+		t.Helper()
+		res := request(t, p, http.MethodGet, "/api/canvas", "", s.cookie)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/canvas = %d", res.StatusCode)
+		}
+		got := decodeBody(t, res)
+		if got["tenant_id"] != want["tenant_id"] || got["canvas_id"] != want["canvas_id"] || got["width"] != float64(1920) || got["height"] != float64(1080) {
+			t.Fatalf("canvas = %v, want %v", got, want)
+		}
+	}
+	ownCanvas(server, alice, a)
+	ownCanvas(server, bob, b)
+	alicePath := "/api/tenants/" + a["tenant_id"].(string) + "/canvases/" + a["canvas_id"].(string)
+	if res := request(t, server, http.MethodGet, alicePath, "", bob.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("bob reads alice's canvas = %d, want 403", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, alicePath, "", alice.cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("alice reads her canvas by tenant = %d", res.StatusCode)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	server = start(t, bin, env...)
+	ownCanvas(server, alice, a)
+	server.stop(t)
+	logs += server.logs.String()
+
+	if !strings.Contains(logs, `"msg":"activation confirmed"`) {
+		t.Fatal("no activation log")
+	}
+	for name, s := range map[string]string{
+		"password":       "correct horse battery",
+		"operator email": "operator@example.com",
+		"streamer email": "alice@example.com",
+		"other email":    "bob@example.com",
+		"session token":  strings.TrimPrefix(operator.cookie, "__Host-pcs="),
+		"CSRF token":     operator.csrf,
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}
+
+func TestGrantOperatorRejectsBadInput(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	withDB := []string{"PEPICANVAS_DATABASE_URL=" + dsn}
+
+	code, out := grantOperator(t, bin, withDB)
+	if code != 2 || !strings.Contains(out, "usage: server grant-operator <email>") {
+		t.Fatalf("missing argument = %d\n%s", code, out)
+	}
+	if code, out := grantOperator(t, bin, withDB, "a@example.com", "b@example.com"); code != 2 || !strings.Contains(out, "usage:") {
+		t.Fatalf("extra argument = %d\n%s", code, out)
+	}
+	for _, email := range []string{"nobody@example.com", "not-an-email"} {
+		code, out := grantOperator(t, bin, withDB, email)
+		if code != 1 || !strings.Contains(out, "no account has that email") || strings.Contains(out, "operator granted") {
+			t.Fatalf("grant-operator %q = %d\n%s", email, code, out)
+		}
+		if strings.Contains(out, dsn) {
+			t.Fatalf("output echoes the DSN:\n%s", out)
+		}
+	}
+	for name, env := range map[string][]string{
+		"missing database": nil,
+		"unreachable db":   {"PEPICANVAS_DATABASE_URL=postgres://pepicanvas:hunter2-decoy@127.0.0.1:1/pepicanvas"},
+	} {
+		code, out := grantOperator(t, bin, env, "a@example.com")
+		if code != 1 || strings.Contains(out, "hunter2-decoy") {
+			t.Fatalf("%s = %d\n%s", name, code, out)
+		}
+	}
 }

@@ -20,6 +20,7 @@ const messages: Record<ApiError, string> = {
   bad_request: "Enter a valid email and a password of 12 to 128 characters.",
   unauthorized: "Email or password is incorrect.",
   forbidden: "The request was rejected. Reload the page and try again.",
+  not_found: "The service is unavailable. Try again.",
   conflict: "The request changed while it was being retried. Try again.",
   identity_taken: "An account with this email already exists.",
   rate_limited: "Too many attempts. Wait a few minutes and try again.",

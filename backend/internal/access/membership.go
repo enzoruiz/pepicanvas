@@ -41,3 +41,24 @@ func CanvasRequest(membership Membership, found bool, tenantID string, action Ac
 	}
 	return request
 }
+
+// OperatorRequest builds the authorization request for an account acting on a
+// tenant's subscription. Operators act platform-wide, so an operator's actor
+// tenant is the target tenant; a non-operator has no tenant and is denied.
+func OperatorRequest(operator bool, tenantID string, action Action) Request {
+	request := Request{
+		ResourceTenantID: tenantID,
+		Resource:         ResourceSubscription,
+		Action:           action,
+		Subscription:     SubscriptionInactive,
+		Invitation:       InvitationNone,
+		Membership:       MembershipNone,
+	}
+	if !operator {
+		return request
+	}
+	request.ActorTenantID = tenantID
+	request.Role = RoleOperator
+	request.Membership = MembershipActive
+	return request
+}
