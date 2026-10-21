@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
 )
 
@@ -23,12 +24,14 @@ const DefaultOperationRetention = 10 * time.Minute
 
 // CanvasStore implements canvas.Store. Every mutation locks its canvas row,
 // so mutations of one canvas commit one at a time in revision order. Each
-// accepted mutation retains its operation ID and result in the same
-// transaction, so a retry returns the committed result without a second effect.
+// accepted mutation retains its operation ID and result, and writes its
+// outbox record, in the same transaction, so a retry returns the committed
+// result without a second effect or a second record.
 type CanvasStore struct {
 	pool      *pgxpool.Pool
 	now       func() time.Time
 	retention time.Duration
+	committed func(canvas.Key)
 	// beforeCommit, when set by tests, runs after the mutation and before commit.
 	beforeCommit func(context.Context) error
 }
@@ -47,6 +50,13 @@ func WithClock(now func() time.Time) CanvasStoreOption {
 // accepted at T is retained while now < T + ttl.
 func WithRetention(ttl time.Duration) CanvasStoreOption {
 	return func(s *CanvasStore) { s.retention = ttl }
+}
+
+// WithCommitted sets a hook that runs after each commit that wrote an outbox
+// record, so a publisher can deliver it without waiting for its next poll.
+// The hook must not block.
+func WithCommitted(hook func(canvas.Key)) CanvasStoreOption {
+	return func(s *CanvasStore) { s.committed = hook }
 }
 
 // NewCanvasStore returns a store over a migrated pool.
@@ -123,8 +133,13 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		return canvas.Result{}, err
 	}
 	fingerprint := canvas.Fingerprint(mutation)
+	kind, payload, err := outbox.EncodeMutation(mutation)
+	if err != nil {
+		return canvas.Result{}, err
+	}
 	var result canvas.Result
-	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+	var replay bool
+	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := db.New(tx)
 		if _, err := q.LockCanvas(ctx, db.LockCanvasParams{TenantID: key.TenantID, CanvasID: key.CanvasID}); errors.Is(err, pgx.ErrNoRows) {
 			return canvas.ErrNotFound
@@ -135,7 +150,7 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		now := s.now()
 		replayed, found, err := retained(ctx, q, key, operation, fingerprint, now.Add(-s.retention))
 		if err != nil || found {
-			result = replayed
+			result, replay = replayed, found
 			return err
 		}
 		if result, err = mutate(ctx, q, key, mutation); err != nil {
@@ -150,6 +165,16 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		}); err != nil {
 			return err
 		}
+		if err := q.InsertOutboxEvent(ctx, db.InsertOutboxEventParams{
+			TenantID: key.TenantID, CanvasID: key.CanvasID, Revision: result.Revision,
+			OperationID:   operation.ID,
+			CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
+			Kind:          kind, Mutation: payload,
+			ObjectID: result.ObjectID, Z: result.Z,
+			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}); err != nil {
+			return err
+		}
 		if s.beforeCommit != nil {
 			return s.beforeCommit(ctx)
 		}
@@ -157,6 +182,9 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 	})
 	if err != nil {
 		return canvas.Result{}, wrap("apply mutation", err)
+	}
+	if !replay && s.committed != nil {
+		s.committed(key)
 	}
 	return result, nil
 }

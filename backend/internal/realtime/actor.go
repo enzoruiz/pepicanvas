@@ -16,6 +16,16 @@ type actor struct {
 	ops      *operations
 	sequence uint64
 	log      []Event
+	// resync makes every replay at or below floor require resync.
+	resync bool
+	floor  uint64
+}
+
+// markResync sets the resync floor at the current sequence.
+func (a *actor) markResync() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.resync, a.floor = true, a.sequence
 }
 
 // run serves the inbox until Close closes it. After abort, remaining
@@ -70,7 +80,7 @@ func (a *actor) handle(abort context.Context, next request) (Result, error) {
 func (a *actor) events(after uint64) ([]Event, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.log) > 0 && after+1 < a.log[0].Sequence {
+	if (a.resync && after <= a.floor) || (len(a.log) > 0 && after+1 < a.log[0].Sequence) {
 		return nil, ErrResyncRequired
 	}
 	var events []Event

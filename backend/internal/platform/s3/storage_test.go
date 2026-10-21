@@ -108,6 +108,27 @@ func (r *failingTail) Read(p []byte) (int, error) {
 	return 0, r.err
 }
 
+// slowTail returns its data at once and then, after delay, one more byte, so
+// the extra byte arrives after the transport has read the declared size.
+type slowTail struct {
+	data  *bytes.Reader
+	delay time.Duration
+	done  bool
+}
+
+func (r *slowTail) Read(p []byte) (int, error) {
+	if r.data.Len() > 0 {
+		return r.data.Read(p)
+	}
+	if r.done || len(p) == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	r.done = true
+	p[0] = 'x'
+	return 1, nil
+}
+
 func TestStorage(t *testing.T) {
 	server := s3test.Start(t)
 	storage := open(t, server)
@@ -195,6 +216,17 @@ func TestStorage(t *testing.T) {
 			key := fmt.Sprintf("assets/long-%d", n)
 			if err := storage.Put(ctx, key, bytes.NewReader(random(t, n+1)), int64(n)); err == nil {
 				t.Fatalf("Put of %d of %d bytes = nil, want an error", n+1, n)
+			}
+			wantNoObject(t, server, storage, key)
+		}
+	})
+
+	t.Run("a Put whose extra byte arrives late leaves nothing", func(t *testing.T) {
+		for _, n := range []int{0, 1, 1000} {
+			key := fmt.Sprintf("assets/late-tail-%d", n)
+			body := &slowTail{data: bytes.NewReader(random(t, n)), delay: 300 * time.Millisecond}
+			if err := storage.Put(ctx, key, body, int64(n)); err == nil {
+				t.Errorf("Put of %d bytes plus a late byte = nil, want an error", n)
 			}
 			wantNoObject(t, server, storage, key)
 		}
