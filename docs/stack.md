@@ -150,7 +150,7 @@ No se usa una biblioteca de estado de servidor (TanStack Query), porque casi tod
 | Frontend | Vitest | Lógica del almacén y del renderizador |
 | E2E | Playwright (canales `chrome` y `msedge`) | Matriz de navegadores soportados (TE-011) |
 | OBS | Procedimiento propio | Playwright no puede automatizar OBS; se definirá en TE-011 |
-| Cuentas y sesiones | Playwright + servidor Go real que sirve el build + PostgreSQL en contenedor (`npm run auth:e2e`) | Por cada navegador de la matriz: registro, duplicado, credenciales inválidas, recarga con sesión válida y sesión terminada que no se restaura desde la caché de ida y vuelta (US-001) |
+| Cuentas y sesiones | Playwright + servidor Go real que sirve el build + PostgreSQL en contenedor (`npm run auth:e2e`) | Por cada navegador de la matriz: registro, duplicado, credenciales inválidas, recarga con sesión válida y sesión terminada que no se restaura desde la caché de ida y vuelta (US-001); activación de streamers (US-002); dimensiones del canvas en límites, rechazo de entradas inválidas sin solicitud, recarga con el tamaño confirmado y rechazo de otro streamer (US-007). Cada archivo `*.auth.mjs` corre con un servidor nuevo y la base compartida, así que el límite de registros por IP no se acumula entre archivos |
 | Privacidad | Playwright + fixture Go de prueba (`npm run privacy:matrix`) | Por cada navegador de la matriz, señuelos nuevos; se escanean el log del fixture, la salida de Playwright y `test-results`, se exige `correlation_id` en cada registro de solicitud y se prueba que ningún señuelo anterior reaparece (TE-003) |
 
 ## Lo que no se usa y por qué

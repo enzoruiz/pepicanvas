@@ -1,14 +1,16 @@
 /* global console, process, setTimeout */
 
-// Runs the US-001 and US-002 end-to-end scenarios on every browser of the
-// support matrix against a disposable PostgreSQL container and the real Go
-// server, which serves the production frontend build. The scenarios get the
-// database URL in PEPICANVAS_E2E_DATABASE_URL, which the server and the
-// host-side `server grant-operator` command share.
+// Runs the US-001, US-002, and US-007 end-to-end scenarios on every browser
+// of the support matrix against a disposable PostgreSQL container and the
+// real Go server, which serves the production frontend build. The scenarios
+// get the database URL in PEPICANVAS_E2E_DATABASE_URL, which the server and
+// the host-side `server grant-operator` command share. Each spec file runs
+// in its own Playwright invocation, so it gets a fresh server whose per-IP
+// rate limits are not spent by the other files.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +24,17 @@ import { browserCachePaths, repositoryRoot } from "./browser-matrix.mjs";
 const postgresImage =
   "postgres:17.4-alpine@sha256:7062a2109c4b51f3c792c7ea01e83ed12ef9a980886e3b3d380a7d2e5f6ce3f5";
 const frontendRoot = path.join(repositoryRoot, "frontend");
+const specRoot = path.join(frontendRoot, "tests/browser");
+
+async function specFiles() {
+  const files = (await readdir(specRoot))
+    .filter((name) => name.endsWith(".auth.mjs"))
+    .sort();
+  if (files.length === 0) {
+    throw new Error("no *.auth.mjs scenarios found");
+  }
+  return files.map((name) => path.posix.join("tests/browser", name));
+}
 
 function docker(args) {
   const result = spawnSync("docker", args, { encoding: "utf8" });
@@ -80,6 +93,7 @@ async function main() {
       "usage: node scripts/auth-e2e-runner.mjs --download|--offline",
     );
   }
+  const specs = await specFiles();
   const matrix = await prepareBrowserCache({ offline: mode === "--offline" });
   const build = spawnSync("npm", ["run", "build"], {
     cwd: frontendRoot,
@@ -96,23 +110,34 @@ async function main() {
       try {
         const { versionOutput } = await prepareExtractedBrowser(browser);
         console.log(`${browser.slot}: executing ${versionOutput}`);
-        const result = spawnSync(
-          process.execPath,
-          [
-            path.join(frontendRoot, "node_modules/@playwright/test/cli.js"),
-            "test",
-            "--config",
-            "playwright.auth.config.ts",
-            "--project",
-            browser.slot,
-          ],
-          {
-            cwd: frontendRoot,
-            env: { ...process.env, PEPICANVAS_E2E_DATABASE_URL: database.url },
-            stdio: "inherit",
-          },
-        );
-        if (result.error || result.status !== 0) {
+        let browserFailed = false;
+        for (const spec of specs) {
+          const result = spawnSync(
+            process.execPath,
+            [
+              path.join(frontendRoot, "node_modules/@playwright/test/cli.js"),
+              "test",
+              "--config",
+              "playwright.auth.config.ts",
+              // The = form: a bare --project would take the spec as a
+              // second project name.
+              `--project=${browser.slot}`,
+              spec,
+            ],
+            {
+              cwd: frontendRoot,
+              env: {
+                ...process.env,
+                PEPICANVAS_E2E_DATABASE_URL: database.url,
+              },
+              stdio: "inherit",
+            },
+          );
+          if (result.error || result.status !== 0) {
+            browserFailed = true;
+          }
+        }
+        if (browserFailed) {
           failed.push(browser.slot);
         }
       } finally {
