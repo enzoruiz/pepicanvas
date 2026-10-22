@@ -11,6 +11,8 @@ type rule struct {
 var allowRules = [...]rule{
 	{role: RoleOwner, resource: ResourceCanvas, action: ActionView},
 	{role: RoleOwner, resource: ResourceCanvas, action: ActionEdit},
+	// Administering a canvas (its dimensions) is the owner's alone (US-007).
+	{role: RoleOwner, resource: ResourceCanvas, action: ActionAdminister},
 	{role: RoleOwner, resource: ResourceMembership, action: ActionView},
 	{role: RoleOwner, resource: ResourceMembership, action: ActionAdminister, targetRoles: []Role{RoleOwner, RoleModerator}},
 	{role: RoleOwner, resource: ResourceInvitation, action: ActionView},
