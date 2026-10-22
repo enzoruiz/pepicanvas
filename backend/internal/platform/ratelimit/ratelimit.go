@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+// Rate is a number of attempts allowed per window.
+type Rate struct {
+	Limit  int
+	Window time.Duration
+}
+
+// Result is the outcome of one attempt. Full reports that the attempt was
+// denied because the key table is full, not because the key is over its limit.
+type Result struct {
+	Allowed    bool
+	RetryAfter time.Duration
+	Full       bool
+}
+
 type entry struct {
 	start time.Time
 	count int
@@ -35,6 +49,13 @@ func New(limit int, window time.Duration, maxKeys int, now func() time.Time) *Li
 // Allow records one attempt for key. When the attempt is denied it returns
 // how long until the key's window ends.
 func (l *Limiter) Allow(key string) (bool, time.Duration) {
+	res := l.Check(key)
+	return res.Allowed, res.RetryAfter
+}
+
+// Check records one attempt for key like Allow and also reports whether a
+// denial came from a full key table.
+func (l *Limiter) Check(key string) Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
@@ -48,16 +69,16 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 			l.evictExpired(now)
 		}
 		if len(l.keys) >= l.maxKeys {
-			return false, l.window
+			return Result{RetryAfter: l.window, Full: true}
 		}
 		w = &entry{start: now}
 		l.keys[key] = w
 	}
 	if w.count >= l.limit {
-		return false, w.start.Add(l.window).Sub(now)
+		return Result{RetryAfter: w.start.Add(l.window).Sub(now)}
 	}
 	w.count++
-	return true, 0
+	return Result{Allowed: true}
 }
 
 func (l *Limiter) evictExpired(now time.Time) {

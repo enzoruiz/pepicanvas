@@ -102,3 +102,18 @@ func TestConcurrentAttemptsNeverExceedTheLimit(t *testing.T) {
 		t.Fatalf("allowed = %d, want 10", allowed)
 	}
 }
+
+func TestCheckTellsAFullTableFromAKeyOverItsLimit(t *testing.T) {
+	c := newClock()
+	l := ratelimit.New(1, time.Minute, 1, c.Now)
+	if res := l.Check("a"); res != (ratelimit.Result{Allowed: true}) {
+		t.Fatalf("first attempt = %+v", res)
+	}
+	c.Advance(10 * time.Second)
+	if res := l.Check("a"); res != (ratelimit.Result{RetryAfter: 50 * time.Second}) {
+		t.Fatalf("over the limit = %+v, want denied for 50s and not full", res)
+	}
+	if res := l.Check("b"); res != (ratelimit.Result{RetryAfter: time.Minute, Full: true}) {
+		t.Fatalf("full table = %+v, want denied for one window and full", res)
+	}
+}
