@@ -33,7 +33,7 @@ Issue: "Eliminación de datos, reembolsos y período de gracia." Also: the edito
 | T2 | S1, S3, S5, S8, S10, S11, S14 | inline, test-first: migration 00007 (access version, deactivation records, access cut outbox), sqlc, store; `CanvasStore.Apply` subscription gate; real-PostgreSQL race, reactivation integrity, two tenants, idempotency | done | `c577156`, see L4 |
 | T3 | S2, S4, S8, S10, S13 | inline, test-first: cut relay from the cut outbox to `revocation.Registry`; ≤2 s close of editor and OBS leases, stale grant rejection, crash before publish recovered | done | `17ebf39`, see L6 |
 | T4 | S1, S4, S6, S7, S12, S13, S15 | inline, test-first: `POST /api/deactivations`, `subscription_inactive` on the own canvas, `cmd/server` wiring of registry and relay; process test | done | `cea8f52`, see L7 |
-| T5 | S2, S15 | inline, test-first: operator deactivation in `OperatorPanel`, inactive-subscription message in `CanvasPanel`; Vitest, E2E | done | see L8 |
+| T5 | S2, S15 | inline, test-first: operator deactivation in `OperatorPanel`, inactive-subscription message in `CanvasPanel`; Vitest, E2E | done | `c6c3c03`, see L8 |
 | T6 | all | docs (`docs/stack.md`), issue control lines, review assess, independent verification, per-S verdicts | pending | |
 
 ## Log
