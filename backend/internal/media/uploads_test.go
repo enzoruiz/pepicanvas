@@ -32,6 +32,7 @@ type fakeStorage struct {
 	mu      sync.Mutex
 	objects map[string][]byte
 	puts    []string
+	owners  map[string]media.Owner
 	faults  map[string]func(key string) error
 	blocks  map[string]bool
 	started chan struct{}
@@ -45,15 +46,17 @@ type fakeStorage struct {
 func newFakeStorage() *fakeStorage {
 	return &fakeStorage{
 		objects: map[string][]byte{},
+		owners:  map[string]media.Owner{},
 		faults:  map[string]func(string) error{},
 		blocks:  map[string]bool{},
 		started: make(chan struct{}, 16),
 	}
 }
 
-func (s *fakeStorage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+func (s *fakeStorage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) error {
 	s.mu.Lock()
 	s.puts = append(s.puts, key)
+	s.owners[key] = owner
 	beforePut, overread := s.beforePut, s.overread
 	s.mu.Unlock()
 	if beforePut != nil {
@@ -149,6 +152,12 @@ func (s *fakeStorage) objectCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.objects)
+}
+
+func (s *fakeStorage) ownerOf(key string) media.Owner {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.owners[key]
 }
 
 func (s *fakeStorage) putKeys() []string {
@@ -455,6 +464,10 @@ func TestUploadPipeline(t *testing.T) {
 		}
 		if keys := f.storage.putKeys(); len(keys) != 1 || keys[0] != reserved.StorageKey || f.storage.objectCount() != 1 {
 			t.Fatalf("storage puts = %v with %d objects, want one put under %s", keys, f.storage.objectCount(), reserved.StorageKey)
+		}
+		// TE-013 S5: the object records the asset that owns it.
+		if got, want := f.storage.ownerOf(reserved.StorageKey), (media.Owner{Key: f.key, AssetID: reserved.AssetID}); got != want {
+			t.Fatalf("stored owner = %+v, want %+v", got, want)
 		}
 	})
 

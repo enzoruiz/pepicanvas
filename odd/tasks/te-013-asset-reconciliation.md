@@ -1,0 +1,42 @@
+# TE-013 asset reconciliation between PostgreSQL and S3 storage
+
+Issue #41 (TE-013). Branch `feat/te-013-asset-reconciliation`, worktree `/home/enzo/projects/pepicanvas-te-013`, base `4b173a8`.
+Scope: reconciler in `internal/media`, ownership metadata and listing in `internal/platform/s3`, inventory and scan queries in `internal/platform/postgres`.
+
+## Specs
+
+- **S1 — Explicit persisted states.** Issue: "Estados pending, ready, quarantined y deleting con transiciones persistidas." and "Solo assets ready se asocian y sirven." Security: "cada transición e inventario queda limitado al propietario; solo ready puede asociarse o servirse."
+- **S2 — Periodic and on-demand reconciler with inventory.** Issue: "Reconciliador periódico y bajo demanda con inventario por estado y edad." CTRL-S3-01: "el inventario por estado y edad es consultable sin exponer nombres privados."
+- **S3 — Detection and convergence.** Issue: "un reconciliador reanudable detectará cargas temporales, registros incompletos y eliminaciones pendientes hasta converger sin servir contenido incompleto."
+- **S4 — Resumable, idempotent stages.** Issue: "Carga, inspección y eliminación reanudables e idempotentes." CTRL-IDEM-01: "repetir una reconciliación o reanudarla después de una interrupción produce un único efecto por asset."
+- **S5 — Safe cleanup with ownership evidence.** Issue: "Limpieza segura que no borra contenido válido sin evidencia de propiedad." and "Limpieza: temporales y deleting se procesan idempotentemente con evidencia de propiedad." Decision L2: objects carry owner metadata; an object without a row is deleted only when its metadata names an owner and it is older than a grace period; objects without evidence are only reported.
+- **S6 — Interruptions before and after S3 converge.** Issue: "Falla antes de escribir S3: el registro queda reintentable o se libera su reserva.", "Falla después de escribir S3: reconciliación detecta el objeto y completa o aísla la transición." and "Interrupciones antes y después de S3 convergen al reconciliar." CTRL-S3-01: "pruebas de integración interrumpen cada transición antes y después de escribir en S3, ejecutan la reconciliación y demuestran convergencia".
+- **S7 — Stop without blind deletion.** Issue: "Reversión o desactivación segura: detener el reconciliador conserva estados pendientes y bloquea su uso, sin borrado ciego." and "Restauración y cierre dejan trabajo pendiente reanudable."
+- **S8 — Isolation between streamers.** Issue: "discrepancias homónimas de dos cuentas se reconcilian sin lectura, asociación ni eliminación cruzada."
+- **S9 — Retroactive proof (rule 8).** Issue: "La prueba retroactiva de CTRL-S3-01 cubre, o justifica como «No aplica», a cada consumidor diferido cerrado; como mínimo TE-005 y TE-006."
+
+### Deferred to their owners
+
+Issue: "CTRL-TRACE-01 — Diferido a TE-015: cada ejecución de reconciliación registra su `correlation_id` (TE-003) sin exponer nombres privados." "CTRL-EVID-01 — Diferido a TE-015: cada reconciliación emite resultado, instante y correlación suficientes para que TE-015 la conserve como evidencia durable." "CTRL-SHUTDOWN-01 — Diferido a TE-016 (TE-016 depende de TE-013): el reconciliador expone un cierre con el contrato de `Hub.Close` y deja reanudable el trabajo pendiente." "CTRL-RESTORE-01 — Diferido a TE-017 (TE-017 depende de TE-013): el reconciliador puede ejecutarse sobre una restauración aislada para que TE-017 verifique la convergencia de los assets." Each deferral ships its primitive here: a run correlation ID and report, `Close`, and a reconciler built only from a store and a storage.
+
+### Non-goals
+
+HTTP routes or an operator endpoint for the inventory (TE-014 owns ingress), process wiring and readiness (TE-016), durable evidence storage (TE-015), backup and restore procedure (TE-017), re-inspecting stored bytes.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S5, S8 | inline, test-first: owner metadata on `Storage.Put`, `Stat` and paged `List` ports; S3 adapter; `Uploads` passes the owner | done | see L4 |
+| T2 | S1, S2, S8 | inline, test-first: migration (`state_changed_at`), queries for inventory by state and age, known storage keys, ready-asset pages; `postgres.MediaStore` methods | pending | |
+| T3 | S2-S5, S8 | inline, test-first: `media.Reconciler.Run` pass (garbage, orphans with grace and ownership, ready assets missing bytes) and its report | pending | |
+| T4 | S2, S7 | inline, test-first: periodic loop, on-demand trigger, `Close` with the `Hub.Close` contract | pending | |
+| T5 | S3, S4, S6, S8, S9 | inline, test-first: PostgreSQL + MinIO interruption matrix at every transition, concurrent reconcilers, resume after interruption, retroactive proof | pending | |
+| T6 | all | docs (`docs/stack.md`), independent verify, review assess, per-S verdicts | pending | |
+
+## Log
+
+- **L1** (user, 2026-10-21): "empieza el desarrollo del issue 41 en su respectivo worktree"
+- **L2** (user, 2026-10-21, on objects without a PostgreSQL row): chose "Metadatos de propiedad + borrado con gracia (Recomendado)" — option text: "Put graba tenant/canvas/asset como metadatos del objeto (cambia el puerto media.Storage). El reconciliador recorre el bucket y borra un huérfano solo si sus metadatos nombran un dueño cuya base prueba que ese asset no existe y el objeto supera un período de gracia. Los objetos sin evidencia solo se reportan en el inventario. Habilita el test de aislamiento con nombres homónimos entre cuentas."
+- **L3** (design, parent): existing primitives from TE-006: states and transitions in `media_assets`, `Collect` (expires reservations, lists quarantined/deleting), `Purge`, `Uploads.Sweep`. The row is inserted before `Put`, and `Purge` runs only after `Delete`, so a pipeline-written object without a row exists only after a restore, an external write, or the replayed-completion window; the grace period (default 1 h, twice the reservation TTL) covers that window. Orphan rule: no `media_assets` row holds the storage key, `Stat` returns owner metadata (tenant, canvas, asset) that validates, and `LastModified` is older than the grace → delete; otherwise count it as unowned or young, never delete. A storage key held by a row of another tenant than its metadata names is never deleted. A ready asset whose object is missing is reported, never mutated (`Open` already answers not found). Inventory is per tenant: counts and bytes per state and age bucket since `state_changed_at`, without asset IDs or storage keys. Migration number 00007; renumber at merge if another branch takes it first.
+- **L4** (T1 evidence, parent): `media.Storage.Put` takes a `media.Owner{Key, AssetID}` (`Owner.Valid`); new port `media.ObjectStore` adds `Stat(ctx, key) (Object, error)` (owner from metadata, `Owned` only when every identifier validates; missing → `ErrNotFound`) and `List(ctx, after, limit) ([]Object, error)` (key order after the cursor, no owner, limit <= 0 → `ErrInvalid`). S3 stores the owner as user metadata `X-Amz-Meta-Pepicanvas-{Tenant,Canvas,Asset}` and rejects an invalid owner with `ErrInvalid` before any request. `Uploads` passes the reserving asset as owner. RED: `vet: uploads_test.go:35:27: undefined: media.Owner`, `storage_test.go:27:19: undefined: media.Owner`. GREEN `PEPICANVAS_REQUIRE_POSTGRES=1 go test -race -count=1 ./internal/media/ ./internal/platform/s3/...` ok; `go vet ./...` and gofmt clean. Mutation: dropping the asset header made `Stat returns the owner recorded by Put` fail (`Owned:false`); restored.
