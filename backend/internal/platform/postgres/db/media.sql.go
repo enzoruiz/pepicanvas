@@ -144,8 +144,8 @@ func (q *Queries) EnsureMediaUsage(ctx context.Context, arg EnsureMediaUsagePara
 const expireReservations = `-- name: ExpireReservations :one
 WITH expired AS (
     UPDATE media_assets
-    SET state = 'deleting'
-    WHERE tenant_id = $1 AND canvas_id = $2 AND state = 'pending' AND reserved_at <= $3
+    SET state = 'deleting', state_changed_at = $3
+    WHERE tenant_id = $1 AND canvas_id = $2 AND state = 'pending' AND reserved_at <= $4
     RETURNING declared_bytes
 )
 SELECT COALESCE(SUM(declared_bytes), 0)::bigint AS released FROM expired
@@ -154,11 +154,17 @@ SELECT COALESCE(SUM(declared_bytes), 0)::bigint AS released FROM expired
 type ExpireReservationsParams struct {
 	TenantID  string
 	CanvasID  string
+	ChangedAt pgtype.Timestamptz
 	ExpiredAt pgtype.Timestamptz
 }
 
 func (q *Queries) ExpireReservations(ctx context.Context, arg ExpireReservationsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, expireReservations, arg.TenantID, arg.CanvasID, arg.ExpiredAt)
+	row := q.db.QueryRow(ctx, expireReservations,
+		arg.TenantID,
+		arg.CanvasID,
+		arg.ChangedAt,
+		arg.ExpiredAt,
+	)
 	var released int64
 	err := row.Scan(&released)
 	return released, err
@@ -283,6 +289,32 @@ func (q *Queries) GetReference(ctx context.Context, arg GetReferenceParams) (str
 	return asset_id, err
 }
 
+const heldStorageKeys = `-- name: HeldStorageKeys :many
+SELECT storage_key
+FROM media_assets
+WHERE storage_key = ANY($1::text[])
+`
+
+func (q *Queries) HeldStorageKeys(ctx context.Context, storageKeys []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, heldStorageKeys, storageKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var storage_key string
+		if err := rows.Scan(&storage_key); err != nil {
+			return nil, err
+		}
+		items = append(items, storage_key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertMediaOperation = `-- name: InsertMediaOperation :exec
 INSERT INTO media_operations (tenant_id, canvas_id, operation_id, fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at, abandon_reason, rejection_code)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -324,8 +356,8 @@ func (q *Queries) InsertMediaOperation(ctx context.Context, arg InsertMediaOpera
 }
 
 const insertPendingAsset = `-- name: InsertPendingAsset :exec
-INSERT INTO media_assets (tenant_id, canvas_id, asset_id, state, declared_bytes, storage_key, replaces_reference, reserved_at)
-VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7)
+INSERT INTO media_assets (tenant_id, canvas_id, asset_id, state, declared_bytes, storage_key, replaces_reference, reserved_at, state_changed_at)
+VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $7)
 `
 
 type InsertPendingAssetParams struct {
@@ -476,6 +508,60 @@ func (q *Queries) LockMediaUsage(ctx context.Context, arg LockMediaUsageParams) 
 	return i, err
 }
 
+const mediaInventory = `-- name: MediaInventory :many
+SELECT state,
+    count(*)::bigint AS assets,
+    sum(declared_bytes)::bigint AS bytes,
+    count(*) FILTER (WHERE state_changed_at > $2)::bigint AS under_hour,
+    count(*) FILTER (WHERE state_changed_at <= $2 AND state_changed_at > $3)::bigint AS under_day,
+    min(state_changed_at)::timestamptz AS oldest_changed_at
+FROM media_assets
+WHERE tenant_id = $1
+GROUP BY state
+`
+
+type MediaInventoryParams struct {
+	TenantID string
+	HourAgo  pgtype.Timestamptz
+	DayAgo   pgtype.Timestamptz
+}
+
+type MediaInventoryRow struct {
+	State           string
+	Assets          int64
+	Bytes           int64
+	UnderHour       int64
+	UnderDay        int64
+	OldestChangedAt pgtype.Timestamptz
+}
+
+func (q *Queries) MediaInventory(ctx context.Context, arg MediaInventoryParams) ([]MediaInventoryRow, error) {
+	rows, err := q.db.Query(ctx, mediaInventory, arg.TenantID, arg.HourAgo, arg.DayAgo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MediaInventoryRow
+	for rows.Next() {
+		var i MediaInventoryRow
+		if err := rows.Scan(
+			&i.State,
+			&i.Assets,
+			&i.Bytes,
+			&i.UnderHour,
+			&i.UnderDay,
+			&i.OldestChangedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const moveReference = `-- name: MoveReference :exec
 UPDATE media_references
 SET asset_id = $4
@@ -534,18 +620,72 @@ func (q *Queries) PurgeExpiredMediaOperations(ctx context.Context, arg PurgeExpi
 	return err
 }
 
+const readyAssetsAfter = `-- name: ReadyAssetsAfter :many
+SELECT tenant_id, canvas_id, asset_id, storage_key
+FROM media_assets
+WHERE state = 'ready'
+    AND (tenant_id, canvas_id, asset_id) > ($1::text, $2::text, $3::text)
+ORDER BY tenant_id, canvas_id, asset_id
+LIMIT $4
+`
+
+type ReadyAssetsAfterParams struct {
+	AfterTenant string
+	AfterCanvas string
+	AfterAsset  string
+	MaxAssets   int32
+}
+
+type ReadyAssetsAfterRow struct {
+	TenantID   string
+	CanvasID   string
+	AssetID    string
+	StorageKey string
+}
+
+func (q *Queries) ReadyAssetsAfter(ctx context.Context, arg ReadyAssetsAfterParams) ([]ReadyAssetsAfterRow, error) {
+	rows, err := q.db.Query(ctx, readyAssetsAfter,
+		arg.AfterTenant,
+		arg.AfterCanvas,
+		arg.AfterAsset,
+		arg.MaxAssets,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReadyAssetsAfterRow
+	for rows.Next() {
+		var i ReadyAssetsAfterRow
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.CanvasID,
+			&i.AssetID,
+			&i.StorageKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setAssetState = `-- name: SetAssetState :exec
 UPDATE media_assets
-SET state = $4, kind = COALESCE($5, kind)
+SET state = $4, kind = COALESCE($5, kind), state_changed_at = $6
 WHERE tenant_id = $1 AND canvas_id = $2 AND asset_id = $3
 `
 
 type SetAssetStateParams struct {
-	TenantID string
-	CanvasID string
-	AssetID  string
-	State    string
-	Kind     pgtype.Text
+	TenantID  string
+	CanvasID  string
+	AssetID   string
+	State     string
+	Kind      pgtype.Text
+	ChangedAt pgtype.Timestamptz
 }
 
 func (q *Queries) SetAssetState(ctx context.Context, arg SetAssetStateParams) error {
@@ -555,6 +695,7 @@ func (q *Queries) SetAssetState(ctx context.Context, arg SetAssetStateParams) er
 		arg.AssetID,
 		arg.State,
 		arg.Kind,
+		arg.ChangedAt,
 	)
 	return err
 }

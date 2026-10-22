@@ -87,6 +87,7 @@ type MediaAsset struct {
 	StorageKey        string
 	ReplacesReference pgtype.Text
 	ReservedAt        pgtype.Timestamptz
+	StateChangedAt    pgtype.Timestamptz
 }
 
 type MediaOperation struct {
