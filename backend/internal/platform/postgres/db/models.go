@@ -8,6 +8,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AccessCut struct {
+	ID            int64
+	TenantID      string
+	Version       int64
+	CorrelationID pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+	AppliedAt     pgtype.Timestamptz
+}
+
 type Account struct {
 	AccountID    string
 	Email        string
@@ -150,9 +159,23 @@ type SubscriptionActivation struct {
 	AcceptedAt        pgtype.Timestamptz
 }
 
+type SubscriptionDeactivation struct {
+	OperationID       string
+	Fingerprint       []byte
+	OperatorAccountID string
+	AccountID         string
+	TenantID          string
+	CanvasID          string
+	Deactivated       bool
+	Version           int64
+	CorrelationID     pgtype.Text
+	AcceptedAt        pgtype.Timestamptz
+}
+
 type Tenant struct {
 	TenantID           string
 	SubscriptionStatus string
 	OwnerAccountID     pgtype.Text
 	CanvasID           pgtype.Text
+	AccessVersion      int64
 }

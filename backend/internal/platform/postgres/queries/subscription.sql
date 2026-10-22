@@ -14,7 +14,7 @@ SELECT account_id FROM operators WHERE account_id = $1 FOR SHARE;
 SELECT account_id FROM accounts WHERE email = $1 FOR UPDATE;
 
 -- name: GetOwnedTenant :one
-SELECT tenant_id, canvas_id, subscription_status
+SELECT tenant_id, canvas_id, subscription_status, access_version
 FROM tenants
 WHERE owner_account_id = $1;
 
@@ -50,3 +50,48 @@ WHERE operation_id IN (
 -- name: InsertActivation :exec
 INSERT INTO subscription_activations (operation_id, fingerprint, operator_account_id, account_id, tenant_id, canvas_id, created, correlation_id, accepted_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+
+-- name: DeactivateTenant :one
+-- The row lock conflicts with the FOR SHARE read of every canvas mutation,
+-- so mutations and deactivations of a tenant commit one at a time.
+UPDATE tenants
+SET subscription_status = 'inactive', access_version = access_version + 1
+WHERE tenant_id = $1 AND subscription_status = 'active'
+RETURNING access_version;
+
+-- name: InsertAccessCut :exec
+INSERT INTO access_cuts (tenant_id, version, correlation_id, created_at)
+VALUES ($1, $2, $3, $4);
+
+-- name: ListPendingCuts :many
+SELECT id, tenant_id, version, correlation_id, created_at
+FROM access_cuts
+WHERE applied_at IS NULL
+ORDER BY id
+LIMIT $1;
+
+-- name: SettleCut :exec
+UPDATE access_cuts SET applied_at = sqlc.arg(applied_at)
+WHERE id = $1 AND applied_at IS NULL;
+
+-- name: GetDeactivation :one
+SELECT fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, correlation_id, accepted_at
+FROM subscription_deactivations
+WHERE operation_id = $1 AND accepted_at > sqlc.arg(not_before);
+
+-- name: DeleteExpiredDeactivation :exec
+DELETE FROM subscription_deactivations
+WHERE operation_id = $1 AND accepted_at <= sqlc.arg(expired_at);
+
+-- name: PurgeExpiredDeactivations :exec
+-- Rows locked by a concurrent purge are left for the next one.
+DELETE FROM subscription_deactivations
+WHERE operation_id IN (
+    SELECT d.operation_id FROM subscription_deactivations d
+    WHERE d.accepted_at <= sqlc.arg(expired_at)
+    FOR UPDATE SKIP LOCKED
+);
+
+-- name: InsertDeactivation :exec
+INSERT INTO subscription_deactivations (operation_id, fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, correlation_id, accepted_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);

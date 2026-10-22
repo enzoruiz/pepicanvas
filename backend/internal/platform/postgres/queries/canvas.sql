@@ -61,3 +61,8 @@ WHERE tenant_id = $1 AND canvas_id = $2 AND object_id = $3;
 -- name: DeleteObject :exec
 DELETE FROM canvas_objects
 WHERE tenant_id = $1 AND canvas_id = $2 AND object_id = $3;
+
+-- name: LockTenantStatus :one
+-- Read after the canvas lock and held until commit, so a deactivation of the
+-- tenant waits for the mutation, and a mutation after it sees it.
+SELECT subscription_status FROM tenants WHERE tenant_id = $1 FOR SHARE;

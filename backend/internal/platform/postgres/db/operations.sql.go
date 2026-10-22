@@ -12,7 +12,7 @@ import (
 )
 
 const getOperation = `-- name: GetOperation :one
-SELECT fingerprint, revision, object_id, z
+SELECT fingerprint, revision, object_id, z, accepted_at
 FROM canvas_operations
 WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3
 `
@@ -28,6 +28,7 @@ type GetOperationRow struct {
 	Revision    int64
 	ObjectID    string
 	Z           int64
+	AcceptedAt  pgtype.Timestamptz
 }
 
 func (q *Queries) GetOperation(ctx context.Context, arg GetOperationParams) (GetOperationRow, error) {
@@ -38,6 +39,7 @@ func (q *Queries) GetOperation(ctx context.Context, arg GetOperationParams) (Get
 		&i.Revision,
 		&i.ObjectID,
 		&i.Z,
+		&i.AcceptedAt,
 	)
 	return i, err
 }

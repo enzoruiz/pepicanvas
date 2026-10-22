@@ -1,5 +1,7 @@
 // Package subscription activates streamers manually (US-002): an operator
-// turns an account into the owner of one tenant with exactly one canvas.
+// turns an account into the owner of one tenant with exactly one canvas. An
+// operator also deactivates a tenant (US-003), which cuts its access at the
+// commit and keeps its canvas for a later reactivation.
 package subscription
 
 import (
@@ -14,18 +16,21 @@ import (
 var (
 	// ErrInvalidActivation reports a request rejected before storage.
 	ErrInvalidActivation = errors.New("subscription: invalid activation")
-	// ErrAccountNotFound reports that no account has the requested email.
+	// ErrInvalidDeactivation reports a deactivation rejected before storage.
+	ErrInvalidDeactivation = errors.New("subscription: invalid deactivation")
+	// ErrAccountNotFound reports that no account has the requested email or,
+	// for a deactivation, that the account owns no tenant.
 	ErrAccountNotFound = errors.New("subscription: account not found")
 	// ErrOperationConflict reports an operation ID reused for a different
-	// activation. A new intent requires a new operation ID.
+	// activation or deactivation. A new intent requires a new operation ID.
 	ErrOperationConflict = errors.New("subscription: operation id reused with a different activation")
-	// ErrOperationRetained is returned by Tx.RecordActivation when another
-	// activation already retains the operation ID.
+	// ErrOperationRetained is returned by Tx.RecordActivation and
+	// Tx.RecordDeactivation when another operation already retains the ID.
 	ErrOperationRetained = errors.New("subscription: operation id retained")
 )
 
-// ActivationRetention is how long an activation operation ID replays its
-// answer. An operation accepted at T is retained while now < T + ttl.
+// ActivationRetention is how long an activation or deactivation operation ID
+// replays its answer. An operation accepted at T is retained while now < T + ttl.
 const ActivationRetention = 10 * time.Minute
 
 // ActivateRequest is one operator's request to activate the account of email.
@@ -46,12 +51,52 @@ type Activation struct {
 	Created   bool
 }
 
-// Tenant is a streamer: one owner account and its only canvas.
+// DeactivateRequest is one operator's request to deactivate the tenant owned
+// by the account of email.
+type DeactivateRequest struct {
+	OperatorID  access.AccountID
+	OperationID string
+	Email       string
+	// CorrelationID is the request correlation (CTRL-TRACE-01 primitive), or empty.
+	CorrelationID string
+}
+
+// Deactivation is the answer to a deactivation. Deactivated reports whether
+// this operation cut an active tenant; Version is the tenant's access version
+// after it. A replay returns the same answer.
+type Deactivation struct {
+	AccountID   access.AccountID
+	TenantID    string
+	CanvasID    string
+	Deactivated bool
+	Version     uint64
+}
+
+// Tenant is a streamer: one owner account and its only canvas. Version is the
+// confirmed version of the tenant's access facts; it starts at 1 and every
+// deactivation increments it.
 type Tenant struct {
 	ID       string
 	Owner    access.AccountID
 	CanvasID string
 	Status   access.SubscriptionStatus
+	Version  uint64
+}
+
+// AccessCut is the durable record of one confirmed access cut, written in the
+// transaction that confirms it, so live connections are cut even when the
+// process stops before it applies the cut (CTRL-CONS-01).
+type AccessCut struct {
+	TenantID      string
+	Version       uint64
+	CorrelationID string
+	CreatedAt     time.Time
+}
+
+// PendingCut is an access cut not yet applied to the live connections.
+type PendingCut struct {
+	ID int64
+	AccessCut
 }
 
 // Record is the retained answer of one activation operation. Fingerprint is
@@ -65,7 +110,20 @@ type Record struct {
 	AcceptedAt    time.Time
 }
 
-// Tx is one activation transaction. Its reads hold their locks until commit.
+// DeactivationRecord is the retained answer of one deactivation operation.
+// Fingerprint is the SHA-256 of the action, the operator ID, and the
+// normalized email.
+type DeactivationRecord struct {
+	OperationID   string
+	OperatorID    access.AccountID
+	Fingerprint   [32]byte
+	Result        Deactivation
+	CorrelationID string
+	AcceptedAt    time.Time
+}
+
+// Tx is one activation or deactivation transaction. Its reads hold their
+// locks until commit.
 type Tx interface {
 	// IsOperator reads the operator grant and holds it until commit.
 	IsOperator(ctx context.Context, account access.AccountID) (bool, error)
@@ -83,6 +141,18 @@ type Tx interface {
 	// RecordActivation drops records accepted at or before purgeBefore and
 	// retains record. It returns ErrOperationRetained for a retained ID.
 	RecordActivation(ctx context.Context, record Record, purgeBefore time.Time) error
+	// Deactivation returns the deactivation record of operationID accepted
+	// after notBefore.
+	Deactivation(ctx context.Context, operationID string, notBefore time.Time) (DeactivationRecord, bool, error)
+	// DeactivateTenant sets an active tenant's subscription to inactive,
+	// increments its access version, and returns the new version.
+	DeactivateTenant(ctx context.Context, tenantID string) (uint64, error)
+	// RecordCut stores cut as pending.
+	RecordCut(ctx context.Context, cut AccessCut) error
+	// RecordDeactivation drops deactivation records accepted at or before
+	// purgeBefore and retains record. It returns ErrOperationRetained for a
+	// retained ID.
+	RecordDeactivation(ctx context.Context, record DeactivationRecord, purgeBefore time.Time) error
 }
 
 // Store runs activation transactions and reads current subscription facts.
@@ -93,4 +163,14 @@ type Store interface {
 	IsOperator(ctx context.Context, account access.AccountID) (bool, error)
 	// OwnedTenant returns the tenant the account owns.
 	OwnedTenant(ctx context.Context, account access.AccountID) (Tenant, bool, error)
+}
+
+// CutStore reads the access cuts not yet applied to live connections and
+// marks them applied.
+type CutStore interface {
+	// PendingCuts returns up to limit pending cuts, oldest first.
+	PendingCuts(ctx context.Context, limit int) ([]PendingCut, error)
+	// SettleCut marks the cut applied at at. Settling an applied or unknown
+	// cut changes nothing.
+	SettleCut(ctx context.Context, id int64, at time.Time) error
 }

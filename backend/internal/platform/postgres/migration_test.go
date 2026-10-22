@@ -165,3 +165,141 @@ func TestActivationRollbackRefusesToLoseActivationsAndGrants(t *testing.T) {
 		t.Fatalf("legacy rows after re-applying = %q, want %q", got, legacy)
 	}
 }
+
+// deactivationSchema reports what 00007 adds and the rows it would lose.
+type deactivationSchema struct {
+	version       int64
+	versionColumn bool
+	records       int
+	cuts          int
+}
+
+func readDeactivationSchema(t *testing.T, pool *pgxpool.Pool) deactivationSchema {
+	t.Helper()
+	ctx := context.Background()
+	var s deactivationSchema
+	var recordsTable, cutsTable bool
+	s.version = schemaVersion(t, pool)
+	err := pool.QueryRow(ctx, `SELECT to_regclass('subscription_deactivations') IS NOT NULL,
+		to_regclass('access_cuts') IS NOT NULL,
+		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'tenants' AND column_name = 'access_version')`).
+		Scan(&recordsTable, &cutsTable, &s.versionColumn)
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	if recordsTable != s.versionColumn || cutsTable != s.versionColumn {
+		t.Fatalf("00007 is partly applied: records %v, cuts %v, version column %v", recordsTable, cutsTable, s.versionColumn)
+	}
+	if s.versionColumn {
+		if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM subscription_deactivations), (SELECT count(*) FROM access_cuts)").Scan(&s.records, &s.cuts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
+
+func activatedRows(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	var rows string
+	if err := pool.QueryRow(context.Background(), `SELECT concat_ws('|',
+		(SELECT string_agg(tenant_id || ':' || subscription_status || ':' || owner_account_id || ':' || canvas_id, ',' ORDER BY tenant_id) FROM tenants),
+		(SELECT string_agg(account_id, ',' ORDER BY account_id) FROM operators))`).Scan(&rows); err != nil {
+		t.Fatalf("read activated rows: %v", err)
+	}
+	return rows
+}
+
+func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, pgtest.Start(t).DSN(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	provider := migrationProvider(t, pool)
+	if _, err := provider.DownTo(ctx, 7); err != nil {
+		t.Fatalf("DownTo(7): %v", err)
+	}
+
+	for _, account := range []string{streamerAccount, operatorAccount} {
+		exec(t, pool, "INSERT INTO accounts (account_id, email, password_hash, created_at) VALUES ($1, $1 || '@example.com', 'stub', now())", account)
+	}
+	exec(t, pool, "INSERT INTO operators (account_id, granted_at) VALUES ($1, now())", operatorAccount)
+	exec(t, pool, "INSERT INTO tenants (tenant_id, subscription_status, owner_account_id, canvas_id) VALUES ('streamer-tenant', 'inactive', $1, 'streamer-canvas')", streamerAccount)
+	if n := count(t, pool, "SELECT count(*) FROM tenants WHERE access_version = 1"); n != 1 {
+		t.Fatalf("tenants at the default access version = %d, want 1", n)
+	}
+	exec(t, pool, "UPDATE tenants SET access_version = 2")
+	kept := activatedRows(t, pool)
+
+	refuse := func(name, message string, want deactivationSchema) {
+		t.Helper()
+		_, err := provider.DownTo(ctx, 6)
+		if err == nil || !strings.Contains(err.Error(), message) {
+			t.Fatalf("%s: rollback error = %v, want %q", name, err, message)
+		}
+		if got := readDeactivationSchema(t, pool); got != want {
+			t.Fatalf("%s: after the refused rollback %+v, want %+v", name, got, want)
+		}
+		if got := activatedRows(t, pool); got != kept {
+			t.Fatalf("%s: rows = %q, want %q", name, got, kept)
+		}
+	}
+	intact := deactivationSchema{version: 7, versionColumn: true}
+
+	exec(t, pool, `INSERT INTO subscription_deactivations (operation_id, fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, accepted_at)
+		VALUES ('op-migration-deactivate', decode(repeat('ab', 32), 'hex'), $1, $2, 'streamer-tenant', 'streamer-canvas', true, 2, now())`, operatorAccount, streamerAccount)
+	withRecord := intact
+	withRecord.records = 1
+	refuse("deactivation record", "00007_deactivation down refused: 1 deactivation record(s)", withRecord)
+
+	exec(t, pool, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())")
+	withBoth := withRecord
+	withBoth.cuts = 1
+	refuse("record and cut", "00007_deactivation down refused: 1 deactivation record(s)", withBoth)
+	exec(t, pool, "DELETE FROM subscription_deactivations")
+	withCut := intact
+	withCut.cuts = 1
+	refuse("access cut", "00007_deactivation down refused: 1 access cut(s)", withCut)
+
+	// Without records and cuts the rollback runs and keeps the activated rows.
+	exec(t, pool, "DELETE FROM access_cuts")
+	if _, err := provider.DownTo(ctx, 6); err != nil {
+		t.Fatalf("rollback without records and cuts: %v", err)
+	}
+	if got, want := readDeactivationSchema(t, pool), (deactivationSchema{version: 6}); got != want {
+		t.Fatalf("after the rollback %+v, want %+v", got, want)
+	}
+	if got := activatedRows(t, pool); got != kept {
+		t.Fatalf("rows after the rollback = %q, want %q", got, kept)
+	}
+
+	// Migrating up again restarts every tenant at access version 1.
+	if _, err := provider.UpTo(ctx, 7); err != nil {
+		t.Fatalf("UpTo(7) after the rollback: %v", err)
+	}
+	if got := readDeactivationSchema(t, pool); got != intact {
+		t.Fatalf("after re-applying %+v, want %+v", got, intact)
+	}
+	if n := count(t, pool, "SELECT count(*) FROM tenants WHERE access_version = 1"); n != 1 {
+		t.Fatal("re-applied migration did not default the access version")
+	}
+	if got := activatedRows(t, pool); got != kept {
+		t.Fatalf("rows after re-applying = %q, want %q", got, kept)
+	}
+	for _, bad := range []string{
+		"UPDATE tenants SET access_version = 0",
+		"INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 0, now())",
+	} {
+		if _, err := pool.Exec(ctx, bad); err == nil {
+			t.Fatalf("%s: accepted, want a check violation", bad)
+		}
+	}
+	exec(t, pool, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())")
+	if _, err := pool.Exec(ctx, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())"); err == nil {
+		t.Fatal("a second cut of the same tenant version was accepted")
+	}
+}
