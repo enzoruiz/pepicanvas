@@ -62,3 +62,25 @@ func OperatorRequest(operator bool, tenantID string, action Action) Request {
 	request.Membership = MembershipActive
 	return request
 }
+
+// InvitationRequest builds the authorization request for an account acting on
+// a tenant's invitations. Only the account that owns the tenant acts on them,
+// so a non-owner has no actor tenant and is denied like any other stranger.
+func InvitationRequest(owner bool, tenantID string, status SubscriptionStatus, action Action) Request {
+	request := Request{
+		ResourceTenantID: tenantID,
+		Resource:         ResourceInvitation,
+		Action:           action,
+		Subscription:     SubscriptionInactive,
+		Invitation:       InvitationNone,
+		Membership:       MembershipNone,
+	}
+	if !owner {
+		return request
+	}
+	request.ActorTenantID = tenantID
+	request.Role = RoleOwner
+	request.Subscription = status
+	request.Membership = MembershipActive
+	return request
+}

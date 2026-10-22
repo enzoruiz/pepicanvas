@@ -1,0 +1,180 @@
+// Package invitation lets the owner of an active tenant create, list, and
+// revoke single-use moderator invitations (US-004), and provides the
+// acceptance primitive that turns a pending invitation into a moderator
+// membership.
+package invitation
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
+)
+
+// Errors returned by the invitation service.
+var (
+	// ErrInvalid reports a request rejected before storage.
+	ErrInvalid = errors.New("invitation: invalid request")
+	// ErrNotFound reports an invitation ID that is unknown or belongs to
+	// another tenant. Both cases are indistinguishable.
+	ErrNotFound = errors.New("invitation: not found")
+	// ErrUnavailable is the only acceptance failure. It never says whether
+	// the token is unknown, revoked, accepted, or expired.
+	ErrUnavailable = errors.New("invitation: unavailable")
+	// ErrOperationConflict reports an operation ID reused for a different
+	// request, or a token already stored under another operation.
+	ErrOperationConflict = errors.New("invitation: operation id or token reused with a different request")
+	// ErrOperationRetained is returned by Tx.RecordOperation when another
+	// operation already retains the operation ID.
+	ErrOperationRetained = errors.New("invitation: operation id retained")
+	// ErrTokenTaken is returned by Tx.InsertInvitation when an invitation
+	// with the same token hash is already stored.
+	ErrTokenTaken = errors.New("invitation: token already stored")
+)
+
+const (
+	// Lifetime is how long an invitation stays usable. It is expired at
+	// exactly CreatedAt + Lifetime.
+	Lifetime = 7 * 24 * time.Hour
+	// OperationRetention is how long an operation ID replays its answer. An
+	// operation accepted at T is retained while now < T + OperationRetention.
+	OperationRetention = 10 * time.Minute
+)
+
+// CreateRequest is one owner's request to store a client-generated token.
+type CreateRequest struct {
+	OwnerID     access.AccountID
+	OperationID string
+	// Token is the secret of kind secret.KindInvitationToken.
+	Token secret.Value
+	// CorrelationID is the request correlation (CTRL-TRACE-01 primitive), or empty.
+	CorrelationID string
+}
+
+// RevokeRequest is one owner's request to revoke an invitation.
+type RevokeRequest struct {
+	OwnerID       access.AccountID
+	OperationID   string
+	InvitationID  string
+	CorrelationID string
+}
+
+// AcceptRequest is one account's request to accept the invitation of Token.
+type AcceptRequest struct {
+	AccountID access.AccountID
+	Token     secret.Value
+}
+
+// Invitation is what the owner sees of an invitation. It never carries the token.
+type Invitation struct {
+	ID        string
+	TenantID  string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
+// Revocation is the answer to a revocation: InvitationRevoked, or
+// InvitationAccepted when an acceptance was confirmed first.
+type Revocation struct {
+	InvitationID string
+	Status       access.InvitationStatus
+}
+
+// Acceptance is the answer to a confirmed acceptance.
+type Acceptance struct {
+	TenantID     string
+	InvitationID string
+}
+
+// Tenant is the tenant an owner administers.
+type Tenant struct {
+	ID     string
+	Owner  access.AccountID
+	Status access.SubscriptionStatus
+}
+
+// Stored is an invitation row. Zero times mean the event did not happen.
+type Stored struct {
+	ID         string
+	TenantID   string
+	TokenHash  [32]byte
+	CreatedBy  access.AccountID
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  time.Time
+	AcceptedAt time.Time
+	AcceptedBy access.AccountID
+}
+
+// Pending reports whether the invitation is neither revoked nor accepted and
+// not yet expired at now.
+func (s Stored) Pending(now time.Time) bool {
+	return s.RevokedAt.IsZero() && s.AcceptedAt.IsZero() && now.Before(s.ExpiresAt)
+}
+
+// Invitation returns the owner's view of the row.
+func (s Stored) Invitation() Invitation {
+	return Invitation{ID: s.ID, TenantID: s.TenantID, CreatedAt: s.CreatedAt, ExpiresAt: s.ExpiresAt}
+}
+
+// OperationKind names the owner action an operation record retains.
+type OperationKind string
+
+const (
+	OperationCreate OperationKind = "create"
+	OperationRevoke OperationKind = "revoke"
+)
+
+// Record is the retained answer of one owner operation. Fingerprint is the
+// SHA-256 of the kind, the owner ID, and the payload (the token hash or the
+// invitation ID). Invitation holds a create answer and Revocation a revoke one.
+type Record struct {
+	OperationID   string
+	Kind          OperationKind
+	OwnerID       access.AccountID
+	Fingerprint   [32]byte
+	Invitation    Invitation
+	Revocation    Revocation
+	CorrelationID string
+	AcceptedAt    time.Time
+}
+
+// Tx is one invitation transaction. Its locks are held until commit.
+type Tx interface {
+	// LockOwnedTenant reads the tenant the account owns FOR SHARE.
+	LockOwnedTenant(ctx context.Context, owner access.AccountID) (Tenant, bool, error)
+	// LockTenant reads a tenant FOR SHARE.
+	LockTenant(ctx context.Context, tenantID string) (Tenant, bool, error)
+	// Operation returns the record of operationID accepted after notBefore.
+	Operation(ctx context.Context, operationID string, notBefore time.Time) (Record, bool, error)
+	// InsertInvitation stores a new invitation. It returns ErrTokenTaken when
+	// the token hash is already stored, including by a concurrent commit.
+	InsertInvitation(ctx context.Context, invitation Stored) error
+	// PendingInvitations returns the tenant's invitations pending at now,
+	// oldest first.
+	PendingInvitations(ctx context.Context, tenantID string, now time.Time) ([]Stored, error)
+	// LockInvitation reads the tenant's invitation FOR UPDATE. An invitation
+	// of another tenant is not found.
+	LockInvitation(ctx context.Context, tenantID, invitationID string) (Stored, bool, error)
+	// LockInvitationByToken reads the invitation of a token hash FOR UPDATE.
+	LockInvitationByToken(ctx context.Context, tokenHash [32]byte) (Stored, bool, error)
+	// RevokeInvitation sets the invitation's revoked_at.
+	RevokeInvitation(ctx context.Context, invitationID string, at time.Time) error
+	// IsMember reports whether the account has any role in the tenant.
+	IsMember(ctx context.Context, tenantID string, account access.AccountID) (bool, error)
+	// AddModerator stores a moderator membership.
+	AddModerator(ctx context.Context, tenantID string, account access.AccountID) error
+	// MarkAccepted sets the invitation's accepted_at and accepted_by.
+	MarkAccepted(ctx context.Context, invitationID string, account access.AccountID, at time.Time) error
+	// RecordOperation drops records accepted at or before purgeBefore and
+	// retains record. It returns ErrOperationRetained for a retained ID.
+	RecordOperation(ctx context.Context, record Record, purgeBefore time.Time) error
+}
+
+// Store runs invitation transactions.
+type Store interface {
+	// InTx runs fn in one transaction and commits only if fn returns nil.
+	InTx(ctx context.Context, fn func(Tx) error) error
+}

@@ -1,0 +1,392 @@
+// Package invitationtest provides an in-memory invitation store for tests of
+// the invitation service and of the adapters built on it.
+package invitationtest
+
+import (
+	"context"
+	"maps"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+)
+
+type state struct {
+	tenants     map[string]invitation.Tenant
+	memberships map[[2]string]access.Role
+	invitations map[string]invitation.Stored
+	records     map[string]invitation.Record
+}
+
+// merge applies the changes tx made to base onto s, keeping what concurrent
+// transactions committed to other rows meanwhile.
+func (s state) merge(base, tx state) {
+	mergeMap(s.tenants, base.tenants, tx.tenants)
+	mergeMap(s.memberships, base.memberships, tx.memberships)
+	mergeMap(s.invitations, base.invitations, tx.invitations)
+	mergeMap(s.records, base.records, tx.records)
+}
+
+func mergeMap[K, V comparable](dst, base, tx map[K]V) {
+	for k, v := range tx {
+		if old, ok := base[k]; !ok || old != v {
+			dst[k] = v
+		}
+	}
+	for k := range base {
+		if _, ok := tx[k]; !ok {
+			delete(dst, k)
+		}
+	}
+}
+
+func (s state) clone() state {
+	return state{
+		tenants:     maps.Clone(s.tenants),
+		memberships: maps.Clone(s.memberships),
+		invitations: maps.Clone(s.invitations),
+		records:     maps.Clone(s.records),
+	}
+}
+
+// MemoryStore is an in-memory invitation.Store. Transactions run one at a
+// time on a copy of the state and replace it only on commit. A hook set with
+// BeforeOnce runs a concurrent transaction in the middle of another one; the
+// lock steps then read the rows that transaction committed, as a PostgreSQL
+// row lock does, and the insert steps see its unique keys.
+type MemoryStore struct {
+	mu                sync.Mutex
+	state             state
+	failures          map[string]error
+	before            map[string]func()
+	transactions      int
+	invitationLookups int
+	operationLookups  int
+}
+
+var _ invitation.Store = (*MemoryStore)(nil)
+
+// NewMemoryStore returns an empty store.
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		state: state{
+			tenants:     map[string]invitation.Tenant{},
+			memberships: map[[2]string]access.Role{},
+			invitations: map[string]invitation.Stored{},
+			records:     map[string]invitation.Record{},
+		},
+		failures: map[string]error{},
+		before:   map[string]func(){},
+	}
+}
+
+// AddTenant seeds a tenant and its owner membership.
+func (m *MemoryStore) AddTenant(tenantID string, owner access.AccountID, status access.SubscriptionStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.tenants[tenantID] = invitation.Tenant{ID: tenantID, Owner: owner, Status: status}
+	m.state.memberships[[2]string{tenantID, string(owner)}] = access.RoleOwner
+}
+
+// SetStatus changes a tenant's subscription status.
+func (m *MemoryStore) SetStatus(tenantID string, status access.SubscriptionStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tenant := m.state.tenants[tenantID]
+	tenant.Status = status
+	m.state.tenants[tenantID] = tenant
+}
+
+// AddMember seeds a membership.
+func (m *MemoryStore) AddMember(tenantID string, account access.AccountID, role access.Role) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.memberships[[2]string{tenantID, string(account)}] = role
+}
+
+// FailOnce makes the next call of step (a Tx method name, or "commit") fail with err.
+func (m *MemoryStore) FailOnce(step string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failures[step] = err
+}
+
+// BeforeOnce runs fn at the start of the next call of step (a Tx method
+// name) with the store unlocked, as a concurrent transaction that commits
+// while the current one is in progress.
+func (m *MemoryStore) BeforeOnce(step string, fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.before[step] = fn
+}
+
+// Invitations returns the committed invitations by ID.
+func (m *MemoryStore) Invitations() map[string]invitation.Stored {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.state.invitations)
+}
+
+// Membership returns the account's committed role in the tenant.
+func (m *MemoryStore) Membership(tenantID string, account access.AccountID) (access.Role, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	role, ok := m.state.memberships[[2]string{tenantID, string(account)}]
+	return role, ok
+}
+
+// Memberships counts the committed memberships.
+func (m *MemoryStore) Memberships() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.state.memberships)
+}
+
+// Records returns the committed operation records by operation ID.
+func (m *MemoryStore) Records() map[string]invitation.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.state.records)
+}
+
+// Transactions counts started transactions.
+func (m *MemoryStore) Transactions() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.transactions
+}
+
+// InvitationLookups counts reads and writes of invitation rows.
+func (m *MemoryStore) InvitationLookups() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.invitationLookups
+}
+
+// OperationLookups counts reads and writes of operation records.
+func (m *MemoryStore) OperationLookups() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.operationLookups
+}
+
+// InTx runs fn on a copy of the state and commits the copy if fn succeeds.
+func (m *MemoryStore) InTx(_ context.Context, fn func(invitation.Tx) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transactions++
+	base := m.state.clone()
+	tx := &memoryTx{store: m, state: m.state.clone()}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := m.fail("commit"); err != nil {
+		return err
+	}
+	m.state.merge(base, tx.state)
+	return nil
+}
+
+// step runs the hook of step with the store unlocked, then consumes its
+// injected failure. The caller holds m.mu.
+func (m *MemoryStore) step(name string) error {
+	if fn := m.before[name]; fn != nil {
+		delete(m.before, name)
+		m.mu.Unlock()
+		fn()
+		m.mu.Lock()
+	}
+	return m.fail(name)
+}
+
+// fail consumes the injected failure of step. The caller holds m.mu.
+func (m *MemoryStore) fail(step string) error {
+	err := m.failures[step]
+	delete(m.failures, step)
+	return err
+}
+
+type memoryTx struct {
+	store *MemoryStore
+	state state
+}
+
+// relock refreshes a locked invitation row from the committed state, so the
+// lock observes what concurrent transactions committed before it.
+func (t *memoryTx) relock(id string) {
+	if committed, ok := t.store.state.invitations[id]; ok {
+		t.state.invitations[id] = committed
+	}
+}
+
+func (t *memoryTx) LockOwnedTenant(_ context.Context, owner access.AccountID) (invitation.Tenant, bool, error) {
+	if err := t.store.step("LockOwnedTenant"); err != nil {
+		return invitation.Tenant{}, false, err
+	}
+	for _, tenant := range t.state.tenants {
+		if tenant.Owner == owner {
+			return tenant, true, nil
+		}
+	}
+	return invitation.Tenant{}, false, nil
+}
+
+func (t *memoryTx) LockTenant(_ context.Context, tenantID string) (invitation.Tenant, bool, error) {
+	if err := t.store.step("LockTenant"); err != nil {
+		return invitation.Tenant{}, false, err
+	}
+	if committed, ok := t.store.state.tenants[tenantID]; ok {
+		t.state.tenants[tenantID] = committed
+	}
+	tenant, ok := t.state.tenants[tenantID]
+	return tenant, ok, nil
+}
+
+func (t *memoryTx) Operation(_ context.Context, operationID string, notBefore time.Time) (invitation.Record, bool, error) {
+	t.store.operationLookups++
+	if err := t.store.step("Operation"); err != nil {
+		return invitation.Record{}, false, err
+	}
+	record, ok := t.state.records[operationID]
+	if !ok || !record.AcceptedAt.After(notBefore) {
+		return invitation.Record{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (t *memoryTx) InsertInvitation(_ context.Context, stored invitation.Stored) error {
+	t.store.invitationLookups++
+	if err := t.store.step("InsertInvitation"); err != nil {
+		return err
+	}
+	// The unique index also sees rows other transactions committed meanwhile.
+	for _, rows := range []map[string]invitation.Stored{t.store.state.invitations, t.state.invitations} {
+		for _, existing := range rows {
+			if existing.TokenHash == stored.TokenHash {
+				return invitation.ErrTokenTaken
+			}
+		}
+	}
+	t.state.invitations[stored.ID] = stored
+	return nil
+}
+
+func (t *memoryTx) PendingInvitations(_ context.Context, tenantID string, now time.Time) ([]invitation.Stored, error) {
+	t.store.invitationLookups++
+	if err := t.store.step("PendingInvitations"); err != nil {
+		return nil, err
+	}
+	var pending []invitation.Stored
+	for _, stored := range t.state.invitations {
+		if stored.TenantID == tenantID && stored.Pending(now) {
+			pending = append(pending, stored)
+		}
+	}
+	slices.SortFunc(pending, func(a, b invitation.Stored) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		if a.ID < b.ID {
+			return -1
+		}
+		return 1
+	})
+	return pending, nil
+}
+
+func (t *memoryTx) LockInvitation(_ context.Context, tenantID, invitationID string) (invitation.Stored, bool, error) {
+	t.store.invitationLookups++
+	if err := t.store.step("LockInvitation"); err != nil {
+		return invitation.Stored{}, false, err
+	}
+	t.relock(invitationID)
+	stored, ok := t.state.invitations[invitationID]
+	if !ok || stored.TenantID != tenantID {
+		return invitation.Stored{}, false, nil
+	}
+	return stored, true, nil
+}
+
+func (t *memoryTx) LockInvitationByToken(_ context.Context, tokenHash [32]byte) (invitation.Stored, bool, error) {
+	t.store.invitationLookups++
+	if err := t.store.step("LockInvitationByToken"); err != nil {
+		return invitation.Stored{}, false, err
+	}
+	for id, stored := range t.store.state.invitations {
+		if stored.TokenHash == tokenHash {
+			t.relock(id)
+		}
+	}
+	for _, stored := range t.state.invitations {
+		if stored.TokenHash == tokenHash {
+			return stored, true, nil
+		}
+	}
+	return invitation.Stored{}, false, nil
+}
+
+func (t *memoryTx) RevokeInvitation(_ context.Context, invitationID string, at time.Time) error {
+	t.store.invitationLookups++
+	if err := t.store.step("RevokeInvitation"); err != nil {
+		return err
+	}
+	stored := t.state.invitations[invitationID]
+	stored.RevokedAt = at
+	t.state.invitations[invitationID] = stored
+	return nil
+}
+
+func (t *memoryTx) IsMember(_ context.Context, tenantID string, account access.AccountID) (bool, error) {
+	if err := t.store.step("IsMember"); err != nil {
+		return false, err
+	}
+	key := [2]string{tenantID, string(account)}
+	if role, ok := t.store.state.memberships[key]; ok {
+		t.state.memberships[key] = role
+	}
+	_, ok := t.state.memberships[key]
+	return ok, nil
+}
+
+func (t *memoryTx) AddModerator(_ context.Context, tenantID string, account access.AccountID) error {
+	if err := t.store.step("AddModerator"); err != nil {
+		return err
+	}
+	t.state.memberships[[2]string{tenantID, string(account)}] = access.RoleModerator
+	return nil
+}
+
+func (t *memoryTx) MarkAccepted(_ context.Context, invitationID string, account access.AccountID, at time.Time) error {
+	t.store.invitationLookups++
+	if err := t.store.step("MarkAccepted"); err != nil {
+		return err
+	}
+	stored := t.state.invitations[invitationID]
+	stored.AcceptedAt = at
+	stored.AcceptedBy = account
+	t.state.invitations[invitationID] = stored
+	return nil
+}
+
+func (t *memoryTx) RecordOperation(_ context.Context, record invitation.Record, purgeBefore time.Time) error {
+	t.store.operationLookups++
+	if err := t.store.step("RecordOperation"); err != nil {
+		return err
+	}
+	for id, r := range t.state.records {
+		if !r.AcceptedAt.After(purgeBefore) {
+			delete(t.state.records, id)
+		}
+	}
+	// The primary key also sees rows other transactions committed meanwhile.
+	if r, ok := t.store.state.records[record.OperationID]; ok && r.AcceptedAt.After(purgeBefore) {
+		return invitation.ErrOperationRetained
+	}
+	if _, ok := t.state.records[record.OperationID]; ok {
+		return invitation.ErrOperationRetained
+	}
+	t.state.records[record.OperationID] = record
+	return nil
+}
