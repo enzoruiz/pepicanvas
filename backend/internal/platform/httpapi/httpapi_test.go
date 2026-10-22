@@ -18,6 +18,8 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/access/accesstest"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation/invitationtest"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
@@ -197,7 +199,9 @@ type env struct {
 	subs     *subscriptiontest.MemoryStore
 	// moderators are the moderator memberships of activated tenants.
 	moderators *sync.Map
+	invs       *invitationtest.MemoryStore
 	logs       *syncBuffer
+	config     httpapi.Config
 	handler    http.Handler
 	bodies     []string
 }
@@ -219,6 +223,7 @@ func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limit
 		faults: &faults{},
 		calls:  &calls{},
 		subs:   subscriptiontest.NewMemoryStore(),
+		invs:   invitationtest.NewMemoryStore(),
 		logs:   &syncBuffer{},
 
 		moderators: &sync.Map{},
@@ -233,17 +238,19 @@ func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limit
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := httpapi.New(httpapi.Config{
+	e.config = httpapi.Config{
 		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults, calls: e.calls},
 		Memberships:   memberships{activated: e.subs, moderators: e.moderators, seeded: e.store},
 		Canvases:      e.canvases,
 		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults, calls: e.calls},
 		Tenants:       faultyTenants{Tenants: e.subs, faults: e.faults},
+		Invitations:   invitation.NewService(e.invs, invitation.WithClock(e.clock.Now)),
 		Ingress:       e.ingress,
 		Logger:        logger,
 		Now:           e.clock.Now,
 		Limits:        limits,
-	})
+	}
+	handler, err := httpapi.New(e.config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,9 +674,10 @@ func TestCanvasRequestsRequireAMembership(t *testing.T) {
 
 func TestSignInRateLimitPerAccountAndIP(t *testing.T) {
 	limits := httpapi.Limits{
-		SignInPerAccount: httpapi.Rate{Limit: 3, Window: time.Minute},
-		SignInPerIP:      httpapi.Rate{Limit: 5, Window: time.Minute},
-		RegisterPerIP:    httpapi.Rate{Limit: 100, Window: time.Minute},
+		SignInPerAccount:      httpapi.Rate{Limit: 3, Window: time.Minute},
+		SignInPerIP:           httpapi.Rate{Limit: 5, Window: time.Minute},
+		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount: httpapi.DefaultLimits.InvitationsPerAccount,
 	}
 	e := newEnv(t, limits)
 	e.register("op-http-rate-00001", "alice@example.com")
@@ -729,9 +737,10 @@ func TestRegistrationRateLimitPerIP(t *testing.T) {
 
 func TestDefaultLimits(t *testing.T) {
 	want := httpapi.Limits{
-		SignInPerAccount: httpapi.Rate{Limit: 10, Window: 15 * time.Minute},
-		SignInPerIP:      httpapi.Rate{Limit: 50, Window: 15 * time.Minute},
-		RegisterPerIP:    httpapi.Rate{Limit: 10, Window: time.Hour},
+		SignInPerAccount:      httpapi.Rate{Limit: 10, Window: 15 * time.Minute},
+		SignInPerIP:           httpapi.Rate{Limit: 50, Window: 15 * time.Minute},
+		RegisterPerIP:         httpapi.Rate{Limit: 10, Window: time.Hour},
+		InvitationsPerAccount: httpapi.Rate{Limit: 20, Window: time.Hour},
 	}
 	if httpapi.DefaultLimits != want {
 		t.Fatalf("DefaultLimits = %+v", httpapi.DefaultLimits)
@@ -748,6 +757,7 @@ func TestConfigurationRequiresAnIngress(t *testing.T) {
 		Canvases:      e.canvases,
 		Subscriptions: faultySubscriptions{faults: e.faults, calls: e.calls},
 		Tenants:       e.subs,
+		Invitations:   e.config.Invitations,
 		Limits:        httpapi.DefaultLimits,
 	}
 	if _, err := httpapi.New(config); err == nil {
@@ -761,9 +771,10 @@ func TestConfigurationRequiresAnIngress(t *testing.T) {
 
 func TestSecretsNeverReachLogsOrErrorBodies(t *testing.T) {
 	e := newEnv(t, httpapi.Limits{
-		SignInPerAccount: httpapi.Rate{Limit: 2, Window: time.Minute},
-		SignInPerIP:      httpapi.Rate{Limit: 100, Window: time.Minute},
-		RegisterPerIP:    httpapi.Rate{Limit: 100, Window: time.Minute},
+		SignInPerAccount:      httpapi.Rate{Limit: 2, Window: time.Minute},
+		SignInPerIP:           httpapi.Rate{Limit: 100, Window: time.Minute},
+		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount: httpapi.DefaultLimits.InvitationsPerAccount,
 	})
 	e.register("op-http-secrets-01", "alice@example.com")
 	alice := e.signIn("alice@example.com")
