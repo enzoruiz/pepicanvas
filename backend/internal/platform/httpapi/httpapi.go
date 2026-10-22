@@ -1,6 +1,6 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
-// (US-001) and the manual streamer activation and own-canvas read (US-002).
-// Every response is private and correlated; unsafe methods must
+// (US-001), the manual streamer activation and own-canvas read (US-002), and
+// the owner-only canvas resize (US-007). Every response is private and correlated; unsafe methods must
 // come from the configured origin, and authenticated mutations must carry the
 // session's CSRF token (CTRL-WEB-01 early primitive; TE-014 owns the control).
 package httpapi
@@ -70,9 +70,10 @@ type Accounts interface {
 	SignOut(ctx context.Context, token secret.Value) error
 }
 
-// CanvasLoader reads committed canvases.
-type CanvasLoader interface {
+// CanvasStore reads committed canvases and commits canvas mutations.
+type CanvasStore interface {
 	Load(ctx context.Context, key canvas.Key) (canvas.Canvas, error)
+	Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error)
 }
 
 // Subscriptions is the streamer activation service.
@@ -86,7 +87,7 @@ type Subscriptions interface {
 type Config struct {
 	Accounts      Accounts
 	Memberships   access.MembershipStore
-	Canvases      CanvasLoader
+	Canvases      CanvasStore
 	Subscriptions Subscriptions
 	// AllowedOrigin is the exact scheme://host[:port] of the editor.
 	AllowedOrigin string
@@ -137,6 +138,7 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/session", a.currentSession)
 	mux.HandleFunc("DELETE /api/session", a.signOut)
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}", a.canvas)
+	mux.HandleFunc("PUT /api/tenants/{tenantID}/canvases/{canvasID}/dimensions", a.setDimensions)
 	mux.HandleFunc("POST /api/activations", a.activate)
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(a.checkOrigin(mux)))), nil
@@ -475,18 +477,8 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	key := canvas.Key{TenantID: r.PathValue("tenantID"), CanvasID: r.PathValue("canvasID")}
-	if err := canvas.ValidateKey(key); err != nil {
-		a.responder.Error(w, r, httpx.ErrForbidden, err)
-		return
-	}
-	membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
-	if err != nil {
-		a.responder.Error(w, r, httpx.ErrInternal, err)
-		return
-	}
-	if err := access.Check(access.CanvasRequest(membership, found, key.TenantID, access.ActionView)); err != nil {
-		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	key, ok := a.authorizeCanvas(w, r, principal, access.ActionView)
+	if !ok {
 		return
 	}
 	loaded, ok := a.load(w, r, key)
@@ -494,6 +486,120 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newCanvasBody(loaded))
+}
+
+// authorizeCanvas reads the canvas key from the path and checks the caller
+// may perform the action on it. Every denial is the same forbidden answer.
+func (a *api) authorizeCanvas(w http.ResponseWriter, r *http.Request, principal access.Principal, action access.Action) (canvas.Key, bool) {
+	key := canvas.Key{TenantID: r.PathValue("tenantID"), CanvasID: r.PathValue("canvasID")}
+	if err := canvas.ValidateKey(key); err != nil {
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+		return canvas.Key{}, false
+	}
+	membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return canvas.Key{}, false
+	}
+	if err := access.Check(access.CanvasRequest(membership, found, key.TenantID, action)); err != nil {
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+		return canvas.Key{}, false
+	}
+	return key, true
+}
+
+// dimensionsBody decodes width and height as pointers, so a missing or null
+// value is rejected rather than read as zero.
+type dimensionsBody struct {
+	OperationID string `json:"operation_id"`
+	Width       *int   `json:"width"`
+	Height      *int   `json:"height"`
+}
+
+type dimensionsResult struct {
+	CanvasID string `json:"canvas_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	Revision int64  `json:"revision"`
+}
+
+// setDimensions lets the owner resize the canvas. The session, its CSRF
+// token, and the owner check run before the body is read, so every other
+// caller gets the same answer whatever it sends. The owner is reauthorized
+// immediately before the change is applied. A retry under the same operation
+// ID returns the same answer without a second effect.
+func (a *api) setDimensions(w http.ResponseWriter, r *http.Request) {
+	token, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !access.VerifyCSRF(token, r.Header.Get(CSRFHeader)) {
+		a.responder.Error(w, r, httpx.ErrForbidden, errors.New("csrf token rejected"))
+		return
+	}
+	key, ok := a.authorizeCanvas(w, r, principal, access.ActionAdminister)
+	if !ok {
+		return
+	}
+	var body dimensionsBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	if body.Width == nil || body.Height == nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, errors.New("width and height are required"))
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	operation := canvas.Operation{ID: body.OperationID, CorrelationID: correlationID.String()}
+	mutation := canvas.SetDimensions{Dimensions: canvas.Dimensions{Width: *body.Width, Height: *body.Height}}
+	if err := canvas.Validate(key, operation, mutation); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+
+	var (
+		result  canvas.Result
+		loadErr error
+	)
+	err := access.GuardMutation(func() (access.Request, error) {
+		membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
+		loadErr = err
+		return access.CanvasRequest(membership, found, key.TenantID, access.ActionAdminister), err
+	}, func() error {
+		var err error
+		result, err = a.Canvases.Apply(r.Context(), key, operation, mutation)
+		return err
+	})
+	switch {
+	case loadErr != nil:
+		a.responder.Error(w, r, httpx.ErrInternal, loadErr)
+	case err == nil:
+		a.Logger.InfoContext(r.Context(), "canvas dimensions confirmed",
+			slog.String("tenant_id", key.TenantID),
+			slog.String("canvas_id", key.CanvasID),
+			slog.Int("width", mutation.Dimensions.Width),
+			slog.Int("height", mutation.Dimensions.Height),
+			slog.Int64("revision", result.Revision),
+		)
+		writeJSON(w, http.StatusOK, dimensionsResult{
+			CanvasID: key.CanvasID,
+			Width:    mutation.Dimensions.Width,
+			Height:   mutation.Dimensions.Height,
+			Revision: result.Revision,
+		})
+	case errors.Is(err, access.ErrAccessDenied):
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	case errors.Is(err, canvas.ErrNotFound):
+		// A missing canvas is the access denial of the read route.
+		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
+	case errors.Is(err, canvas.ErrOperationConflict):
+		a.responder.Error(w, r, httpx.ErrConflict, err)
+	case errors.Is(err, canvas.ErrInvalid):
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+	}
 }
 
 // authenticate resolves the session cookie. An invalid session clears the

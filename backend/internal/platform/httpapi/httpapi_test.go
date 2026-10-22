@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,16 +31,96 @@ const (
 	clientIP = "192.0.2.10"
 )
 
-// canvases serves seeded canvases and the empty canvases activations created.
+// canvases serves seeded canvases and the empty canvases activations created,
+// and applies dimension changes over them, retaining operations as the
+// PostgreSQL canvas store does.
 type canvases struct {
 	mu        sync.Mutex
 	byID      map[canvas.Key]canvas.Canvas
 	activated *subscriptiontest.MemoryStore
+	// applied holds the canvases changed by Apply; Load reads it first.
+	applied    map[canvas.Key]canvas.Canvas
+	operations map[string]appliedOperation
+	effects    int
+	// failNext, when set, fails the next Apply without an effect.
+	failNext error
+}
+
+type appliedOperation struct {
+	fingerprint   [32]byte
+	result        canvas.Result
+	correlationID string
 }
 
 func (c *canvases) Load(_ context.Context, key canvas.Key) (canvas.Canvas, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.loadLocked(key)
+}
+
+func (c *canvases) Apply(_ context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error) {
+	if err := canvas.Validate(key, operation, mutation); err != nil {
+		return canvas.Result{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.failNext; err != nil {
+		c.failNext = nil
+		return canvas.Result{}, err
+	}
+	fingerprint := canvas.Fingerprint(mutation)
+	if retained, ok := c.operations[operation.ID]; ok {
+		if retained.fingerprint != fingerprint {
+			return canvas.Result{}, canvas.ErrOperationConflict
+		}
+		return retained.result, nil
+	}
+	current, err := c.loadLocked(key)
+	if err != nil {
+		return canvas.Result{}, err
+	}
+	resize, ok := mutation.(canvas.SetDimensions)
+	if !ok {
+		return canvas.Result{}, fmt.Errorf("fake canvases: unsupported mutation %T", mutation)
+	}
+	current.Dimensions = resize.Dimensions
+	current.Revision++
+	if c.applied == nil {
+		c.applied = map[canvas.Key]canvas.Canvas{}
+		c.operations = map[string]appliedOperation{}
+	}
+	c.applied[key] = current
+	result := canvas.Result{Revision: current.Revision}
+	c.operations[operation.ID] = appliedOperation{fingerprint: fingerprint, result: result, correlationID: operation.CorrelationID}
+	c.effects++
+	return result, nil
+}
+
+// Applies counts the mutations that took effect.
+func (c *canvases) Applies() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.effects
+}
+
+// Correlation returns the correlation ID retained with an operation.
+func (c *canvases) Correlation(operationID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.operations[operationID].correlationID
+}
+
+// FailNext makes the next Apply fail with err.
+func (c *canvases) FailNext(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failNext = err
+}
+
+func (c *canvases) loadLocked(key canvas.Key) (canvas.Canvas, error) {
+	if changed, ok := c.applied[key]; ok {
+		return changed, nil
+	}
 	if dimensions, ok := c.activated.Canvases()[key]; ok {
 		return canvas.Canvas{Key: key, Dimensions: dimensions}, nil
 	}
