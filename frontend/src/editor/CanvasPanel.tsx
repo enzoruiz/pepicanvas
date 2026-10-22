@@ -46,6 +46,8 @@ interface PendingResize {
 interface CanvasPanelProps {
   session: Session;
   newOperationId?: () => string;
+  // Called once the own canvas loaded, which means an active owner.
+  onLoaded?: (canvas: OwnCanvas) => void;
 }
 
 // A whole number within the limits, or undefined for anything else
@@ -63,6 +65,7 @@ function parseSize(
 export function CanvasPanel({
   session,
   newOperationId = () => crypto.randomUUID(),
+  onLoaded,
 }: CanvasPanelProps) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [width, setWidth] = useState("");
@@ -82,6 +85,7 @@ export function CanvasPanel({
         setState({ kind: "ready", canvas: result.value });
         setWidth(String(result.value.width));
         setHeight(String(result.value.height));
+        onLoaded?.(result.value);
       } else if (result.error === "forbidden") {
         setState({ kind: "inactive" });
       } else if (result.error === "subscription_inactive") {
@@ -93,7 +97,7 @@ export function CanvasPanel({
     return () => {
       active = false;
     };
-  }, []);
+  }, [onLoaded]);
 
   async function submit(event: FormEvent<HTMLFormElement>, canvas: OwnCanvas) {
     event.preventDefault();

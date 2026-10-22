@@ -1,7 +1,7 @@
 /* global console, process, setTimeout */
 
-// Runs the US-001, US-002, and US-007 end-to-end scenarios on every browser
-// of the support matrix against a disposable PostgreSQL container and the
+// Runs the US-001, US-002, US-004, and US-007 end-to-end scenarios on every
+// browser of the support matrix against a disposable PostgreSQL container and the
 // real Go server, which serves the production frontend build. The scenarios
 // get the database URL in PEPICANVAS_E2E_DATABASE_URL, which the server and
 // the host-side `server grant-operator` command share. Each spec file runs
@@ -149,11 +149,11 @@ async function main() {
   }
   if (failed.length > 0) {
     throw new Error(
-      `account, session, and activation scenarios failed on ${failed.join(", ")}`,
+      `account, session, activation, and invitation scenarios failed on ${failed.join(", ")}`,
     );
   }
   console.log(
-    `account, session, and activation scenarios passed on ${matrix.browsers.length} browsers`,
+    `account, session, activation, and invitation scenarios passed on ${matrix.browsers.length} browsers`,
   );
 }
 

@@ -1,6 +1,6 @@
-// Client for the account, session, activation, deactivation, and canvas API
-// (US-001, US-002, US-003, US-007). Responses are reduced to a closed set of
-// outcomes; server text never reaches the UI.
+// Client for the account, session, activation, deactivation, invitation, and
+// canvas API (US-001, US-002, US-003, US-004, US-007). Responses are reduced
+// to a closed set of outcomes; server text never reaches the UI.
 
 import type { CanvasObject } from "../canvas/CanvasSurface";
 
@@ -41,6 +41,17 @@ export interface Deactivation {
   tenantId: string;
   canvasId: string;
   deactivated: boolean;
+}
+
+export interface Invitation {
+  invitationId: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface Revocation {
+  invitationId: string;
+  status: "revoked" | "accepted";
 }
 
 export type ApiError =
@@ -344,6 +355,102 @@ export async function deactivate(
           deactivated,
         },
       };
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+// An invitation token is pci_ followed by 256 random bits in unpadded
+// base64url (43 characters). It is generated here so a retried creation
+// carries the same token; the server stores only its hash.
+export function generateInvitationToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const base64 = btoa(String.fromCharCode(...bytes));
+  return `pci_${base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+}
+
+const invitationIdPattern = /^[0-9a-f]{32}$/;
+
+function isTimestamp(value: unknown): value is string {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function toInvitation(value: unknown): Invitation | undefined {
+  if (typeof value === "object" && value !== null) {
+    const { invitation_id, created_at, expires_at } = value as Record<
+      string,
+      unknown
+    >;
+    if (
+      typeof invitation_id === "string" &&
+      invitationIdPattern.test(invitation_id) &&
+      isTimestamp(created_at) &&
+      isTimestamp(expires_at)
+    ) {
+      return {
+        invitationId: invitation_id,
+        createdAt: created_at,
+        expiresAt: expires_at,
+      };
+    }
+  }
+  return undefined;
+}
+
+// The token travels only in the JSON body, never in the URL.
+export async function createInvitation(
+  csrfToken: string,
+  operationId: string,
+  token: string,
+): Promise<Result<Invitation>> {
+  const result = await call(
+    "POST",
+    "/api/invitations",
+    { operation_id: operationId, token },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  const invitation = toInvitation(result.value);
+  return invitation
+    ? { ok: true, value: invitation }
+    : { ok: false, error: "unavailable" };
+}
+
+export async function listInvitations(): Promise<Result<Invitation[]>> {
+  const result = await call("GET", "/api/invitations");
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { invitations } = result.value as Record<string, unknown>;
+    if (Array.isArray(invitations)) {
+      const parsed = invitations.map(toInvitation);
+      if (parsed.every((invitation) => invitation !== undefined)) {
+        return { ok: true, value: parsed };
+      }
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+export async function revokeInvitation(
+  csrfToken: string,
+  operationId: string,
+  invitationId: string,
+): Promise<Result<Revocation>> {
+  const result = await call(
+    "POST",
+    `/api/invitations/${encodeURIComponent(invitationId)}/revoke`,
+    { operation_id: operationId },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { invitation_id, status } = result.value as Record<string, unknown>;
+    if (
+      typeof invitation_id === "string" &&
+      invitationIdPattern.test(invitation_id) &&
+      (status === "revoked" || status === "accepted")
+    ) {
+      return { ok: true, value: { invitationId: invitation_id, status } };
     }
   }
   return { ok: false, error: "unavailable" };

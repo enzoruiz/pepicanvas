@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
@@ -66,6 +66,44 @@ describe("EditorShell", () => {
     expect(
       screen.queryByRole("button", { name: "Deactivate" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows an active owner the invitations panel", async () => {
+    replies.push(session(false), ownCanvas, json(200, { invitations: [] }));
+    render(<EditorShell />);
+
+    expect(
+      await screen.findByRole("region", { name: "Invite moderators" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]).toMatchObject({ method: "GET", path: "/api/invitations" });
+  });
+
+  it.each([
+    ["an inactive account or moderator", false, 403],
+    ["an operator-only account", true, 403],
+    ["an account whose canvas is unavailable", false, 500],
+  ])("hides the invitations panel from %s", async (_, operator, status) => {
+    replies.push(
+      session(operator),
+      json(status, { error: status === 403 ? "forbidden" : "internal" }),
+    );
+    render(<EditorShell />);
+
+    expect(
+      await screen.findByText(
+        status === 403
+          ? "Your account is not active yet. Ask an operator to activate it."
+          : "Your canvas is unavailable. Reload the page to try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Invite moderators" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Create invitation link" }),
+    ).not.toBeInTheDocument();
+    expect(calls).toHaveLength(2);
   });
 
   it("shows an operator the operator panel", async () => {
