@@ -10,9 +10,13 @@ const password = `e2e-password-${randomBytes(6).toString("hex")}`;
 const backendRoot = path.resolve(import.meta.dirname, "../../../backend");
 
 const activated = "Streamer activated.";
-const unchanged = "Streamer was already active; the canvas is unchanged.";
+const unchanged = "Streamer is active; the canvas is unchanged.";
+const deactivated = "Streamer deactivated. Their canvas and files are kept.";
+const alreadyInactive = "Streamer was already inactive; nothing changed.";
 const inactive =
   "Your account is not active yet. Ask an operator to activate it.";
+const subscriptionInactive =
+  "Your subscription is inactive. Your canvas and files are kept; ask an operator to reactivate it.";
 
 function uniqueEmail(label) {
   return `${label}-${randomBytes(6).toString("hex")}@example.com`;
@@ -66,9 +70,17 @@ async function signedIn(browser, email) {
 }
 
 async function activate(page, email, message) {
-  const panel = page.getByRole("region", { name: "Activate a streamer" });
+  await submitStreamer(page, "Activate", email, message);
+}
+
+async function deactivate(page, email, message) {
+  await submitStreamer(page, "Deactivate", email, message);
+}
+
+async function submitStreamer(page, action, email, message) {
+  const panel = page.getByRole("region", { name: "Manage streamers" });
   await panel.getByLabel("Streamer email").fill(email);
-  await panel.getByRole("button", { name: "Activate" }).click();
+  await panel.getByRole("button", { name: action, exact: true }).click();
   await expect(panel.getByRole("status")).toHaveText(message);
   await expect(panel.getByLabel("Streamer email")).toHaveValue("");
 }
@@ -79,7 +91,7 @@ async function ownCanvas(page) {
   return response.json();
 }
 
-test("an operator activates streamers who each open only their own canvas", async ({
+test("an operator activates and deactivates streamers who each open only their own canvas", async ({
   browser,
   page,
 }) => {
@@ -107,7 +119,7 @@ test("an operator activates streamers who each open only their own canvas", asyn
       .getByText("1920 × 1080"),
   ).toBeVisible();
   await expect(
-    a.page.getByRole("region", { name: "Activate a streamer" }),
+    a.page.getByRole("region", { name: "Manage streamers" }),
   ).toHaveCount(0);
   const aliceCanvas = await ownCanvas(a.page);
   expect(aliceCanvas).toMatchObject({ width: 1920, height: 1080, revision: 0 });
@@ -139,6 +151,39 @@ test("an operator activates streamers who each open only their own canvas", asyn
     c.page.getByRole("region", { name: "Your canvas" }).getByText(inactive),
   ).toBeVisible();
   await expect(c.page.getByText("×")).toHaveCount(0);
+
+  // Deactivation cuts A's access and keeps the canvas; B continues.
+  await deactivate(op.page, alice, deactivated);
+  const aliceRegion = a.page.getByRole("region", { name: "Your canvas" });
+  await a.page.reload();
+  await expect(aliceRegion.getByRole("status")).toHaveText(
+    subscriptionInactive,
+  );
+  await expect(aliceRegion.getByText("×")).toHaveCount(0);
+  const denied = await a.page.request.get("/api/canvas");
+  expect(denied.status()).toBe(403);
+  const deniedBody = await denied.text();
+  expect(JSON.parse(deniedBody)).toMatchObject({
+    error: "subscription_inactive",
+  });
+  for (const secret of [alice, aliceCanvas.tenant_id, aliceCanvas.canvas_id]) {
+    expect(deniedBody).not.toContain(secret);
+  }
+  expect((await a.page.request.get(route)).status()).toBe(403);
+
+  const bobRegion = b.page.getByRole("region", { name: "Your canvas" });
+  await b.page.reload();
+  await expect(bobRegion.getByText("1920 × 1080")).toBeVisible();
+  expect(await ownCanvas(b.page)).toEqual(bobCanvas);
+
+  await deactivate(op.page, alice, alreadyInactive);
+
+  // Reactivation is the activation and brings back the same canvas.
+  await activate(op.page, alice, unchanged);
+  await a.page.reload();
+  await expect(aliceRegion.getByText("1920 × 1080")).toBeVisible();
+  await expect(aliceRegion.getByText(subscriptionInactive)).toHaveCount(0);
+  expect(await ownCanvas(a.page)).toEqual(aliceCanvas);
 
   for (const session of [op, a, b, c]) {
     await session.context.close();

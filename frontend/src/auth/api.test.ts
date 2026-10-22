@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
-import { activate, getOwnCanvas, getSession } from "./api";
+import { activate, deactivate, getOwnCanvas, getSession } from "./api";
 
 let calls: Call[];
 let replies: Reply[];
@@ -83,6 +83,15 @@ describe("getOwnCanvas", () => {
     expect(await getOwnCanvas()).toEqual({ ok: false, error: "forbidden" });
   });
 
+  it("knows subscription_inactive for a deactivated owner", async () => {
+    replies.push(json(403, { error: "subscription_inactive" }));
+
+    expect(await getOwnCanvas()).toEqual({
+      ok: false,
+      error: "subscription_inactive",
+    });
+  });
+
   it("rejects a malformed canvas body", async () => {
     replies.push(json(200, { tenant_id: tenantId, canvas_id: canvasId }));
 
@@ -134,6 +143,85 @@ describe("activate", () => {
     );
 
     expect(await activate("csrf", "operation-id-0001", "x@y.z")).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+});
+
+describe("deactivate", () => {
+  it.each([true, false])(
+    "sends the operation, email, and CSRF token and reads deactivated %s",
+    async (deactivated) => {
+      replies.push(
+        json(200, {
+          account_id: accountId,
+          tenant_id: tenantId,
+          canvas_id: canvasId,
+          deactivated,
+        }),
+      );
+
+      expect(
+        await deactivate("csrf", "operation-id-0001", "bob@example.com"),
+      ).toEqual({
+        ok: true,
+        value: { accountId, tenantId, canvasId, deactivated },
+      });
+      expect(calls[0]).toMatchObject({
+        method: "POST",
+        path: "/api/deactivations",
+        headers: { "X-CSRF-Token": "csrf" },
+        body: { operation_id: "operation-id-0001", email: "bob@example.com" },
+      });
+    },
+  );
+
+  it.each([
+    ["bad_request", 400],
+    ["forbidden", 403],
+    ["not_found", 404],
+    ["conflict", 409],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code, detail: "ignored" }));
+
+    expect(await deactivate("csrf", "operation-id-0001", "x@y.z")).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+
+  it.each([json(500, { error: "internal" }), "network-error" as const])(
+    "reports unavailable for %o",
+    async (reply) => {
+      replies.push(reply);
+
+      expect(await deactivate("csrf", "operation-id-0001", "x@y.z")).toEqual({
+        ok: false,
+        error: "unavailable",
+      });
+    },
+  );
+
+  it.each([
+    { account_id: accountId, tenant_id: tenantId, canvas_id: canvasId },
+    {
+      account_id: accountId,
+      tenant_id: tenantId,
+      canvas_id: canvasId,
+      deactivated: "true",
+    },
+    { tenant_id: tenantId, canvas_id: canvasId, deactivated: true },
+    {
+      account_id: accountId,
+      tenant_id: tenantId,
+      canvas_id: canvasId,
+      created: true,
+    },
+  ])("rejects a malformed answer %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(await deactivate("csrf", "operation-id-0001", "x@y.z")).toEqual({
       ok: false,
       error: "unavailable",
     });

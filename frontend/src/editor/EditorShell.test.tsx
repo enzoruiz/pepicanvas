@@ -58,10 +58,13 @@ describe("EditorShell", () => {
     expect(await screen.findByText("1920 × 1080")).toBeInTheDocument();
     expect(calls[1]).toMatchObject({ method: "GET", path: "/api/canvas" });
     expect(
-      screen.queryByRole("region", { name: "Activate a streamer" }),
+      screen.queryByRole("region", { name: "Manage streamers" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Activate" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Deactivate" }),
     ).not.toBeInTheDocument();
   });
 
@@ -70,7 +73,7 @@ describe("EditorShell", () => {
     render(<EditorShell />);
 
     expect(
-      await screen.findByRole("region", { name: "Activate a streamer" }),
+      await screen.findByRole("region", { name: "Manage streamers" }),
     ).toBeInTheDocument();
     expect(
       await screen.findByText(
