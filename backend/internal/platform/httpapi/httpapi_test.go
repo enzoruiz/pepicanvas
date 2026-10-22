@@ -40,25 +40,31 @@ type canvases struct {
 func (c *canvases) Load(_ context.Context, key canvas.Key) (canvas.Canvas, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if found, ok := c.byID[key]; ok {
+		return found, nil
+	}
 	if dimensions, ok := c.activated.Canvases()[key]; ok {
 		return canvas.Canvas{Key: key, Dimensions: dimensions}, nil
 	}
-	found, ok := c.byID[key]
-	if !ok {
-		return canvas.Canvas{}, canvas.ErrNotFound
-	}
-	return found, nil
+	return canvas.Canvas{}, canvas.ErrNotFound
 }
 
-// memberships reads the owner memberships activations created, as the
-// PostgreSQL memberships and tenants tables do, then the seeded ones.
+// memberships reads the owner memberships activations created and the
+// moderators added to activated tenants, with the tenant's current
+// subscription, as the PostgreSQL memberships and tenants tables do, then the
+// seeded ones.
 type memberships struct {
-	activated *subscriptiontest.MemoryStore
-	seeded    access.MembershipStore
+	activated  *subscriptiontest.MemoryStore
+	moderators *sync.Map // [2]string{tenantID, accountID} -> true
+	seeded     access.MembershipStore
 }
 
 func (m memberships) MembershipOf(ctx context.Context, account access.AccountID, tenantID string) (access.Membership, bool, error) {
-	if role, ok := m.activated.Membership(tenantID, account); ok {
+	role, ok := m.activated.Membership(tenantID, account)
+	if _, moderator := m.moderators.Load([2]string{tenantID, string(account)}); !ok && moderator {
+		role, ok = access.RoleModerator, true
+	}
+	if ok {
 		for _, tenant := range m.activated.Tenants() {
 			if tenant.ID == tenantID {
 				return access.Membership{TenantID: tenantID, Role: role, Subscription: tenant.Status}, true, nil
@@ -93,9 +99,11 @@ type env struct {
 	clock    *accesstest.Clock
 	canvases *canvases
 	subs     *subscriptiontest.MemoryStore
-	logs     *syncBuffer
-	handler  http.Handler
-	bodies   []string
+	// moderators are the moderator memberships of activated tenants.
+	moderators *sync.Map
+	logs       *syncBuffer
+	handler    http.Handler
+	bodies     []string
 }
 
 func newEnv(t *testing.T, limits httpapi.Limits) *env {
@@ -108,6 +116,8 @@ func newEnv(t *testing.T, limits httpapi.Limits) *env {
 		faults: &faults{},
 		subs:   subscriptiontest.NewMemoryStore(),
 		logs:   &syncBuffer{},
+
+		moderators: &sync.Map{},
 	}
 	e.canvases = &canvases{byID: map[canvas.Key]canvas.Canvas{}, activated: e.subs}
 	svc, err := access.NewService(e.store, e.store, e.hasher, access.WithClock(e.clock.Now))
@@ -116,9 +126,10 @@ func newEnv(t *testing.T, limits httpapi.Limits) *env {
 	}
 	handler, err := httpapi.New(httpapi.Config{
 		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults},
-		Memberships:   memberships{activated: e.subs, seeded: e.store},
+		Memberships:   memberships{activated: e.subs, moderators: e.moderators, seeded: e.store},
 		Canvases:      e.canvases,
 		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults},
+		Tenants:       faultyTenants{Tenants: e.subs, faults: e.faults},
 		AllowedOrigin: origin,
 		Logger:        slog.New(logging.NewHandler(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
 		Now:           e.clock.Now,

@@ -10,6 +10,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 // faults makes the API's account and subscription ports fail on demand.
@@ -17,6 +18,7 @@ type faults struct {
 	authenticate error
 	isOperator   error
 	signOut      error
+	ownedTenant  error
 }
 
 type faultyAccounts struct {
@@ -48,6 +50,18 @@ func (s faultySubscriptions) IsOperator(ctx context.Context, account access.Acco
 		return false, s.faults.isOperator
 	}
 	return s.Subscriptions.IsOperator(ctx, account)
+}
+
+type faultyTenants struct {
+	httpapi.Tenants
+	faults *faults
+}
+
+func (s faultyTenants) OwnedTenant(ctx context.Context, account access.AccountID) (subscription.Tenant, bool, error) {
+	if s.faults.ownedTenant != nil {
+		return subscription.Tenant{}, false, s.faults.ownedTenant
+	}
+	return s.Tenants.OwnedTenant(ctx, account)
 }
 
 func TestSignInThatFailsAfterCreatingTheSessionLeavesNoSession(t *testing.T) {

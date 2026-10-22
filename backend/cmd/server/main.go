@@ -1,5 +1,9 @@
 // Command server is the PepiCanvas backend: it migrates PostgreSQL, serves
-// the HTTP API, and serves the built frontend from one origin.
+// the HTTP API, and serves the built frontend from one origin. It also runs
+// the live-connection registry (TE-002) and the relay that applies each
+// confirmed access cut to it (US-003); cuts a stopped process left pending are
+// applied at start, before the server listens. Shutdown stops HTTP, then the
+// relay, then the registry.
 //
 // Usage:
 //
@@ -36,17 +40,20 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
+	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 const (
 	defaultListenAddr = "127.0.0.1:8080"
 	startupTimeout    = 15 * time.Second
-	// shutdownTimeout bounds HTTP draining; full process shutdown belongs to TE-016.
+	// shutdownTimeout bounds HTTP draining, and then the relay and registry
+	// stop; full process shutdown belongs to TE-016.
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -132,12 +139,28 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if err != nil {
 		return err
 	}
+	registry, err := revocation.NewRegistry(revocation.Config{Logger: logger})
+	if err != nil {
+		return err
+	}
+	subscriptions := postgres.NewSubscriptionStore(pool)
+	relay, err := subscription.NewCutRelay(subscription.RelayConfig{
+		Store:     subscriptions,
+		Cutter:    registry,
+		Logger:    logger,
+		Correlate: correlate,
+	})
+	if err != nil {
+		return err
+	}
 	api, err := httpapi.New(httpapi.Config{
 		Accounts: accounts,
 		// Activation writes the memberships and tenants rows MembershipOf reads.
-		Memberships:   store,
+		Memberships: store,
+		// Canvas mutations are rejected for a tenant that is not active.
 		Canvases:      postgres.NewCanvasStore(pool),
-		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(pool)),
+		Subscriptions: subscription.NewService(subscriptions, subscription.WithCommitted(relay.Notify)),
+		Tenants:       subscriptions,
 		AllowedOrigin: origin,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,
@@ -151,6 +174,23 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if dir := getenv("PEPICANVAS_STATIC_DIR"); dir != "" {
 		mux.Handle("/", staticFiles(dir))
 	}
+
+	if err := relay.Start(); err != nil {
+		return err
+	}
+	// Runs after the HTTP server drained, so no deactivation commits a cut
+	// the stopped relay would leave for the next start, and before the pool
+	// closes.
+	defer func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancelShutdown()
+		if err := relay.Close(shutdownCtx); err != nil {
+			logger.Error("cut relay stopped", slog.Any("error", err))
+		}
+		if err := registry.Close(shutdownCtx); err != nil {
+			logger.Error("registry stopped", slog.Any("error", err))
+		}
+	}()
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -180,6 +220,17 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// correlate carries a stored cut's correlation ID into the registry's context,
+// so its logs relate to the deactivation request. A missing or malformed ID
+// is dropped.
+func correlate(ctx context.Context, id string) context.Context {
+	parsed, err := correlation.Parse(id)
+	if err != nil {
+		return ctx
+	}
+	return correlation.WithID(ctx, parsed)
 }
 
 // staticFiles serves the built frontend. HTML documents are never cached, so

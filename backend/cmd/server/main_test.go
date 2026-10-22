@@ -481,3 +481,218 @@ func TestGrantOperatorRejectsBadInput(t *testing.T) {
 		}
 	}
 }
+
+func deactivate(t *testing.T, p *process, s session, op, email string) (*http.Response, string) {
+	t.Helper()
+	res := requestWith(t, p, http.MethodPost, "/api/deactivations", `{"operation_id":"`+op+`","email":"`+email+`"}`, s.cookie, s.csrf)
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res, string(body)
+}
+
+// count runs a single-value query.
+func count(t *testing.T, dsn, query string, args ...any) int64 {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var n int64
+	if err := conn.QueryRow(ctx, query, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return n
+}
+
+// logLine returns the first log record with msg whose correlation_id is id.
+func logLine(logs, msg, id string) map[string]any {
+	for _, line := range strings.Split(logs, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == msg && record["correlation_id"] == id {
+			return record
+		}
+	}
+	return nil
+}
+
+// US-003 S1, S4, S6, S13, S15: an operator deactivates a streamer over the
+// real server; the cut holds across a restart, the relay applies it, and
+// reactivation returns the same canvas.
+func TestOperatorDeactivatesAndReactivatesAcrossRestart(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	bob := registerAndSignIn(t, server, "op-process-bob-001", "bob@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	_, a := activate(t, server, operator, "op-process-act-a01", "alice@example.com")
+	_, b := activate(t, server, operator, "op-process-act-b01", "bob@example.com")
+	if a == nil || b == nil {
+		t.Fatal("activation failed")
+	}
+	// S5: the canvas keeps its objects through deactivation.
+	seed(t, dsn,
+		"INSERT INTO canvas_objects (tenant_id, canvas_id, object_id, kind, content, x, y, width, height, rotation, z) VALUES ('"+
+			a["tenant_id"].(string)+"', '"+a["canvas_id"].(string)+"', 'obj-1', 'text', 'kept', 5, 6, 100, 40, 0, 1)",
+		"UPDATE canvases SET revision = 1, next_z = 2 WHERE tenant_id = '"+a["tenant_id"].(string)+"'",
+	)
+	alicePath := "/api/tenants/" + a["tenant_id"].(string) + "/canvases/" + a["canvas_id"].(string)
+	bobPath := "/api/tenants/" + b["tenant_id"].(string) + "/canvases/" + b["canvas_id"].(string)
+	read := func(p *process, s session, path string) string {
+		t.Helper()
+		res := request(t, p, http.MethodGet, path, "", s.cookie)
+		body, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", path, res.StatusCode, body)
+		}
+		return string(body)
+	}
+	denied := func(p *process, s session, path, code string) {
+		t.Helper()
+		res := request(t, p, http.MethodGet, path, "", s.cookie)
+		body := decodeBody(t, res)
+		if res.StatusCode != http.StatusForbidden || body["error"] != code || len(body) != 2 {
+			t.Fatalf("GET %s = %d %v, want 403 %s", path, res.StatusCode, body, code)
+		}
+		if res.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("GET %s Cache-Control = %q", path, res.Header.Get("Cache-Control"))
+		}
+	}
+	own := read(server, alice, "/api/canvas")
+	if !strings.Contains(own, `"content":"kept"`) || !strings.Contains(own, `"width":1920`) {
+		t.Fatalf("own canvas = %s", own)
+	}
+	byTenant := read(server, alice, alicePath)
+	bobOwn := read(server, bob, "/api/canvas")
+
+	// S6: a non-operator, and an operator without the CSRF token, change nothing.
+	unchanged := func() {
+		t.Helper()
+		if n := count(t, dsn, "SELECT count(*) FROM tenants WHERE subscription_status = 'active'"); n != 2 {
+			t.Fatalf("active tenants = %d, want 2", n)
+		}
+		if n := count(t, dsn, "SELECT count(*) FROM subscription_deactivations"); n != 0 {
+			t.Fatalf("deactivation records = %d, want 0", n)
+		}
+		if n := count(t, dsn, "SELECT count(*) FROM access_cuts"); n != 0 {
+			t.Fatalf("access cuts = %d, want 0", n)
+		}
+	}
+	if res, body := deactivate(t, server, alice, "op-process-deny-01", "bob@example.com"); res.StatusCode != http.StatusForbidden || !strings.Contains(body, `"error":"forbidden"`) {
+		t.Fatalf("non-operator deactivation = %d %s", res.StatusCode, body)
+	}
+	if res, body := deactivate(t, server, session{cookie: operator.cookie}, "op-process-deny-02", "alice@example.com"); res.StatusCode != http.StatusForbidden || !strings.Contains(body, `"error":"forbidden"`) {
+		t.Fatalf("deactivation without CSRF = %d %s", res.StatusCode, body)
+	}
+	unchanged()
+
+	res, first := deactivate(t, server, operator, "op-process-deact-01", "alice@example.com")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("deactivate = %d %s", res.StatusCode, first)
+	}
+	correlationID := res.Header.Get("X-Correlation-ID")
+	var result map[string]any
+	if err := json.Unmarshal([]byte(first), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["account_id"] != a["account_id"] || result["tenant_id"] != a["tenant_id"] || result["canvas_id"] != a["canvas_id"] || result["deactivated"] != true || len(result) != 4 {
+		t.Fatalf("deactivation = %v, activation %v", result, a)
+	}
+	// S11: the replay is byte-identical; a new operation changes nothing.
+	if res, again := deactivate(t, server, operator, "op-process-deact-01", "alice@example.com"); res.StatusCode != http.StatusOK || again != first {
+		t.Fatalf("replay = %d %s, want %s", res.StatusCode, again, first)
+	}
+	if res, again := deactivate(t, server, operator, "op-process-deact-02", "alice@example.com"); res.StatusCode != http.StatusOK || !strings.Contains(again, `"deactivated":false`) {
+		t.Fatalf("second deactivation = %d %s", res.StatusCode, again)
+	}
+
+	// S1: the cut is effective at the answer.
+	denied(server, alice, "/api/canvas", "subscription_inactive")
+	denied(server, alice, alicePath, "forbidden")
+	if got := read(server, bob, "/api/canvas"); got != bobOwn {
+		t.Fatalf("bob canvas = %s, want %s", got, bobOwn)
+	}
+	read(server, bob, bobPath)
+	// S13: the stored record and cut keep the request correlation, and the
+	// relay applies the cut.
+	if n := count(t, dsn, "SELECT count(*) FROM subscription_deactivations WHERE operation_id = 'op-process-deact-01' AND correlation_id = $1", correlationID); n != 1 {
+		t.Fatalf("deactivation records with the correlation = %d", n)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for count(t, dsn, "SELECT count(*) FROM access_cuts WHERE tenant_id = $1 AND correlation_id = $2 AND applied_at IS NOT NULL", a["tenant_id"], correlationID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the access cut was not applied\n%s", server.logs)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	// S4: a restart does not restore access.
+	server = start(t, bin, env...)
+	if n := count(t, dsn, "SELECT count(*) FROM tenants WHERE tenant_id = $1 AND subscription_status = 'inactive'", a["tenant_id"]); n != 1 {
+		t.Fatal("tenant A is not inactive after the restart")
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM access_cuts WHERE applied_at IS NOT NULL"); n != 1 {
+		t.Fatalf("applied cuts after the restart = %d, want 1", n)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM access_cuts"); n != 1 {
+		t.Fatalf("cuts after the restart = %d, want 1", n)
+	}
+	denied(server, alice, "/api/canvas", "subscription_inactive")
+	denied(server, alice, alicePath, "forbidden")
+	read(server, bob, bobPath)
+
+	// S5: reactivation is the activation and returns the same canvas.
+	_, again := activate(t, server, operator, "op-process-react-1", "alice@example.com")
+	if again == nil || again["tenant_id"] != a["tenant_id"] || again["canvas_id"] != a["canvas_id"] || again["created"] != false {
+		t.Fatalf("reactivation = %v, activation %v", again, a)
+	}
+	if got := read(server, alice, "/api/canvas"); got != own {
+		t.Fatalf("own canvas after reactivation = %s, want %s", got, own)
+	}
+	if got := read(server, alice, alicePath); got != byTenant {
+		t.Fatalf("tenant canvas after reactivation = %s, want %s", got, byTenant)
+	}
+	server.stop(t)
+	logs += server.logs.String()
+
+	confirmed := logLine(logs, "deactivation confirmed", correlationID)
+	if confirmed == nil || confirmed["tenant_id"] != a["tenant_id"] || confirmed["account_id"] != a["account_id"] || confirmed["canvas_id"] != a["canvas_id"] {
+		t.Fatalf("deactivation log = %v\n%s", confirmed, logs)
+	}
+	for _, msg := range []string{"access cut confirmed", "access cut applied"} {
+		if record := logLine(logs, msg, correlationID); record == nil || record["tenant_id"] != a["tenant_id"] {
+			t.Fatalf("%s log = %v\n%s", msg, record, logs)
+		}
+	}
+	for name, s := range map[string]string{
+		"password":       "correct horse battery",
+		"operator email": "operator@example.com",
+		"streamer email": "alice@example.com",
+		"other email":    "bob@example.com",
+		"session token":  strings.TrimPrefix(operator.cookie, "__Host-pcs="),
+		"CSRF token":     operator.csrf,
+		"streamer token": strings.TrimPrefix(alice.cookie, "__Host-pcs="),
+		"streamer CSRF":  alice.csrf,
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}

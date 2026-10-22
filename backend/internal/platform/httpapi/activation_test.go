@@ -203,13 +203,13 @@ func TestStreamersReadOnlyTheirOwnCanvas(t *testing.T) {
 		t.Fatalf("owner tenant canvas route = %d", res.StatusCode)
 	}
 
-	// A never-activated account, an operator, and an inactive streamer get
-	// the same denial as the tenant canvas route.
+	// A never-activated account and an operator get the same denial as the
+	// tenant canvas route; the owner of an inactive tenant learns why (US-003).
 	carol := e.signIn("carol@example.com")
 	expectError(t, e.do(http.MethodGet, "/api/canvas", nil, withSession(carol.token)), http.StatusForbidden, "forbidden")
 	expectError(t, e.do(http.MethodGet, "/api/canvas", nil, withSession(op.token)), http.StatusForbidden, "forbidden")
 	e.subs.SetStatus(b["tenant_id"].(string), access.SubscriptionInactive)
-	expectError(t, e.do(http.MethodGet, "/api/canvas", nil, withSession(bob.token)), http.StatusForbidden, "forbidden")
+	expectError(t, e.do(http.MethodGet, "/api/canvas", nil, withSession(bob.token)), http.StatusForbidden, "subscription_inactive")
 	expectError(t, e.do(http.MethodGet, "/api/canvas", nil), http.StatusUnauthorized, "unauthorized")
 }
 
