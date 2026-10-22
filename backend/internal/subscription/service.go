@@ -17,8 +17,9 @@ import (
 
 // Service activates streamers and resolves each streamer's canvas.
 type Service struct {
-	store Store
-	now   func() time.Time
+	store     Store
+	now       func() time.Time
+	committed func()
 }
 
 // Option configures a Service.
@@ -27,6 +28,13 @@ type Option func(*Service)
 // WithClock sets the time source used for operation retention.
 func WithClock(now func() time.Time) Option {
 	return func(s *Service) { s.now = now }
+}
+
+// WithCommitted sets a hook that runs after each commit that wrote an access
+// cut, such as CutRelay.Notify. It must not block: the deactivation answers
+// once the hook returns.
+func WithCommitted(hook func()) Option {
+	return func(s *Service) { s.committed = hook }
 }
 
 // NewService builds the service.
@@ -153,6 +161,11 @@ const anyTenant = "any-tenant"
 // its access version, and stores one pending access cut in the same
 // transaction; deactivating an inactive tenant changes nothing. A retry under
 // the same operation ID returns the first answer while it is retained.
+//
+// The access cut is effective at the commit: from then on every new read and
+// mutation is rejected by the stored status. Live connections are cut by the
+// relay the WithCommitted hook wakes; the answer does not wait for it, and a
+// cut the relay has not applied stays pending until one does.
 func (s *Service) Deactivate(ctx context.Context, request DeactivateRequest) (Deactivation, error) {
 	email, ok := access.NormalizeEmail(request.Email)
 	if !ok || !access.ValidOperationID(request.OperationID) {
@@ -177,7 +190,9 @@ func (s *Service) deactivate(ctx context.Context, request DeactivateRequest, ema
 	notBefore := now.Add(-ActivationRetention)
 
 	var result Deactivation
+	wroteCut := false
 	err := s.store.InTx(ctx, func(tx Tx) error {
+		wroteCut = false
 		// The grant stays locked until commit, so the decision still holds
 		// when the deactivation is confirmed.
 		operator, err := tx.IsOperator(ctx, request.OperatorID)
@@ -224,6 +239,7 @@ func (s *Service) deactivate(ctx context.Context, request DeactivateRequest, ema
 			if err := tx.RecordCut(ctx, cut); err != nil {
 				return fmt.Errorf("subscription: record cut: %w", err)
 			}
+			wroteCut = true
 		}
 		if err := access.Check(access.OperatorRequest(operator, tenant.ID, access.ActionDeactivate)); err != nil {
 			return err
@@ -245,6 +261,9 @@ func (s *Service) deactivate(ctx context.Context, request DeactivateRequest, ema
 	})
 	if err != nil {
 		return Deactivation{}, err
+	}
+	if wroteCut && s.committed != nil {
+		s.committed()
 	}
 	return result, nil
 }

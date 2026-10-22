@@ -111,7 +111,8 @@ func (m *MemoryStore) SetStatus(tenantID string, status access.SubscriptionStatu
 	m.state.tenants[tenantID] = tenant
 }
 
-// FailOnce makes the next call of step (a Tx method name, or "commit") fail with err.
+// FailOnce makes the next call of step (a Tx method name, "commit",
+// "PendingCuts", or "SettleCut") fail with err.
 func (m *MemoryStore) FailOnce(step string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -178,10 +179,26 @@ func (m *MemoryStore) Cuts() []subscription.PendingCut {
 	return cuts
 }
 
+// AppliedAt returns when the cut was settled, or false while it is pending
+// or unknown.
+func (m *MemoryStore) AppliedAt(id int64) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, cut := range m.state.cuts {
+		if cut.ID == id && !cut.appliedAt.IsZero() {
+			return cut.appliedAt, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // PendingCuts returns up to limit committed cuts not yet settled, oldest first.
 func (m *MemoryStore) PendingCuts(_ context.Context, limit int) ([]subscription.PendingCut, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.fail("PendingCuts"); err != nil {
+		return nil, err
+	}
 	var pending []subscription.PendingCut
 	for _, cut := range m.state.cuts {
 		if len(pending) == limit {
@@ -198,6 +215,9 @@ func (m *MemoryStore) PendingCuts(_ context.Context, limit int) ([]subscription.
 func (m *MemoryStore) SettleCut(_ context.Context, id int64, at time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.fail("SettleCut"); err != nil {
+		return err
+	}
 	for i, cut := range m.state.cuts {
 		if cut.ID == id && cut.appliedAt.IsZero() {
 			m.state.cuts[i].appliedAt = at
