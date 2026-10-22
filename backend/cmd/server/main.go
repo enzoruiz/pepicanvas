@@ -1,5 +1,7 @@
 // Command server is the PepiCanvas backend: it migrates PostgreSQL, serves
-// the HTTP API, and serves the built frontend from one origin.
+// the HTTP API, and serves the built frontend from one origin. In the same
+// process it runs the outbox publisher, which delivers committed canvas
+// mutations to the realtime hub (TE-012).
 //
 // Usage:
 //
@@ -36,18 +38,25 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
+	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 const (
 	defaultListenAddr = "127.0.0.1:8080"
 	startupTimeout    = 15 * time.Second
-	// shutdownTimeout bounds HTTP draining; full process shutdown belongs to TE-016.
+	// shutdownTimeout bounds HTTP draining and closing the outbox publisher
+	// and the realtime hub; full process shutdown belongs to TE-016.
 	shutdownTimeout = 5 * time.Second
+	// outboxOperationPrefix starts the operation ID of every command
+	// outbox.HubSink submits (outbox-<record ID>).
+	outboxOperationPrefix = "outbox-"
 )
 
 func main() {
@@ -127,6 +136,22 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 
+	// The hub only receives what the outbox publisher delivers: mutations
+	// PostgreSQL already committed after TE-001 authorized them. No client
+	// submits to it yet (US-017), so it refuses every other command.
+	hub, err := realtime.NewHub(realtime.Config{Authorize: authorizeOutbox})
+	if err != nil {
+		return err
+	}
+	publisher, err := outbox.NewPublisher(outbox.Config{
+		Store:  postgres.NewOutboxStore(pool),
+		Sink:   outbox.NewHubSink(hub),
+		Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	store := postgres.NewAccountStore(pool)
 	accounts, err := access.NewService(store, store, password.Argon2id{})
 	if err != nil {
@@ -136,7 +161,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Accounts: accounts,
 		// Activation writes the memberships and tenants rows MembershipOf reads.
 		Memberships:   store,
-		Canvases:      postgres.NewCanvasStore(pool),
+		Canvases:      postgres.NewCanvasStore(pool, postgres.WithCommitted(func(canvas.Key) { publisher.Notify() })),
 		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(pool)),
 		AllowedOrigin: origin,
 		Logger:        logger,
@@ -164,21 +189,50 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
+	// Records left pending by an earlier process are delivered on the first pass.
+	if err := publisher.Start(); err != nil {
+		_ = listener.Close()
+		return err
+	}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
 	logger.Info("listening", slog.String("addr", listener.Addr().String()))
 
+	var serveErr error
 	select {
 	case err := <-served:
-		return fmt.Errorf("serve: %w", err)
+		serveErr = fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+	if serveErr == nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			serveErr = fmt.Errorf("shutdown: %w", err)
+		}
+	}
+	// No request can commit any more, so the publisher stops after its last
+	// delivery and the hub after the commands it queued. Undelivered records
+	// stay pending for the next start.
+	if err := publisher.Close(shutdownCtx); err != nil {
+		logger.Error("outbox publisher close failed", slog.String("error", err.Error()))
+	}
+	if err := hub.Close(shutdownCtx); err != nil {
+		logger.Error("realtime hub close failed", slog.String("error", err.Error()))
+	}
+	if serveErr != nil {
+		return serveErr
 	}
 	logger.Info("stopped")
+	return nil
+}
+
+// authorizeOutbox accepts only commands submitted by outbox.HubSink, whose
+// mutations were authorized before they committed.
+func authorizeOutbox(_ context.Context, command realtime.Command) error {
+	if !strings.HasPrefix(command.OperationID, outboxOperationPrefix) {
+		return access.ErrAccessDenied
+	}
 	return nil
 }
 
