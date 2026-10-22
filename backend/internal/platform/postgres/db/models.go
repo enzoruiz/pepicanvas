@@ -86,6 +86,32 @@ type CanvasOutbox struct {
 	Outcome       pgtype.Text
 }
 
+type Invitation struct {
+	InvitationID string
+	TenantID     string
+	TokenHash    []byte
+	CreatedBy    string
+	CreatedAt    pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+	RevokedAt    pgtype.Timestamptz
+	AcceptedAt   pgtype.Timestamptz
+	AcceptedBy   pgtype.Text
+}
+
+type InvitationOperation struct {
+	OperationID    string
+	Kind           string
+	OwnerAccountID string
+	Fingerprint    []byte
+	TenantID       string
+	InvitationID   string
+	CreatedAt      pgtype.Timestamptz
+	ExpiresAt      pgtype.Timestamptz
+	Status         pgtype.Text
+	CorrelationID  pgtype.Text
+	AcceptedAt     pgtype.Timestamptz
+}
+
 type MediaAsset struct {
 	TenantID          string
 	CanvasID          string

@@ -198,6 +198,28 @@ func readDeactivationSchema(t *testing.T, pool *pgxpool.Pool) deactivationSchema
 	return s
 }
 
+// invitationSchema reports what 00009 adds and the invitations it would lose.
+type invitationSchema struct {
+	version          int64
+	invitationsTable bool
+	operationsTable  bool
+	invitations      int
+}
+
+func readInvitationSchema(t *testing.T, pool *pgxpool.Pool) invitationSchema {
+	t.Helper()
+	s := invitationSchema{version: schemaVersion(t, pool)}
+	err := pool.QueryRow(context.Background(), `SELECT to_regclass('invitations') IS NOT NULL, to_regclass('invitation_operations') IS NOT NULL`).
+		Scan(&s.invitationsTable, &s.operationsTable)
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	if s.invitationsTable {
+		s.invitations = count(t, pool, "SELECT count(*) FROM invitations")
+	}
+	return s
+}
+
 func activatedRows(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var rows string
@@ -301,5 +323,50 @@ func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
 	exec(t, pool, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())")
 	if _, err := pool.Exec(ctx, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())"); err == nil {
 		t.Fatal("a second cut of the same tenant version was accepted")
+	}
+}
+
+func TestInvitationRollbackRefusesToLoseInvitations(t *testing.T) {
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, pgtest.Start(t).DSN(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	provider := migrationProvider(t, pool)
+	// The test exercises 00009 as the latest applied migration.
+	if _, err := provider.DownTo(ctx, 9); err != nil {
+		t.Fatalf("DownTo(9): %v", err)
+	}
+
+	exec(t, pool, "INSERT INTO accounts (account_id, email, password_hash, created_at) VALUES ($1, $1 || '@example.com', 'stub', now())", streamerAccount)
+	exec(t, pool, "INSERT INTO tenants (tenant_id, subscription_status, owner_account_id, canvas_id) VALUES ('invited-tenant', 'active', $1, 'invited-canvas')", streamerAccount)
+	exec(t, pool, `INSERT INTO invitations (invitation_id, tenant_id, token_hash, created_by, created_at, expires_at)
+		VALUES ('0123456789abcdef0123456789abcdef', 'invited-tenant', sha256('pci_rollback'), $1, now(), now() + interval '168 hours')`, streamerAccount)
+	intact := invitationSchema{version: 9, invitationsTable: true, operationsTable: true, invitations: 1}
+
+	_, err = provider.DownTo(ctx, 8)
+	if err == nil || !strings.Contains(err.Error(), "00009_invitations down refused: 1 invitation(s)") {
+		t.Fatalf("rollback error = %v, want the refusal", err)
+	}
+	if got := readInvitationSchema(t, pool); got != intact {
+		t.Fatalf("after the refused rollback %+v, want %+v", got, intact)
+	}
+
+	exec(t, pool, "DELETE FROM invitations")
+	if _, err := provider.DownTo(ctx, 8); err != nil {
+		t.Fatalf("rollback without invitations: %v", err)
+	}
+	if got, want := readInvitationSchema(t, pool), (invitationSchema{version: 8}); got != want {
+		t.Fatalf("after the rollback %+v, want %+v", got, want)
+	}
+	if _, err := provider.UpTo(ctx, 9); err != nil {
+		t.Fatalf("UpTo(9) after the rollback: %v", err)
+	}
+	if got, want := readInvitationSchema(t, pool), (invitationSchema{version: 9, invitationsTable: true, operationsTable: true}); got != want {
+		t.Fatalf("after re-applying %+v, want %+v", got, want)
 	}
 }
