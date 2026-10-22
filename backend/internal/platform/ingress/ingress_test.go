@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -194,6 +195,10 @@ func TestConfigurationIsRejectedWhenAControlWouldBeWeakened(t *testing.T) {
 		nil, {}, {"*"}, {"null"}, {""}, {"https://*.pepicanvas.test"}, {"https://pepicanvas.test/"},
 		{"https://pepicanvas.test/editor"}, {"https://user@pepicanvas.test"}, {"ftp://pepicanvas.test"},
 		{"pepicanvas.test"}, {"https://pepicanvas.test?x=1"}, {origin, "*"},
+		// Browsers send origins lower-cased, without a default port, and in
+		// ASCII; any other spelling could never match and only hides a typo.
+		{"https://PepiCanvas.test"}, {"https://pepicanvas.test:443"}, {"http://pepicanvas.test:80"},
+		{"https://pepicanvas.test:"}, {"https://bücher.test"},
 	} {
 		config := valid
 		config.AllowedOrigins = origins
@@ -561,6 +566,46 @@ func TestUpgradeChecksOriginAndLimitsBeforeTheHandler(t *testing.T) {
 	if res := e.do(http.MethodGet, "/api/socket", upgrade(), withSession(sessionA)); res.StatusCode != http.StatusNoContent {
 		t.Fatalf("A after the window: %d", res.StatusCode)
 	}
+}
+
+func TestRejectedUpgradesDoNotFillTheSessionTable(t *testing.T) {
+	limits := generous
+	limits.UpgradesPerIP = ratelimit.Rate{Limit: 30, Window: time.Minute}
+	limits.UpgradesPerSession = ratelimit.Rate{Limit: 10, Window: time.Minute}
+	e := newEnv(t, limits)
+	// One address cycles invented session cookies; once its address budget is
+	// spent, its attempts must not take slots in the shared session table.
+	for i := range 100_000 {
+		e.do(http.MethodGet, "/api/socket", upgrade(), fromIP("198.51.100.1"), withSession(fmt.Sprintf("pcs_attacker%07d", i)))
+	}
+	if res := e.do(http.MethodGet, "/api/socket", upgrade(), fromIP("203.0.113.5"), withSession(sessionB)); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("victim on another address refused with %d", res.StatusCode)
+	}
+	if got := count(e.ingress.Snapshot(), ingress.SurfaceWebSocket, ingress.ReasonLimiterFull); got != 0 {
+		t.Fatalf("limiter_full = %d, want 0", got)
+	}
+}
+
+func TestOriginAndCSRFHostileVariants(t *testing.T) {
+	e := newEnv(t, generous)
+	for name, opts := range map[string][]option{
+		"dup good+bad":  {func(r *http.Request) { r.Header.Add("Origin", "https://evil.test") }},
+		"dup good+good": {func(r *http.Request) { r.Header.Add("Origin", origin) }},
+		"comma list":    {withOrigin(origin + ", https://evil.test")},
+		"punycode":      {withOrigin("https://xn--pepicanvas-test.test")},
+	} {
+		if res := e.do(http.MethodPost, "/api/open", opts...); res.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: %d", name, res.StatusCode)
+		}
+	}
+	two := ingress.SessionCookie + "=" + sessionA + "; " + ingress.SessionCookie + "=" + sessionB
+	if res := e.do(http.MethodPost, "/api/things/1", func(r *http.Request) { r.Header.Set("Cookie", two) }, withCSRF(csrfOf(sessionB))); res.StatusCode != http.StatusForbidden {
+		t.Errorf("second cookie's CSRF accepted: %d", res.StatusCode)
+	}
+	for _, p := range []string{"/api/%75nclassified", "//api/unclassified", "/api/things/../unclassified"} {
+		e.do(http.MethodPost, p)
+	}
+	e.expectCalls(0)
 }
 
 func TestRejectionsAreLoggedWithReasonRouteAndCorrelationOnly(t *testing.T) {

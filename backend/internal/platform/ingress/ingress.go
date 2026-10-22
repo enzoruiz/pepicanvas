@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
@@ -179,10 +180,26 @@ func validateOrigin(origin string) error {
 	u, err := url.Parse(origin)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
 		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || origin != u.Scheme+"://"+u.Host ||
-		strings.Contains(u.Host, "*") {
+		strings.Contains(u.Host, "*") || !canonicalHost(u) {
 		return fmt.Errorf("ingress: allowed origin must be exactly scheme://host[:port]")
 	}
 	return nil
+}
+
+// canonicalHost reports whether u's host is spelled the way a browser sends
+// it in Origin: lower-case ASCII, without an empty or default port. Any other
+// spelling could never match and would only hide a configuration typo.
+func canonicalHost(u *url.URL) bool {
+	if u.Host != strings.ToLower(u.Host) || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	for _, c := range u.Host {
+		if c > unicode.MaxASCII {
+			return false
+		}
+	}
+	port := u.Port()
+	return !(u.Scheme == "https" && port == "443") && !(u.Scheme == "http" && port == "80")
 }
 
 // Protect guards mux: every answer carries the security headers, every
@@ -276,14 +293,20 @@ func (in *Ingress) Upgrade(h http.Handler) http.Handler {
 			in.reject(w, r, SurfaceWebSocket, ReasonNotWebSocket, route)
 			return
 		}
-		// The session budget goes first, so a session-limited attempt does not
-		// spend the address budget other streamers share.
+		// The session budget is only peeked before the address budget, so a
+		// session-limited attempt spends neither, and an attempt the address
+		// budget refuses never takes a slot in the shared session table.
+		sessionKey := ""
 		if cookie, err := r.Cookie(SessionCookie); err == nil {
-			if !in.allow(w, r, in.upgradesPerSession, SessionKey(cookie.Value), SurfaceWebSocket, ReasonRateSession, route) {
+			sessionKey = SessionKey(cookie.Value)
+			if !in.admit(w, r, in.upgradesPerSession.Peek(sessionKey), SurfaceWebSocket, ReasonRateSession, route) {
 				return
 			}
 		}
 		if !in.allow(w, r, in.upgradesPerIP, ClientIP(r), SurfaceWebSocket, ReasonRateIP, route) {
+			return
+		}
+		if sessionKey != "" && !in.allow(w, r, in.upgradesPerSession, sessionKey, SurfaceWebSocket, ReasonRateSession, route) {
 			return
 		}
 		h.ServeHTTP(w, r)
@@ -317,7 +340,12 @@ func (in *Ingress) Allow(w http.ResponseWriter, r *http.Request, limiter *rateli
 }
 
 func (in *Ingress) allow(w http.ResponseWriter, r *http.Request, limiter *ratelimit.Limiter, key string, surface Surface, reason Reason, route string) bool {
-	res := limiter.Check(key)
+	return in.admit(w, r, limiter.Check(key), surface, reason, route)
+}
+
+// admit answers 429 for a denied limiter result and reports whether the
+// request may continue.
+func (in *Ingress) admit(w http.ResponseWriter, r *http.Request, res ratelimit.Result, surface Surface, reason Reason, route string) bool {
 	if res.Allowed {
 		return true
 	}

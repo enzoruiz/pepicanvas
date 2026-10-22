@@ -81,6 +81,36 @@ func (l *Limiter) Check(key string) Result {
 	return Result{Allowed: true}
 }
 
+// Peek reports what Check would answer for key without recording an attempt
+// or taking a slot in the key table.
+func (l *Limiter) Peek(key string) Result {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if w, ok := l.keys[key]; ok && now.Before(w.start.Add(l.window)) {
+		if w.count >= l.limit {
+			return Result{RetryAfter: w.start.Add(l.window).Sub(now)}
+		}
+		return Result{Allowed: true}
+	} else if ok {
+		// An expired entry is replaced in place, so it needs no new slot.
+		return Result{Allowed: true}
+	}
+	if len(l.keys) >= l.maxKeys && !l.anyExpired(now) {
+		return Result{RetryAfter: l.window, Full: true}
+	}
+	return Result{Allowed: true}
+}
+
+func (l *Limiter) anyExpired(now time.Time) bool {
+	for _, w := range l.keys {
+		if !now.Before(w.start.Add(l.window)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *Limiter) evictExpired(now time.Time) {
 	for key, w := range l.keys {
 		if !now.Before(w.start.Add(l.window)) {
