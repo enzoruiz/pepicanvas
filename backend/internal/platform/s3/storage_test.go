@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -357,6 +359,57 @@ func TestObjectStore(t *testing.T) {
 			t.Fatalf("paged keys = %v, want %v", got, want)
 		}
 	})
+
+	t.Run("List stopped before the last key leaves no listing goroutine", func(t *testing.T) {
+		// A limit past one S3 page stops the listing while minio still holds
+		// keys of the next page to send.
+		const limit = 1001
+		var wg sync.WaitGroup
+		slots := make(chan struct{}, 16)
+		errs := make(chan error, limit+10)
+		for i := range limit + 10 {
+			slots <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-slots }()
+				if _, err := server.Client.PutObject(ctx, s3test.Bucket, fmt.Sprintf("bulk/%04d", i), strings.NewReader("x"), 1, minio.PutObjectOptions{}); err != nil {
+					errs <- err
+				}
+			})
+		}
+		wg.Wait()
+		close(errs)
+		if err := <-errs; err != nil {
+			t.Fatalf("raw put: %v", err)
+		}
+		for range 3 {
+			if objects, err := storage.List(ctx, "", limit); err != nil || len(objects) != limit {
+				t.Fatalf("List(%d) = %d objects, %v", limit, len(objects), err)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			leaked := listingGoroutines()
+			if leaked == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d listing goroutines still running after List returned", leaked)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+}
+
+// listingGoroutines counts goroutines started by minio's ListObjects.
+func listingGoroutines() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "minio-go/v7.(*Client).ListObjects.func")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }
 
 func TestOpenFailsWithoutEchoingCredentials(t *testing.T) {

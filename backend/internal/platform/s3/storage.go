@@ -216,10 +216,17 @@ func (s *Storage) List(ctx context.Context, after string, limit int) ([]media.Ob
 		return nil, fmt.Errorf("%w: list limit must be positive", media.ErrInvalid)
 	}
 	listCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	objects := make([]media.Object, 0, min(limit, maxListPage))
 	options := minio.ListObjectsOptions{Recursive: true, StartAfter: after, MaxKeys: min(limit, maxListPage)}
-	for info := range s.client.ListObjects(listCtx, s.bucket, options) {
+	listing := s.client.ListObjects(listCtx, s.bucket, options)
+	// minio's listing goroutine blocks on its last send once cancelled, so
+	// drain the channel until it closes.
+	defer func() {
+		cancel()
+		for range listing {
+		}
+	}()
+	for info := range listing {
 		if info.Err != nil {
 			return nil, fmt.Errorf("s3: list objects: %w", info.Err)
 		}
