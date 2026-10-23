@@ -203,6 +203,19 @@ type Store interface {
 	// Abandoned returns the Abandon committed under operationID while that
 	// operation is retained, or ErrNotFound when no such Abandon is retained.
 	Abandoned(ctx context.Context, key CanvasKey, operationID string) (Abandon, error)
+	// Inventory counts the assets of every canvas of a tenant, one entry per
+	// state in InventoryStates order, aged by the time since each asset
+	// entered its state.
+	Inventory(ctx context.Context, tenantID string) ([]StateInventory, error)
+	// HeldKeys returns which of up to MaxScanKeys storage keys an asset of
+	// any tenant, in any state, still holds.
+	HeldKeys(ctx context.Context, storageKeys []string) (map[string]bool, error)
+	// AssetExists reports whether the owner's asset exists in any state.
+	AssetExists(ctx context.Context, owner Owner) (bool, error)
+	// ReadyPage returns up to limit ready assets of every tenant, ordered by
+	// tenant, canvas, and asset, strictly after the owner after. The zero
+	// Owner starts from the beginning.
+	ReadyPage(ctx context.Context, after Owner, limit int) ([]StoredAsset, error)
 }
 
 // Fingerprint identifies the intent of a command, so a retry under the same
