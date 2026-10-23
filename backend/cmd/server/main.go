@@ -43,6 +43,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
@@ -176,6 +177,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 	subscriptions := postgres.NewSubscriptionStore(pool)
+	invitations := postgres.NewInvitationStore(pool)
 	relay, err := subscription.NewCutRelay(subscription.RelayConfig{
 		Store:     subscriptions,
 		Cutter:    registry,
@@ -193,9 +195,11 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Canvases:      postgres.NewCanvasStore(pool, postgres.WithCommitted(func(canvas.Key) { publisher.Notify() })),
 		Subscriptions: subscription.NewService(subscriptions, subscription.WithCommitted(relay.Notify)),
 		Tenants:       subscriptions,
-		Ingress:       in,
-		Logger:        logger,
-		Limits:        httpapi.DefaultLimits,
+		// The store clock keeps PostgreSQL's precision, so replayed answers match.
+		Invitations: invitation.NewService(invitations, invitation.WithClock(invitations.Now)),
+		Ingress:     in,
+		Logger:      logger,
+		Limits:      httpapi.DefaultLimits,
 	})
 	if err != nil {
 		return err

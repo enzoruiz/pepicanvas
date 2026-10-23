@@ -1,10 +1,12 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
 // (US-001), the manual streamer activation and own-canvas read (US-002), the
-// operator deactivation (US-003), and the owner-only canvas resize (US-007).
-// Every response is private and correlated, and every route is guarded by the
-// ingress (TE-014): unsafe methods need the exact Origin, session mutations
-// need the session's CSRF token before the session is read, and the abuse
-// limits answer 429 (CTRL-WEB-01, CTRL-RATE-01).
+// operator deactivation (US-003), the owner's moderator invitations (US-004),
+// and the owner-only canvas resize (US-007). Every response is private and
+// correlated, and every route is guarded by the ingress (TE-014): unsafe
+// methods need the exact Origin, session mutations need the session's CSRF
+// token before the session is read, and the abuse limits answer 429
+// (CTRL-WEB-01, CTRL-RATE-01). Invitation tokens arrive only in request bodies
+// and never appear in a response or a log line.
 package httpapi
 
 import (
@@ -20,6 +22,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
@@ -43,19 +46,22 @@ const (
 // Rate is a number of attempts allowed per window.
 type Rate = ratelimit.Rate
 
-// Limits are the abuse limits of the sign-in and registration routes,
-// answered through the ingress. Addresses come from the TCP peer.
+// Limits are the abuse limits of the sign-in, registration, and invitation
+// creation routes, answered through the ingress. Addresses come from the TCP
+// peer; invitation creation is keyed by the session's account.
 type Limits struct {
-	SignInPerAccount Rate
-	SignInPerIP      Rate
-	RegisterPerIP    Rate
+	SignInPerAccount      Rate
+	SignInPerIP           Rate
+	RegisterPerIP         Rate
+	InvitationsPerAccount Rate
 }
 
 // DefaultLimits are the pilot limits.
 var DefaultLimits = Limits{
-	SignInPerAccount: Rate{Limit: 10, Window: 15 * time.Minute},
-	SignInPerIP:      Rate{Limit: 50, Window: 15 * time.Minute},
-	RegisterPerIP:    Rate{Limit: 10, Window: time.Hour},
+	SignInPerAccount:      Rate{Limit: 10, Window: 15 * time.Minute},
+	SignInPerIP:           Rate{Limit: 50, Window: 15 * time.Minute},
+	RegisterPerIP:         Rate{Limit: 10, Window: time.Hour},
+	InvitationsPerAccount: Rate{Limit: 20, Window: time.Hour},
 }
 
 // Accounts is the account and session service.
@@ -86,6 +92,13 @@ type Tenants interface {
 	OwnedTenant(ctx context.Context, account access.AccountID) (subscription.Tenant, bool, error)
 }
 
+// Invitations is the moderator invitation service.
+type Invitations interface {
+	Create(ctx context.Context, request invitation.CreateRequest) (invitation.Invitation, error)
+	List(ctx context.Context, owner access.AccountID) ([]invitation.Invitation, error)
+	Revoke(ctx context.Context, request invitation.RevokeRequest) (invitation.Revocation, error)
+}
+
 // Config wires the API.
 type Config struct {
 	Accounts      Accounts
@@ -93,6 +106,7 @@ type Config struct {
 	Canvases      CanvasStore
 	Subscriptions Subscriptions
 	Tenants       Tenants
+	Invitations   Invitations
 	// Ingress guards every route; it holds the allowed origins.
 	Ingress *ingress.Ingress
 	Logger  *slog.Logger
@@ -103,10 +117,11 @@ type Config struct {
 
 type api struct {
 	Config
-	responder        httpx.Responder
-	signInPerAccount *ratelimit.Limiter
-	signInPerIP      *ratelimit.Limiter
-	registerPerIP    *ratelimit.Limiter
+	responder             httpx.Responder
+	signInPerAccount      *ratelimit.Limiter
+	signInPerIP           *ratelimit.Limiter
+	registerPerIP         *ratelimit.Limiter
+	invitationsPerAccount *ratelimit.Limiter
 }
 
 // New validates the configuration and returns the API handler.
@@ -114,10 +129,10 @@ func New(config Config) (http.Handler, error) {
 	if config.Ingress == nil {
 		return nil, errors.New("httpapi: ingress is required")
 	}
-	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil {
-		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, and tenants are required")
+	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil || config.Invitations == nil {
+		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, tenants, and invitations are required")
 	}
-	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP} {
+	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP, config.Limits.InvitationsPerAccount} {
 		if rate.Limit < 1 || rate.Window <= 0 {
 			return nil, errors.New("httpapi: every limit needs a positive count and window")
 		}
@@ -134,6 +149,8 @@ func New(config Config) (http.Handler, error) {
 		signInPerAccount: limiter(config.Limits.SignInPerAccount),
 		signInPerIP:      limiter(config.Limits.SignInPerIP),
 		registerPerIP:    limiter(config.Limits.RegisterPerIP),
+		// Invitation creation is keyed by account ID, never by email.
+		invitationsPerAccount: limiter(config.Limits.InvitationsPerAccount),
 	}
 
 	mux := http.NewServeMux()
@@ -147,6 +164,9 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/activations", in.Route(ingress.Session, http.HandlerFunc(a.activate)))
 	mux.Handle("POST /api/deactivations", in.Route(ingress.Session, http.HandlerFunc(a.deactivate)))
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
+	mux.Handle("POST /api/invitations", in.Route(ingress.Session, http.HandlerFunc(a.createInvitation)))
+	mux.HandleFunc("GET /api/invitations", a.listInvitations)
+	mux.Handle("POST /api/invitations/{invitationID}/revoke", in.Route(ingress.Session, http.HandlerFunc(a.revokeInvitation)))
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
 }
 
@@ -393,6 +413,138 @@ func (a *api) deactivate(w http.ResponseWriter, r *http.Request) {
 	default:
 		a.responder.Error(w, r, httpx.ErrInternal, err)
 	}
+}
+
+type invitationBody struct {
+	OperationID string `json:"operation_id"`
+	Token       string `json:"token"`
+}
+
+type invitationResult struct {
+	InvitationID string `json:"invitation_id"`
+	CreatedAt    string `json:"created_at"`
+	ExpiresAt    string `json:"expires_at"`
+}
+
+type invitationList struct {
+	Invitations []invitationResult `json:"invitations"`
+}
+
+type revocationBody struct {
+	OperationID string `json:"operation_id"`
+}
+
+type revocationResult struct {
+	InvitationID string `json:"invitation_id"`
+	Status       string `json:"status"`
+}
+
+func newInvitationResult(i invitation.Invitation) invitationResult {
+	return invitationResult{
+		InvitationID: i.ID,
+		CreatedAt:    i.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt:    i.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// invitationError maps an invitation service error to its public answer.
+// Unknown and other-tenant invitation IDs share the one not-found answer.
+func (a *api) invitationError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, access.ErrAccessDenied):
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	case errors.Is(err, invitation.ErrInvalid):
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+	case errors.Is(err, invitation.ErrNotFound):
+		a.responder.Error(w, r, httpx.ErrNotFound, err)
+	case errors.Is(err, invitation.ErrOperationConflict):
+		a.responder.Error(w, r, httpx.ErrConflict, err)
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+	}
+}
+
+// createInvitation stores the hash of a client-generated token as an
+// invitation to the session owner's tenant. The creation limit is checked
+// after the session and before the body is read; the ingress has already
+// checked the Origin and the CSRF token.
+func (a *api) createInvitation(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !a.Ingress.Allow(w, r, a.invitationsPerAccount, string(principal.AccountID), ingress.ReasonRateAccount) {
+		return
+	}
+	var body invitationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	created, err := a.Invitations.Create(r.Context(), invitation.CreateRequest{
+		OwnerID:       principal.AccountID,
+		OperationID:   body.OperationID,
+		Token:         secret.New(secret.KindInvitationToken, body.Token),
+		CorrelationID: correlationID.String(),
+	})
+	if err != nil {
+		a.invitationError(w, r, err)
+		return
+	}
+	a.Logger.InfoContext(r.Context(), "invitation created",
+		slog.String("tenant_id", created.TenantID),
+		slog.String("invitation_id", created.ID),
+	)
+	writeJSON(w, http.StatusCreated, newInvitationResult(created))
+}
+
+// listInvitations answers the session owner's pending invitations.
+func (a *api) listInvitations(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	pending, err := a.Invitations.List(r.Context(), principal.AccountID)
+	if err != nil {
+		a.invitationError(w, r, err)
+		return
+	}
+	body := invitationList{Invitations: make([]invitationResult, 0, len(pending))}
+	for _, i := range pending {
+		body.Invitations = append(body.Invitations, newInvitationResult(i))
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// revokeInvitation revokes an invitation of the session owner's tenant. The
+// ingress has already checked the Origin and the CSRF token.
+func (a *api) revokeInvitation(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var body revocationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	revoked, err := a.Invitations.Revoke(r.Context(), invitation.RevokeRequest{
+		OwnerID:       principal.AccountID,
+		OperationID:   body.OperationID,
+		InvitationID:  r.PathValue("invitationID"),
+		CorrelationID: correlationID.String(),
+	})
+	if err != nil {
+		a.invitationError(w, r, err)
+		return
+	}
+	a.Logger.InfoContext(r.Context(), "invitation revoked",
+		slog.String("invitation_id", revoked.InvitationID),
+		slog.String("status", string(revoked.Status)),
+	)
+	writeJSON(w, http.StatusOK, revocationResult{InvitationID: revoked.InvitationID, Status: string(revoked.Status)})
 }
 
 // signOut ends the session. The ingress has already checked the CSRF token

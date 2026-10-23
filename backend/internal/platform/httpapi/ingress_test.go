@@ -329,9 +329,10 @@ func TestOneStreamersMutationBudgetLeavesAnotherUnaffected(t *testing.T) {
 // the same address.
 func TestOneStreamersSignInLimitLeavesAnotherUnaffected(t *testing.T) {
 	e := newEnv(t, httpapi.Limits{
-		SignInPerAccount: ratelimit.Rate{Limit: 2, Window: time.Minute},
-		SignInPerIP:      ratelimit.Rate{Limit: 100, Window: time.Minute},
-		RegisterPerIP:    ratelimit.Rate{Limit: 100, Window: time.Minute},
+		SignInPerAccount:      ratelimit.Rate{Limit: 2, Window: time.Minute},
+		SignInPerIP:           ratelimit.Rate{Limit: 100, Window: time.Minute},
+		RegisterPerIP:         ratelimit.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount: httpapi.DefaultLimits.InvitationsPerAccount,
 	})
 	e.register("op-http-iso-alice2", "alice@example.com")
 	e.register("op-http-iso-bob002", "bob@example.com")

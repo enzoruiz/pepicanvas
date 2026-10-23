@@ -19,6 +19,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
+	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
@@ -82,12 +83,14 @@ func (p *pgEnv) serve(canvases *postgres.CanvasStore) {
 		memberships = p.memberships(store)
 	}
 	subscriptions := postgres.NewSubscriptionStore(p.pool)
+	invitations := postgres.NewInvitationStore(p.pool)
 	handler, err := httpapi.New(httpapi.Config{
 		Accounts:      accounts,
 		Memberships:   memberships,
 		Canvases:      canvases,
 		Subscriptions: subscription.NewService(subscriptions),
 		Tenants:       subscriptions,
+		Invitations:   invitation.NewService(invitations, invitation.WithClock(invitations.Now)),
 		Ingress:       in,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,

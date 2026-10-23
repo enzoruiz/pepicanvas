@@ -3,9 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import {
   activate,
+  createInvitation,
   deactivate,
+  generateInvitationToken,
   getOwnCanvas,
   getSession,
+  listInvitations,
+  revokeInvitation,
   setDimensions,
 } from "./api";
 
@@ -364,5 +368,189 @@ describe("deactivate", () => {
       ok: false,
       error: "unavailable",
     });
+  });
+});
+
+const invitationId = "cccccccccccccccccccccccccccccccc";
+const token = `pci_${"A".repeat(43)}`;
+const createdAt = "2026-10-22T10:00:00.123456Z";
+const expiresAt = "2026-10-29T10:00:00.123456Z";
+
+describe("generateInvitationToken", () => {
+  it("draws 32 random bytes into a pci_ base64url token", () => {
+    const spy = vi.spyOn(crypto, "getRandomValues");
+    const generated = generateInvitationToken();
+
+    expect(generated).toMatch(/^pci_[A-Za-z0-9_-]{43}$/);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((spy.mock.calls[0][0] as Uint8Array).byteLength).toBe(32);
+    spy.mockRestore();
+  });
+
+  it("encodes the bytes without padding", () => {
+    const spy = vi
+      .spyOn(crypto, "getRandomValues")
+      .mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+        (array as unknown as Uint8Array).fill(0xff);
+        return array;
+      });
+
+    expect(generateInvitationToken()).toBe(`pci_${"_".repeat(42)}8`);
+    spy.mockRestore();
+  });
+
+  it("never repeats a token", () => {
+    const tokens = new Set(
+      Array.from({ length: 200 }, () => generateInvitationToken()),
+    );
+
+    expect(tokens.size).toBe(200);
+  });
+});
+
+describe("createInvitation", () => {
+  it("sends the token only in the JSON body with the CSRF token", async () => {
+    replies.push(
+      json(201, {
+        invitation_id: invitationId,
+        created_at: createdAt,
+        expires_at: expiresAt,
+      }),
+    );
+
+    expect(await createInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: true,
+      value: { invitationId, createdAt, expiresAt },
+    });
+    expect(calls[0]).toEqual({
+      method: "POST",
+      path: "/api/invitations",
+      headers: { "X-CSRF-Token": "csrf", "Content-Type": "application/json" },
+      body: { operation_id: "operation-id-0001", token },
+    });
+  });
+
+  it.each([
+    { created_at: createdAt, expires_at: expiresAt },
+    { invitation_id: "nope", created_at: createdAt, expires_at: expiresAt },
+    { invitation_id: invitationId, created_at: createdAt },
+    { invitation_id: invitationId, created_at: 1, expires_at: expiresAt },
+    { invitation_id: invitationId, created_at: createdAt, expires_at: "soon" },
+  ])("rejects the malformed answer %o", async (body) => {
+    replies.push(json(201, body));
+
+    expect(await createInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([
+    ["rate_limited", 429],
+    ["forbidden", 403],
+    ["conflict", 409],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code }));
+
+    expect(await createInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+
+  it("reports a network failure as unavailable", async () => {
+    replies.push("network-error");
+
+    expect(await createInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+});
+
+describe("listInvitations", () => {
+  it("reads the pending invitations without a token", async () => {
+    replies.push(
+      json(200, {
+        invitations: [
+          {
+            invitation_id: invitationId,
+            created_at: createdAt,
+            expires_at: expiresAt,
+          },
+        ],
+      }),
+    );
+
+    expect(await listInvitations()).toEqual({
+      ok: true,
+      value: [{ invitationId, createdAt, expiresAt }],
+    });
+    expect(calls[0]).toMatchObject({
+      method: "GET",
+      path: "/api/invitations",
+      body: undefined,
+    });
+  });
+
+  it("reads an empty list", async () => {
+    replies.push(json(200, { invitations: [] }));
+
+    expect(await listInvitations()).toEqual({ ok: true, value: [] });
+  });
+
+  it.each([
+    {},
+    { invitations: null },
+    { invitations: [{ invitation_id: invitationId, created_at: createdAt }] },
+  ])("rejects the malformed list %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(await listInvitations()).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+});
+
+describe("revokeInvitation", () => {
+  it.each(["revoked", "accepted"])(
+    "sends the operation with the CSRF token and reads %s",
+    async (status) => {
+      replies.push(json(200, { invitation_id: invitationId, status }));
+
+      expect(
+        await revokeInvitation("csrf", "operation-id-0001", invitationId),
+      ).toEqual({ ok: true, value: { invitationId, status } });
+      expect(calls[0]).toEqual({
+        method: "POST",
+        path: `/api/invitations/${invitationId}/revoke`,
+        headers: {
+          "X-CSRF-Token": "csrf",
+          "Content-Type": "application/json",
+        },
+        body: { operation_id: "operation-id-0001" },
+      });
+    },
+  );
+
+  it.each([
+    { invitation_id: invitationId, status: "pending" },
+    { invitation_id: invitationId },
+    { status: "revoked" },
+  ])("rejects the malformed answer %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(
+      await revokeInvitation("csrf", "operation-id-0001", invitationId),
+    ).toEqual({ ok: false, error: "unavailable" });
+  });
+
+  it("knows not_found", async () => {
+    replies.push(json(404, { error: "not_found" }));
+
+    expect(
+      await revokeInvitation("csrf", "operation-id-0001", invitationId),
+    ).toEqual({ ok: false, error: "not_found" });
   });
 });

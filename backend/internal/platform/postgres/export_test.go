@@ -20,3 +20,10 @@ func SetMediaBeforeCommit(store *MediaStore, hook func(context.Context) error) {
 func SetSubscriptionFault(store *SubscriptionStore, hook func(ctx context.Context, step string) error) {
 	store.fault = hook
 }
+
+// SetInvitationFault injects a fault after an invitation transaction step,
+// named after the Tx method ("InsertInvitation"), or before its transaction
+// commits ("commit"). A nil hook removes it.
+func SetInvitationFault(store *InvitationStore, hook func(ctx context.Context, step string) error) {
+	store.fault = hook
+}

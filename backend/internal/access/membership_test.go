@@ -57,3 +57,38 @@ func TestOperatorRequestGrantsOnlyOperatorsSubscriptionActions(t *testing.T) {
 		t.Fatal("an operator request without a tenant was allowed")
 	}
 }
+
+func TestInvitationRequestGrantsOnlyActiveOwnersOfTheTenant(t *testing.T) {
+	active, inactive := access.SubscriptionActive, access.SubscriptionInactive
+	cases := map[string]struct {
+		owner  bool
+		tenant string
+		status access.SubscriptionStatus
+		action access.Action
+		want   bool
+	}{
+		"owner of tenant a administers":    {true, "tenant-a", active, access.ActionAdminister, true},
+		"owner of tenant b administers":    {true, "tenant-b", active, access.ActionAdminister, true},
+		"owner views":                      {true, "tenant-a", active, access.ActionView, true},
+		"owner edits":                      {true, "tenant-a", active, access.ActionEdit, false},
+		"inactive owner administers":       {true, "tenant-a", inactive, access.ActionAdminister, false},
+		"inactive owner views":             {true, "tenant-a", inactive, access.ActionView, false},
+		"moderator or stranger administer": {false, "tenant-a", active, access.ActionAdminister, false},
+		"moderator or stranger view":       {false, "tenant-a", active, access.ActionView, false},
+		"owner without a tenant":           {true, "", active, access.ActionAdminister, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			request := access.InvitationRequest(c.owner, c.tenant, c.status, c.action)
+			if request.Resource != access.ResourceInvitation {
+				t.Fatalf("resource = %q, want invitation", request.Resource)
+			}
+			if got := access.Check(request) == nil; got != c.want {
+				t.Fatalf("allowed = %v, want %v", got, c.want)
+			}
+		})
+	}
+	if request := access.InvitationRequest(false, "tenant-a", active, access.ActionAdminister); request.ActorTenantID != "" {
+		t.Fatalf("a non-owner request has actor tenant %q, want none", request.ActorTenantID)
+	}
+}

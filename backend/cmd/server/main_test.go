@@ -887,3 +887,108 @@ func TestServerGuardsAPIAndStaticAnswers(t *testing.T) {
 	expectHeaders("static POST", res, "frame-ancestors 'none'")
 	server.stop(t)
 }
+
+// US-004: an activated owner creates, lists, and revokes an invitation over
+// real PostgreSQL, and a creation retried after a restart replays its answer.
+func TestOwnerManagesInvitationsAcrossRestart(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	stranger := registerAndSignIn(t, server, "op-process-strng-1", "stranger@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	if res, _ := activate(t, server, operator, "op-process-act-a01", "alice@example.com"); res.StatusCode != http.StatusOK {
+		t.Fatalf("activate alice = %d", res.StatusCode)
+	}
+
+	const token = "pci_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	create := `{"operation_id":"op-process-inv-c01","token":"` + token + `"}`
+	res := requestWith(t, server, http.MethodPost, "/api/invitations", create, alice.cookie, alice.csrf)
+	created, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusCreated || strings.Contains(string(created), token) {
+		t.Fatalf("create = %d %s", res.StatusCode, created)
+	}
+	var invitation map[string]any
+	if err := json.Unmarshal(created, &invitation); err != nil || len(invitation["invitation_id"].(string)) != 32 {
+		t.Fatalf("create body = %s", created)
+	}
+	id := invitation["invitation_id"].(string)
+
+	list := func(p *process) []any {
+		t.Helper()
+		res := request(t, p, http.MethodGet, "/api/invitations", "", alice.cookie)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("list = %d", res.StatusCode)
+		}
+		items, _ := decodeBody(t, res)["invitations"].([]any)
+		return items
+	}
+	if items := list(server); len(items) != 1 || items[0].(map[string]any)["invitation_id"] != id {
+		t.Fatalf("pending = %v", items)
+	}
+
+	// S2: a stranger can neither create, list, nor revoke.
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-s01","token":"pci_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}`, stranger.cookie, stranger.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("stranger create = %d, want 403", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/invitations", "", stranger.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("stranger list = %d, want 403", res.StatusCode)
+	}
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations/"+id+"/revoke", `{"operation_id":"op-process-inv-s02"}`, stranger.cookie, stranger.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("stranger revoke = %d, want 403", res.StatusCode)
+	}
+
+	var revoked []string
+	for _, op := range []string{"op-process-inv-r01", "op-process-inv-r02"} {
+		res := requestWith(t, server, http.MethodPost, "/api/invitations/"+id+"/revoke", `{"operation_id":"`+op+`"}`, alice.cookie, alice.csrf)
+		body, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK || string(body) != `{"invitation_id":"`+id+`","status":"revoked"}`+"\n" {
+			t.Fatalf("revoke %s = %d %s", op, res.StatusCode, body)
+		}
+		revoked = append(revoked, string(body))
+	}
+	if revoked[0] != revoked[1] {
+		t.Fatalf("revocations differ: %v", revoked)
+	}
+	if items := list(server); len(items) != 0 {
+		t.Fatalf("pending after revoke = %v", items)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	// S9: the creation retried after a restart returns the identical body.
+	server = start(t, bin, env...)
+	res = requestWith(t, server, http.MethodPost, "/api/invitations", create, alice.cookie, alice.csrf)
+	if again, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusCreated || string(again) != string(created) {
+		t.Fatalf("replay after restart = %d %s, want %s", res.StatusCode, again, created)
+	}
+	server.stop(t)
+	logs += server.logs.String()
+
+	for _, msg := range []string{`"msg":"invitation created"`, `"msg":"invitation revoked"`} {
+		if !strings.Contains(logs, msg) {
+			t.Fatalf("no %s log", msg)
+		}
+	}
+	for name, s := range map[string]string{
+		"invitation token": "pci_",
+		"session token":    strings.TrimPrefix(alice.cookie, "__Host-pcs="),
+		"CSRF token":       alice.csrf,
+		"owner email":      "alice@example.com",
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}
