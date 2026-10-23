@@ -145,7 +145,10 @@ func TestCrashBetweenCommitAndPublishIsDeliveredAfterRestart(t *testing.T) {
 	_, events, _ = openPG(t, server)
 	hub := newHub(t, realtime.Config{Authorize: allowAll})
 	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(hub), Now: now.Now, PollInterval: 10 * time.Millisecond})
-	eventually(t, "every record to settle", func() bool { return mustStats(t, events, key.TenantID).Pending == 0 })
+	// The publisher settles a record before it counts it, so wait for both.
+	eventually(t, "every record to settle and be counted", func() bool {
+		return mustStats(t, events, key.TenantID).Pending == 0 && publisher.Counters().Delivered == 5
+	})
 
 	delivered := hubEvents(t, hub, key)
 	assertDeliveredInOrder(t, delivered, 1, 5)

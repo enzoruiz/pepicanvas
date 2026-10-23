@@ -37,6 +37,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
@@ -115,6 +116,12 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
+	// An origin that would weaken the ingress controls stops the process
+	// before any dependency is opened or any request is accepted.
+	in, err := ingress.New(ingress.Config{AllowedOrigins: []string{origin}, Limits: ingress.DefaultLimits, Logger: logger})
+	if err != nil {
+		return err
+	}
 
 	startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
@@ -138,7 +145,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Memberships:   store,
 		Canvases:      postgres.NewCanvasStore(pool),
 		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(pool)),
-		AllowedOrigin: origin,
+		Ingress:       in,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,
 	})
@@ -149,7 +156,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	mux := http.NewServeMux()
 	mux.Handle("/api/", api)
 	if dir := getenv("PEPICANVAS_STATIC_DIR"); dir != "" {
-		mux.Handle("/", staticFiles(dir))
+		mux.Handle("/", in.Static(staticFiles(dir)))
 	}
 
 	listener, err := net.Listen("tcp", listenAddr)

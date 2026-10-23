@@ -19,6 +19,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription/subscriptiontest"
@@ -88,6 +89,8 @@ func (b *syncBuffer) String() string {
 type env struct {
 	t        *testing.T
 	faults   *faults
+	calls    *calls
+	ingress  *ingress.Ingress
 	store    *accesstest.MemoryStore
 	hasher   *accesstest.PlainHasher
 	clock    *accesstest.Clock
@@ -100,12 +103,20 @@ type env struct {
 
 func newEnv(t *testing.T, limits httpapi.Limits) *env {
 	t.Helper()
+	return newEnvWith(t, limits, ingress.DefaultLimits)
+}
+
+// newEnvWith builds the API behind an ingress with ingressLimits, both on
+// the fake clock.
+func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limits) *env {
+	t.Helper()
 	e := &env{
 		t:      t,
 		store:  accesstest.NewMemoryStore(),
 		hasher: &accesstest.PlainHasher{},
 		clock:  accesstest.NewClock(),
 		faults: &faults{},
+		calls:  &calls{},
 		subs:   subscriptiontest.NewMemoryStore(),
 		logs:   &syncBuffer{},
 	}
@@ -114,13 +125,18 @@ func newEnv(t *testing.T, limits httpapi.Limits) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	logger := slog.New(logging.NewHandler(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	e.ingress, err = ingress.New(ingress.Config{AllowedOrigins: []string{origin}, Limits: ingressLimits, Logger: logger, Now: e.clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler, err := httpapi.New(httpapi.Config{
-		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults},
+		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults, calls: e.calls},
 		Memberships:   memberships{activated: e.subs, seeded: e.store},
 		Canvases:      e.canvases,
-		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults},
-		AllowedOrigin: origin,
-		Logger:        slog.New(logging.NewHandler(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults, calls: e.calls},
+		Ingress:       e.ingress,
+		Logger:        logger,
 		Now:           e.clock.Now,
 		Limits:        limits,
 	})
@@ -176,6 +192,11 @@ func (e *env) do(method, path string, body any, options ...option) *http.Respons
 	if res.Header.Get(httpx.CorrelationHeader) == "" {
 		e.t.Fatalf("%s %s: missing correlation header", method, path)
 	}
+	for name := range res.Header {
+		if strings.HasPrefix(strings.ToLower(name), "access-control-") {
+			e.t.Fatalf("%s %s: CORS header %s written; CORS must stay closed", method, path, name)
+		}
+	}
 	if got := res.Header.Get("Cache-Control"); got != "no-store" {
 		e.t.Fatalf("%s %s: Cache-Control = %q, want no-store", method, path, got)
 	}
@@ -217,9 +238,9 @@ func credentials(email, pass string) map[string]string {
 	return map[string]string{"email": email, "password": pass}
 }
 
-func (e *env) register(op, email string) access.AccountID {
+func (e *env) register(op, email string, options ...option) access.AccountID {
 	e.t.Helper()
-	res := e.do(http.MethodPost, "/api/accounts", registration(op, email, password))
+	res := e.do(http.MethodPost, "/api/accounts", registration(op, email, password), options...)
 	if res.StatusCode != http.StatusCreated {
 		e.t.Fatalf("register %s: status %d", email, res.StatusCode)
 	}
@@ -417,10 +438,12 @@ func TestSignOutRequiresTheSessionCSRFToken(t *testing.T) {
 		t.Fatal("sign out did not clear the cookie")
 	}
 	expectError(t, e.do(http.MethodGet, "/api/session", nil, withSession(alice.token)), http.StatusUnauthorized, "unauthorized")
-	// Repeating the sign-out after the session ended succeeds.
-	if res := e.do(http.MethodDelete, "/api/session", nil, withSession(alice.token)); res.StatusCode != http.StatusNoContent {
+	// Repeating the sign-out after the session ended succeeds with the
+	// session's CSRF token; without it the ingress answers 403 (TE-014 L2b).
+	if res := e.do(http.MethodDelete, "/api/session", nil, withSession(alice.token), withCSRF(alice.csrf)); res.StatusCode != http.StatusNoContent {
 		t.Fatalf("repeated sign out = %d", res.StatusCode)
 	}
+	expectError(t, e.do(http.MethodDelete, "/api/session", nil, withSession(alice.token)), http.StatusForbidden, "forbidden")
 	if res := e.do(http.MethodGet, "/api/session", nil, withSession(other.token)); res.StatusCode != http.StatusOK {
 		t.Fatal("signing out one session ended another")
 	}
@@ -611,12 +634,23 @@ func TestDefaultLimits(t *testing.T) {
 	}
 }
 
-func TestConfigurationRejectsAnInexactOrigin(t *testing.T) {
-	for _, o := range []string{"", "*", "pepicanvas.test", "https://pepicanvas.test/", "https://pepicanvas.test/app", "https://user@pepicanvas.test", "ftp://pepicanvas.test"} {
-		_, err := httpapi.New(httpapi.Config{AllowedOrigin: o, Limits: httpapi.DefaultLimits})
-		if err == nil {
-			t.Fatalf("AllowedOrigin %q accepted", o)
-		}
+// Origin exactness is validated by ingress.New (its tests hold the inexact
+// cases); the API refuses to run without an ingress.
+func TestConfigurationRequiresAnIngress(t *testing.T) {
+	e := newEnv(t, httpapi.DefaultLimits)
+	config := httpapi.Config{
+		Accounts:      faultyAccounts{faults: e.faults, calls: e.calls},
+		Memberships:   e.store,
+		Canvases:      e.canvases,
+		Subscriptions: faultySubscriptions{faults: e.faults, calls: e.calls},
+		Limits:        httpapi.DefaultLimits,
+	}
+	if _, err := httpapi.New(config); err == nil {
+		t.Fatal("a configuration without an ingress was accepted")
+	}
+	config.Ingress = e.ingress
+	if _, err := httpapi.New(config); err != nil {
+		t.Fatalf("a configuration with an ingress was rejected: %v", err)
 	}
 }
 
