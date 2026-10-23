@@ -9,7 +9,7 @@ export function EditorShell() {
       <AuthGate>
         {(session) => (
           <>
-            <CanvasPanel />
+            <CanvasPanel session={session} />
             {session.operator && <OperatorPanel session={session} />}
           </>
         )}
