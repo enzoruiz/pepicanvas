@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -223,11 +224,25 @@ func TestServerKeepsSessionsAcrossRestartAndServesTheEditor(t *testing.T) {
 
 func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 	bin := buildServer(t)
+	const unreachable = "PEPICANVAS_DATABASE_URL=postgres://pepicanvas:hunter2-decoy@127.0.0.1:1/pepicanvas"
 	cases := map[string][]string{
 		"missing database": {"PEPICANVAS_ALLOWED_ORIGIN=" + origin},
-		"missing origin":   {"PEPICANVAS_DATABASE_URL=postgres://pepicanvas:hunter2-decoy@127.0.0.1:1/pepicanvas"},
-		"wildcard origin":  {"PEPICANVAS_DATABASE_URL=postgres://pepicanvas:hunter2-decoy@127.0.0.1:1/pepicanvas", "PEPICANVAS_ALLOWED_ORIGIN=*"},
-		"unreachable db":   {"PEPICANVAS_DATABASE_URL=postgres://pepicanvas:hunter2-decoy@127.0.0.1:1/pepicanvas", "PEPICANVAS_ALLOWED_ORIGIN=" + origin},
+		"missing origin":   {unreachable},
+		"unreachable db":   {unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin},
+	}
+	// S8, S10: an origin that would weaken CTRL-WEB-01 stops the process
+	// before the database is opened or the listener exists.
+	invalidOrigins := map[string]string{
+		"wildcard origin":       "*",
+		"wildcard subdomain":    "https://*.pepicanvas.test",
+		"null origin":           "null",
+		"trailing slash origin": origin + "/",
+		"origin with a path":    origin + "/editor",
+		"origin with userinfo":  "http://user@127.0.0.1:5173",
+		"origin without scheme": "127.0.0.1:5173",
+	}
+	for name, o := range invalidOrigins {
+		cases[name] = []string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + o}
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -240,6 +255,13 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 			}
 			if strings.Contains(string(out), "hunter2-decoy") {
 				t.Fatalf("output echoes the database password:\n%s", out)
+			}
+			if strings.Contains(string(out), `"msg":"listening"`) {
+				t.Fatalf("the server listened with an invalid configuration:\n%s", out)
+			}
+			if _, invalid := invalidOrigins[name]; invalid &&
+				(!strings.Contains(string(out), "allowed origin must be exactly scheme://host[:port]") || strings.Contains(string(out), "127.0.0.1:1")) {
+				t.Fatalf("the origin was not rejected before the database was opened:\n%s", out)
 			}
 		})
 	}
@@ -480,4 +502,90 @@ func TestGrantOperatorRejectsBadInput(t *testing.T) {
 			t.Fatalf("%s = %d\n%s", name, code, out)
 		}
 	}
+}
+
+// S1, S4, L2c: the built server answers API and static requests with the
+// security headers, refuses preflights without CORS headers, and refuses
+// unsafe methods on static files.
+func TestServerGuardsAPIAndStaticAnswers(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	static := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(static, "editor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(static, "editor", "index.html"), []byte("<!doctype html><title>editor</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := start(t, bin,
+		"PEPICANVAS_DATABASE_URL="+db.DSN(t),
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN="+origin,
+		"PEPICANVAS_STATIC_DIR="+static,
+	)
+	frame := map[string]string{
+		"X-Content-Type-Options":       "nosniff",
+		"X-Frame-Options":              "DENY",
+		"Cross-Origin-Resource-Policy": "same-origin",
+	}
+	expectHeaders := func(name string, res *http.Response, csp string) {
+		t.Helper()
+		want := maps.Clone(frame)
+		want["Content-Security-Policy"] = csp
+		for k, v := range want {
+			if got := res.Header.Get(k); got != v {
+				t.Errorf("%s: %s = %q, want %q", name, k, got, v)
+			}
+		}
+		// The origin is plain HTTP, so HSTS would lock a local deployment out.
+		if got := res.Header.Get("Strict-Transport-Security"); got != "" {
+			t.Errorf("%s: HSTS = %q on a plain-HTTP origin", name, got)
+		}
+		for k := range res.Header {
+			if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+				t.Errorf("%s: CORS header %s written", name, k)
+			}
+		}
+	}
+	api := "default-src 'none'; frame-ancestors 'none'"
+
+	res := request(t, server, http.MethodPost, "/api/accounts", `{"operation_id":"op-process-guard-1","email":"alice@example.com","password":"correct horse battery"}`, "")
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("register = %d", res.StatusCode)
+	}
+	expectHeaders("register", res, api)
+	res = request(t, server, http.MethodGet, "/api/session", "", "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/session = %d, want 401", res.StatusCode)
+	}
+	expectHeaders("unauthorized session", res, api)
+
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodOptions, "http://"+server.addr+"/api/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Origin", origin)
+	r.Header.Set("Access-Control-Request-Method", http.MethodDelete)
+	r.Header.Set("Access-Control-Request-Headers", "x-csrf-token")
+	res, err = http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("OPTIONS /api/session = %d, want 403", res.StatusCode)
+	}
+	expectHeaders("preflight", res, api)
+
+	res = request(t, server, http.MethodGet, "/editor/", "", "")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET /editor/ = %d", res.StatusCode)
+	}
+	expectHeaders("editor page", res, "frame-ancestors 'none'")
+	res = request(t, server, http.MethodPost, "/editor/", "{}", "")
+	if res.StatusCode != http.StatusMethodNotAllowed || res.Header.Get("Allow") != "GET, HEAD" {
+		t.Fatalf("POST /editor/ = %d Allow %q, want 405 GET, HEAD", res.StatusCode, res.Header.Get("Allow"))
+	}
+	expectHeaders("static POST", res, "frame-ancestors 'none'")
+	server.stop(t)
 }
