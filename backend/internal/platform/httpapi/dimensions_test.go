@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
@@ -469,4 +470,18 @@ func TestResizeStoreFailureChangesNothing(t *testing.T) {
 	e.expectCanvas(alice, 1920, 1080, 0)
 
 	expectResized(t, e.resize(alice.signedIn, alice.path, dimensions("op-http-dim-fail01", 1280, 720)), alice.canvasID, 1280, 720, 1)
+}
+
+// US-003 S1: a deactivation confirmed after the owner was reauthorized makes
+// the store refuse the resize; the answer is the tenant route's forbidden,
+// never internal, and nothing changes.
+func TestResizeOfAnInactiveTenantIsForbidden(t *testing.T) {
+	e := newEnv(t, httpapi.DefaultLimits)
+	op := e.operator("op-http-dim-oper01", "operator@example.com")
+	alice := e.streamer(op, "alice1", "alice@example.com")
+
+	e.canvases.FailNext(canvas.ErrInactive)
+	expectError(t, e.resize(alice.signedIn, alice.path, dimensions("op-http-dim-inac01", 1280, 720)), http.StatusForbidden, "forbidden")
+	e.expectApplies(0)
+	e.expectCanvas(alice, 1920, 1080, 0)
 }

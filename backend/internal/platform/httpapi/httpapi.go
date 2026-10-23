@@ -633,6 +633,10 @@ func (a *api) setDimensions(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, canvas.ErrNotFound):
 		// A missing canvas is the access denial of the read route.
 		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
+	case errors.Is(err, canvas.ErrInactive):
+		// A deactivation confirmed after the reauthorization (US-003) is the
+		// tenant route's access denial.
+		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
 	case errors.Is(err, canvas.ErrOperationConflict):
 		a.responder.Error(w, r, httpx.ErrConflict, err)
 	case errors.Is(err, canvas.ErrInvalid):
