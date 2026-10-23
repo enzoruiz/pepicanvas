@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
@@ -20,6 +22,17 @@ func (e *env) deactivate(s signedIn, op, email string) map[string]any {
 		e.t.Fatalf("deactivate %s: status %d %s", email, res.StatusCode, e.bodies[len(e.bodies)-1])
 	}
 	return decode(e.t, res)
+}
+
+// logLine returns the first log record with msg whose correlation_id is id.
+func logLine(logs, msg, id string) map[string]any {
+	for _, line := range strings.Split(logs, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == msg && record["correlation_id"] == id {
+			return record
+		}
+	}
+	return nil
 }
 
 // streamers signs in an operator and activates alice and bob.
@@ -332,45 +345,103 @@ func TestDeactivationRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
-// S12, CTRL-WEB-01 early primitive: Origin and CSRF are checked before the
-// body is read, the domain runs, or storage changes.
+// S12, CTRL-WEB-01 (TE-014 ingress): valid CSRF from the allowed Origin
+// deactivates; a missing, invalid, or other-session CSRF token and an absent
+// or hostile Origin are refused by the ingress before the session is read,
+// the domain runs, or storage changes, and each refusal is counted and logged
+// with its reason, route, and correlation ID.
 func TestDeactivationChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 	e := newEnv(t, httpapi.DefaultLimits)
 	op, a, b := e.streamers()
 	other := e.signIn("operator@example.com")
 	body := activation("op-http-dea-web001", "alice@example.com")
 	transactions := e.subs.Transactions()
+	lookups := e.subs.AccountLookups()
+	const route = "POST /api/deactivations"
 
 	rejected := map[string]struct {
 		opts   []option
-		status int
-		code   string
+		reason ingress.Reason
 	}{
-		"no session":         {[]option{withCSRF(op.csrf)}, http.StatusUnauthorized, "unauthorized"},
-		"missing CSRF":       {[]option{withSession(op.token)}, http.StatusForbidden, "forbidden"},
-		"invalid CSRF":       {[]option{withSession(op.token), withCSRF("not-the-token")}, http.StatusForbidden, "forbidden"},
-		"other session CSRF": {[]option{withSession(op.token), withCSRF(other.csrf)}, http.StatusForbidden, "forbidden"},
-		"absent Origin":      {[]option{withSession(op.token), withCSRF(op.csrf), withoutOrigin()}, http.StatusForbidden, "forbidden"},
-		"hostile Origin":     {[]option{withSession(op.token), withCSRF(op.csrf), withOrigin("https://evil.test")}, http.StatusForbidden, "forbidden"},
+		"missing CSRF":       {[]option{withSession(op.token)}, ingress.ReasonCSRF},
+		"invalid CSRF":       {[]option{withSession(op.token), withCSRF("not-the-token")}, ingress.ReasonCSRF},
+		"other session CSRF": {[]option{withSession(op.token), withCSRF(other.csrf)}, ingress.ReasonCSRF},
+		"absent Origin":      {[]option{withSession(op.token), withCSRF(op.csrf), withoutOrigin()}, ingress.ReasonOrigin},
+		"hostile Origin":     {[]option{withSession(op.token), withCSRF(op.csrf), withOrigin("https://evil.test")}, ingress.ReasonOrigin},
 		// The CSRF check runs before the body is parsed.
-		"missing CSRF, malformed body": {[]option{withSession(op.token), withBody("application/json", "{")}, http.StatusForbidden, "forbidden"},
+		"missing CSRF, malformed body": {[]option{withSession(op.token), withBody("application/json", "{")}, ingress.ReasonCSRF},
 	}
 	for name, c := range rejected {
 		t.Run(name, func(t *testing.T) {
-			expectError(t, e.do(http.MethodPost, "/api/deactivations", body, c.opts...), c.status, c.code)
-			if n := e.subs.Transactions(); n != transactions {
-				t.Fatalf("transactions = %d, want %d", n, transactions)
+			before := e.effects()
+			counts := map[ingress.Reason]uint64{}
+			for _, r := range []ingress.Reason{ingress.ReasonOrigin, ingress.ReasonCSRF, ingress.ReasonUnclassified} {
+				counts[r] = reasonCount(e.ingress, r)
+			}
+			res := e.do(http.MethodPost, "/api/deactivations", body, c.opts...)
+			correlationID := res.Header.Get(httpx.CorrelationHeader)
+			expectError(t, res, http.StatusForbidden, "forbidden")
+
+			// Authenticate, Deactivate, the account lookup, and every write
+			// are untouched: the refusal happened before the session was read.
+			e.expectNoEffect(name, before)
+			if n := e.subs.AccountLookups(); n != lookups {
+				t.Fatalf("account lookups = %d, want %d", n, lookups)
 			}
 			e.expectUnchanged(a, b)
+
+			for r, n := range counts {
+				want := n
+				if r == c.reason {
+					want++
+				}
+				if got := reasonCount(e.ingress, r); got != want {
+					t.Fatalf("ingress %s rejections = %d, want %d", r, got, want)
+				}
+			}
+			record := logLine(e.logs.String(), "request failed", correlationID)
+			if record == nil {
+				t.Fatalf("no rejection logged with correlation %q", correlationID)
+			}
+			if got, want := record["error"], "ingress rejected: surface=http reason="+string(c.reason)+" route="+route; got != want {
+				t.Fatalf("rejection log error = %v, want %q", got, want)
+			}
 		})
 	}
 
-	// Valid CSRF from the allowed Origin reaches the domain.
+	// Without a session cookie there is no credential to forge: the ingress
+	// lets the request through and the handler answers 401 before the body.
+	csrf := reasonCount(e.ingress, ingress.ReasonCSRF)
+	expectError(t, e.do(http.MethodPost, "/api/deactivations", body, withCSRF(op.csrf)), http.StatusUnauthorized, "unauthorized")
+	if got := reasonCount(e.ingress, ingress.ReasonCSRF); got != csrf {
+		t.Fatalf("ingress csrf rejections = %d, want %d", got, csrf)
+	}
+	if e.callsTo("Deactivate") != 0 || e.subs.Transactions() != transactions || e.subs.AccountLookups() != lookups {
+		t.Fatal("a request without a session reached the domain")
+	}
+	e.expectUnchanged(a, b)
+
+	// Valid CSRF from the allowed Origin reaches the domain and cuts A only.
 	if got := e.deactivate(op, "op-http-dea-web001", "alice@example.com"); got["deactivated"] != true {
 		t.Fatalf("deactivation = %v", got)
 	}
+	if n := e.callsTo("Deactivate"); n != 1 {
+		t.Fatalf("Deactivate calls = %d, want 1", n)
+	}
 	if n := e.subs.Transactions(); n != transactions+1 {
 		t.Fatalf("transactions = %d, want %d", n, transactions+1)
+	}
+	if got := e.status(a["tenant_id"].(string)); got == access.SubscriptionActive {
+		t.Fatal("tenant A is still active after the accepted deactivation")
+	}
+	if got := e.status(b["tenant_id"].(string)); got != access.SubscriptionActive {
+		t.Fatalf("tenant B status = %s, want active", got)
+	}
+	if n := len(e.subs.Deactivations()); n != 1 {
+		t.Fatalf("deactivation records = %d, want 1", n)
+	}
+	if n := len(e.subs.Cuts()); n != 1 {
+		t.Fatalf("access cuts = %d, want 1", n)
 	}
 }
 

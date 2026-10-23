@@ -89,6 +89,11 @@ func (s faultySubscriptions) Activate(ctx context.Context, request subscription.
 	return s.Subscriptions.Activate(ctx, request)
 }
 
+func (s faultySubscriptions) Deactivate(ctx context.Context, request subscription.DeactivateRequest) (subscription.Deactivation, error) {
+	s.calls.add("Deactivate")
+	return s.Subscriptions.Deactivate(ctx, request)
+}
+
 func (s faultySubscriptions) IsOperator(ctx context.Context, account access.AccountID) (bool, error) {
 	if s.faults.isOperator != nil {
 		return false, s.faults.isOperator
