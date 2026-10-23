@@ -25,6 +25,17 @@ var ErrUnavailable = errors.New("s3: storage unavailable")
 // raced another write to the same key.
 const conditionalRequestConflict = "ConditionalRequestConflict"
 
+// Owner metadata headers. Every identifier is printable ASCII without spaces,
+// so it travels unchanged in an S3 user metadata header.
+const (
+	tenantHeader = "X-Amz-Meta-Pepicanvas-Tenant"
+	canvasHeader = "X-Amz-Meta-Pepicanvas-Canvas"
+	assetHeader  = "X-Amz-Meta-Pepicanvas-Asset"
+)
+
+// maxListPage is the most keys one S3 list request returns.
+const maxListPage = 1000
+
 var (
 	errBodyTooShort = errors.New("s3: body is shorter than its declared size")
 	errBodyTooLong  = errors.New("s3: body is longer than its declared size")
@@ -72,12 +83,16 @@ func Open(ctx context.Context, config Config) (*Storage, error) {
 
 // Put stores exactly size bytes in a single PUT, so a failed, cancelled, short,
 // or long upload never leaves a readable object or orphan multipart parts. The
+// owner is stored as user metadata; an invalid owner is media.ErrInvalid. The
 // PUT is conditional: an existing object is never replaced and Put returns
 // media.ErrObjectExists. Put returns when ctx is done even if body is blocked;
 // the copy goroutine then ends when body returns from Read.
-func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+func (s *Storage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("s3: negative size")
+	}
+	if !owner.Valid() {
+		return fmt.Errorf("%w: object owner is malformed", media.ErrInvalid)
 	}
 	reader, writer := io.Pipe()
 	verdict := make(chan error, 1)
@@ -101,6 +116,11 @@ func (s *Storage) Put(ctx context.Context, key string, body io.Reader, size int6
 		}
 	}
 	options := minio.PutObjectOptions{
+		UserMetadata: map[string]string{
+			tenantHeader: owner.Key.TenantID,
+			canvasHeader: owner.Key.CanvasID,
+			assetHeader:  owner.AssetID,
+		},
 		DisableMultipart: true,
 		// Stream the body instead of buffering it to sign its hash.
 		DisableContentSha256: true,
@@ -167,6 +187,59 @@ func (s *Storage) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("s3: get object: %w", err)
 	}
 	return object, nil
+}
+
+// Stat describes an object and its owner, or returns media.ErrNotFound for a
+// missing key. An object without valid owner metadata is unowned.
+func (s *Storage) Stat(ctx context.Context, key string) (media.Object, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		if minio.ToErrorResponse(err).Code == minio.NoSuchKey {
+			return media.Object{}, media.ErrNotFound
+		}
+		return media.Object{}, fmt.Errorf("s3: stat object: %w", err)
+	}
+	object := media.Object{Key: key, ModifiedAt: info.LastModified}
+	owner := media.Owner{
+		Key:     media.CanvasKey{TenantID: info.Metadata.Get(tenantHeader), CanvasID: info.Metadata.Get(canvasHeader)},
+		AssetID: info.Metadata.Get(assetHeader),
+	}
+	if owner.Valid() {
+		object.Owner, object.Owned = owner, true
+	}
+	return object, nil
+}
+
+// List returns up to limit objects whose keys sort after after, in key order.
+func (s *Storage) List(ctx context.Context, after string, limit int) ([]media.Object, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("%w: list limit must be positive", media.ErrInvalid)
+	}
+	listCtx, cancel := context.WithCancel(ctx)
+	objects := make([]media.Object, 0, min(limit, maxListPage))
+	options := minio.ListObjectsOptions{Recursive: true, StartAfter: after, MaxKeys: min(limit, maxListPage)}
+	listing := s.client.ListObjects(listCtx, s.bucket, options)
+	// minio's listing goroutine blocks on its last send once cancelled, so
+	// drain the channel until it closes.
+	defer func() {
+		cancel()
+		for range listing {
+		}
+	}()
+	for info := range listing {
+		if info.Err != nil {
+			return nil, fmt.Errorf("s3: list objects: %w", info.Err)
+		}
+		objects = append(objects, media.Object{Key: info.Key, ModifiedAt: info.LastModified})
+		if len(objects) == limit {
+			break
+		}
+	}
+	// A cancelled listing may end without an error item.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return objects, nil
 }
 
 // Delete removes an object. Deleting a missing key succeeds.

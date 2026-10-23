@@ -22,6 +22,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	argon2 "github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
@@ -69,20 +70,25 @@ func (p *pgEnv) serve(canvases *postgres.CanvasStore) {
 		p.t.Fatal(err)
 	}
 	logs := &syncBuffer{}
+	logger := slog.New(logging.NewHandler(slog.NewJSONHandler(logs, nil)))
+	in, err := ingress.New(ingress.Config{AllowedOrigins: []string{origin}, Limits: ingress.DefaultLimits, Logger: logger})
+	if err != nil {
+		p.t.Fatal(err)
+	}
 	handler, err := httpapi.New(httpapi.Config{
 		Accounts:      accounts,
 		Memberships:   store,
 		Canvases:      canvases,
 		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(p.pool)),
-		AllowedOrigin: origin,
-		Logger:        slog.New(logging.NewHandler(slog.NewJSONHandler(logs, nil))),
+		Ingress:       in,
+		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,
 	})
 	if err != nil {
 		p.t.Fatal(err)
 	}
 	p.canvases = canvases
-	p.http = &env{t: p.t, handler: handler, logs: logs}
+	p.http = &env{t: p.t, ingress: in, handler: handler, logs: logs}
 }
 
 func (p *pgEnv) register(op, email string) access.AccountID {

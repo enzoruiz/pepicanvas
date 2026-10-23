@@ -19,7 +19,7 @@ WHERE tenant_id = $1 AND canvas_id = $2;
 -- name: ExpireReservations :one
 WITH expired AS (
     UPDATE media_assets
-    SET state = 'deleting'
+    SET state = 'deleting', state_changed_at = sqlc.arg(changed_at)
     WHERE tenant_id = $1 AND canvas_id = $2 AND state = 'pending' AND reserved_at <= sqlc.arg(expired_at)
     RETURNING declared_bytes
 )
@@ -32,8 +32,8 @@ WHERE state = 'pending' AND reserved_at <= sqlc.arg(expired_at)
 LIMIT sqlc.arg(max_canvases);
 
 -- name: InsertPendingAsset :exec
-INSERT INTO media_assets (tenant_id, canvas_id, asset_id, state, declared_bytes, storage_key, replaces_reference, reserved_at)
-VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7);
+INSERT INTO media_assets (tenant_id, canvas_id, asset_id, state, declared_bytes, storage_key, replaces_reference, reserved_at, state_changed_at)
+VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $7);
 
 -- name: LockAsset :one
 SELECT state, kind, declared_bytes, storage_key, replaces_reference
@@ -43,7 +43,7 @@ FOR UPDATE;
 
 -- name: SetAssetState :exec
 UPDATE media_assets
-SET state = $4, kind = COALESCE(sqlc.narg(kind), kind)
+SET state = $4, kind = COALESCE(sqlc.narg(kind), kind), state_changed_at = sqlc.arg(changed_at)
 WHERE tenant_id = $1 AND canvas_id = $2 AND asset_id = $3;
 
 -- name: GetReadyAsset :one
@@ -117,3 +117,27 @@ WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3
 SELECT EXISTS (
     SELECT 1 FROM canvases WHERE tenant_id = $1 AND canvas_id = $2
 );
+
+-- name: MediaInventory :many
+SELECT state,
+    count(*)::bigint AS assets,
+    sum(declared_bytes)::bigint AS bytes,
+    count(*) FILTER (WHERE state_changed_at > sqlc.arg(hour_ago))::bigint AS under_hour,
+    count(*) FILTER (WHERE state_changed_at <= sqlc.arg(hour_ago) AND state_changed_at > sqlc.arg(day_ago))::bigint AS under_day,
+    min(state_changed_at)::timestamptz AS oldest_changed_at
+FROM media_assets
+WHERE tenant_id = $1
+GROUP BY state;
+
+-- name: HeldStorageKeys :many
+SELECT storage_key
+FROM media_assets
+WHERE storage_key = ANY(sqlc.arg(storage_keys)::text[]);
+
+-- name: ReadyAssetsAfter :many
+SELECT tenant_id, canvas_id, asset_id, storage_key
+FROM media_assets
+WHERE state = 'ready'
+    AND (tenant_id, canvas_id, asset_id) > (sqlc.arg(after_tenant)::text, sqlc.arg(after_canvas)::text, sqlc.arg(after_asset)::text)
+ORDER BY tenant_id, canvas_id, asset_id
+LIMIT sqlc.arg(max_assets);

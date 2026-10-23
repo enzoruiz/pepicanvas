@@ -33,11 +33,11 @@ type recordingStorage struct {
 	keys []string
 }
 
-func (r *recordingStorage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+func (r *recordingStorage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) error {
 	r.mu.Lock()
 	r.keys = append(r.keys, key)
 	r.mu.Unlock()
-	return r.Storage.Put(ctx, key, body, size)
+	return r.Storage.Put(ctx, key, owner, body, size)
 }
 
 func (r *recordingStorage) last(t *testing.T) string {
