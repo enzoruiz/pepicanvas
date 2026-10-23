@@ -43,6 +43,8 @@ type canvases struct {
 	applied    map[canvas.Key]canvas.Canvas
 	operations map[string]appliedOperation
 	effects    int
+	// calls counts every Apply, including rejected ones.
+	calls int
 	// failNext, when set, fails the next Apply without an effect.
 	failNext error
 }
@@ -60,6 +62,9 @@ func (c *canvases) Load(_ context.Context, key canvas.Key) (canvas.Canvas, error
 }
 
 func (c *canvases) Apply(_ context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
 	if err := canvas.Validate(key, operation, mutation); err != nil {
 		return canvas.Result{}, err
 	}
@@ -102,6 +107,13 @@ func (c *canvases) Applies() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.effects
+}
+
+// ApplyCalls counts every call to Apply, whatever its outcome.
+func (c *canvases) ApplyCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 // Correlation returns the correlation ID retained with an operation.

@@ -6,10 +6,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ratelimit"
 )
 
 func dimensions(op string, width, height int) map[string]any {
@@ -274,8 +277,10 @@ func TestResizeReplayReturnsTheSameAnswer(t *testing.T) {
 	e.expectCanvas(alice, 1600, 900, 2)
 }
 
-// S11, CTRL-WEB-01 early primitive: Origin and CSRF are checked before the
-// body is read, the domain runs, or storage changes.
+// S11, CTRL-WEB-01 (TE-014 ingress): the resize route is a Session route, so
+// Origin and the session's CSRF token are checked before the session is read,
+// the body is decoded, the domain runs, or storage changes. Every refusal is
+// the ingress's exact forbidden answer, counted under its reason.
 func TestResizeChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 	e := newEnv(t, httpapi.DefaultLimits)
 	op := e.operator("op-http-dim-oper01", "operator@example.com")
@@ -288,28 +293,108 @@ func TestResizeChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 		opts   []option
 		status int
 		code   string
+		reason ingress.Reason
 	}{
-		"no session":                   {[]option{withCSRF(alice.csrf)}, http.StatusUnauthorized, "unauthorized"},
-		"no session, malformed body":   {[]option{withCSRF(alice.csrf), withBody("application/json", "{")}, http.StatusUnauthorized, "unauthorized"},
-		"missing CSRF":                 {[]option{withSession(alice.token)}, http.StatusForbidden, "forbidden"},
-		"invalid CSRF":                 {[]option{withSession(alice.token), withCSRF("not-the-token")}, http.StatusForbidden, "forbidden"},
-		"other session CSRF":           {[]option{withSession(alice.token), withCSRF(other.csrf)}, http.StatusForbidden, "forbidden"},
-		"absent Origin":                {[]option{withSession(alice.token), withCSRF(alice.csrf), withoutOrigin()}, http.StatusForbidden, "forbidden"},
-		"hostile Origin":               {[]option{withSession(alice.token), withCSRF(alice.csrf), withOrigin("https://evil.test")}, http.StatusForbidden, "forbidden"},
-		"missing CSRF, malformed body": {[]option{withSession(alice.token), withBody("application/json", "{")}, http.StatusForbidden, "forbidden"},
-		"missing CSRF, invalid size":   {[]option{withSession(alice.token), withBody("application/json", `{"operation_id":"op-http-dim-web001","width":1,"height":1}`)}, http.StatusForbidden, "forbidden"},
+		"no session":                   {[]option{withCSRF(alice.csrf)}, http.StatusUnauthorized, "unauthorized", ""},
+		"no session, malformed body":   {[]option{withCSRF(alice.csrf), withBody("application/json", "{")}, http.StatusUnauthorized, "unauthorized", ""},
+		"missing CSRF":                 {[]option{withSession(alice.token)}, http.StatusForbidden, "forbidden", ingress.ReasonCSRF},
+		"invalid CSRF":                 {[]option{withSession(alice.token), withCSRF("not-the-token")}, http.StatusForbidden, "forbidden", ingress.ReasonCSRF},
+		"other session CSRF":           {[]option{withSession(alice.token), withCSRF(other.csrf)}, http.StatusForbidden, "forbidden", ingress.ReasonCSRF},
+		"absent Origin":                {[]option{withSession(alice.token), withCSRF(alice.csrf), withoutOrigin()}, http.StatusForbidden, "forbidden", ingress.ReasonOrigin},
+		"hostile Origin":               {[]option{withSession(alice.token), withCSRF(alice.csrf), withOrigin("https://evil.test")}, http.StatusForbidden, "forbidden", ingress.ReasonOrigin},
+		"null Origin":                  {[]option{withSession(alice.token), withCSRF(alice.csrf), withOrigin("null")}, http.StatusForbidden, "forbidden", ingress.ReasonOrigin},
+		"suffix Origin":                {[]option{withSession(alice.token), withCSRF(alice.csrf), withOrigin(origin + ".evil.test")}, http.StatusForbidden, "forbidden", ingress.ReasonOrigin},
+		"hostile Origin, no CSRF":      {[]option{withSession(alice.token), withOrigin("https://evil.test")}, http.StatusForbidden, "forbidden", ingress.ReasonOrigin},
+		"missing CSRF, malformed body": {[]option{withSession(alice.token), withBody("application/json", "{")}, http.StatusForbidden, "forbidden", ingress.ReasonCSRF},
+		"missing CSRF, invalid size":   {[]option{withSession(alice.token), withBody("application/json", `{"operation_id":"op-http-dim-web001","width":1,"height":1}`)}, http.StatusForbidden, "forbidden", ingress.ReasonCSRF},
 	}
 	for name, c := range rejected {
-		t.Run(name, func(t *testing.T) {
-			expectError(t, e.do(http.MethodPut, path, body, c.opts...), c.status, c.code)
-			e.expectApplies(0)
-		})
+		before := e.effects()
+		var count uint64
+		if c.reason != "" {
+			count = reasonCount(e.ingress, c.reason)
+		}
+		res := e.do(http.MethodPut, path, body, c.opts...)
+		if sessionCookie(res) != nil {
+			t.Fatalf("%s: a refused resize touched the session cookie", name)
+		}
+		expectError(t, res, c.status, c.code)
+		if c.reason == "" {
+			// Without a cookie there is no token to forge: the handler reads
+			// the absent session and answers 401 before the body.
+			after := e.effects()
+			if after.storage != before.storage || after.calls["Apply"] != before.calls["Apply"] {
+				t.Fatalf("%s reached the canvas: %+v -> %+v", name, before, after)
+			}
+			continue
+		}
+		e.expectNoEffect("resize with "+name, before)
+		if got := reasonCount(e.ingress, c.reason); got != count+1 {
+			t.Fatalf("%s: %s rejections = %d, want %d", name, c.reason, got, count+1)
+		}
+	}
+	if got := e.canvases.ApplyCalls(); got != 0 {
+		t.Fatalf("Apply calls = %d, want 0", got)
 	}
 	e.expectCanvas(alice, 1920, 1080, 0)
 
 	// Valid CSRF from the allowed Origin reaches the domain.
 	expectResized(t, e.resize(alice.signedIn, alice.path, body), alice.canvasID, 1280, 720, 1)
 	e.expectApplies(1)
+}
+
+// S10, S11: a resize the ingress refuses (Origin, CSRF, the per-session
+// mutation budget of Session routes) retains no operation, so a retry under
+// the same operation ID has exactly one effect and replays it.
+func TestResizeRefusedByTheIngressLeavesNoOperation(t *testing.T) {
+	limits := ingress.DefaultLimits
+	limits.MutationsPerSession = ratelimit.Rate{Limit: 2, Window: time.Minute}
+	e := newEnvWith(t, httpapi.DefaultLimits, limits)
+	op := e.operator("op-http-dim-oper01", "operator@example.com")
+	alice := e.streamer(op, "alice1", "alice@example.com")
+	spent := e.signIn("alice@example.com")
+	const id = "op-http-dim-ing001"
+
+	for range 2 {
+		expectError(t, e.resize(spent, alice.path, nil, withBody("application/json", "{")), http.StatusBadRequest, "bad_request")
+	}
+	for _, c := range []struct {
+		name   string
+		s      signedIn
+		opts   []option
+		status int
+		code   string
+	}{
+		{"hostile Origin", alice.signedIn, []option{withOrigin("https://evil.test")}, http.StatusForbidden, "forbidden"},
+		{"absent Origin", alice.signedIn, []option{withoutOrigin()}, http.StatusForbidden, "forbidden"},
+		{"missing CSRF", alice.signedIn, []option{func(r *http.Request) { r.Header.Del(httpapi.CSRFHeader) }}, http.StatusForbidden, "forbidden"},
+		{"invalid CSRF", alice.signedIn, []option{withCSRF("not-the-token")}, http.StatusForbidden, "forbidden"},
+		{"session limit", spent, nil, http.StatusTooManyRequests, "rate_limited"},
+	} {
+		before := e.effects()
+		res := e.resize(c.s, alice.path, dimensions(id, 1280, 720), c.opts...)
+		if c.status == http.StatusTooManyRequests && res.Header.Get("Retry-After") != "60" {
+			t.Fatalf("%s: Retry-After = %q, want 60", c.name, res.Header.Get("Retry-After"))
+		}
+		expectError(t, res, c.status, c.code)
+		e.expectNoEffect(c.name, before)
+		if e.canvases.Correlation(id) != "" {
+			t.Fatalf("%s retained the operation", c.name)
+		}
+	}
+	if got := e.canvases.ApplyCalls(); got != 0 {
+		t.Fatalf("Apply calls = %d, want 0", got)
+	}
+	e.expectCanvas(alice, 1920, 1080, 0)
+
+	expectResized(t, e.resize(alice.signedIn, alice.path, dimensions(id, 1280, 720)), alice.canvasID, 1280, 720, 1)
+	first := e.bodies[len(e.bodies)-1]
+	expectResized(t, e.resize(alice.signedIn, alice.path, dimensions(id, 1280, 720)), alice.canvasID, 1280, 720, 1)
+	if again := e.bodies[len(e.bodies)-1]; again != first {
+		t.Fatalf("replay body = %s, want %s", again, first)
+	}
+	e.expectApplies(1)
+	e.expectCanvas(alice, 1280, 720, 1)
 }
 
 // S12: the confirmation log and the retained operation carry the request

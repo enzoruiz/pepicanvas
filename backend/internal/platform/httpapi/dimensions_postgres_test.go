@@ -394,6 +394,41 @@ func TestPostgresOnlyTheOwnerResizes(t *testing.T) {
 	p.expectStored(bob, 1920, 1080, 0, 0, 0)
 }
 
+// S11, CTRL-WEB-01: over real PostgreSQL, a missing or invalid CSRF token and
+// an absent or hostile Origin are refused by the ingress with its exact
+// forbidden answer, leaving the canvas row, its revision, its retained
+// operations, and its outbox unchanged; the valid request then commits once.
+func TestPostgresIngressRefusesResizeBeforeTheDomain(t *testing.T) {
+	p := openPGEnv(t, pgtest.Start(t))
+	op := p.operator("operator@example.com")
+	alice := p.streamer(op, "alice1", "alice@example.com")
+	other := p.http.signIn("alice@example.com")
+	const id = "op-pg-dim-web-001"
+
+	for _, c := range []struct {
+		name   string
+		opts   []option
+		reason ingress.Reason
+	}{
+		{"missing CSRF", []option{func(r *http.Request) { r.Header.Del(httpapi.CSRFHeader) }}, ingress.ReasonCSRF},
+		{"invalid CSRF", []option{withCSRF("not-the-token")}, ingress.ReasonCSRF},
+		{"other session CSRF", []option{withCSRF(other.csrf)}, ingress.ReasonCSRF},
+		{"absent Origin", []option{withoutOrigin()}, ingress.ReasonOrigin},
+		{"hostile Origin", []option{withOrigin("https://evil.test")}, ingress.ReasonOrigin},
+	} {
+		count := reasonCount(p.http.ingress, c.reason)
+		expectError(t, p.resize(alice.signedIn, alice.path, dimensions(id, 1280, 720), c.opts...), http.StatusForbidden, "forbidden")
+		if got := reasonCount(p.http.ingress, c.reason); got != count+1 {
+			t.Fatalf("%s: %s rejections = %d, want %d", c.name, c.reason, got, count+1)
+		}
+		p.expectStored(alice, 1920, 1080, 0, 0, 0)
+	}
+	p.http.expectCanvas(alice, 1920, 1080, 0)
+
+	expectResized(t, p.resize(alice.signedIn, alice.path, dimensions(id, 1280, 720)), alice.canvasID, 1280, 720, 1)
+	p.expectStored(alice, 1280, 720, 1, 1, 1)
+}
+
 // S5: concurrent resizes commit one at a time; the last confirmed revision
 // defines the dimensions.
 func TestPostgresConcurrentResizesLastConfirmedWins(t *testing.T) {

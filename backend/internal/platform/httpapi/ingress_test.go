@@ -28,16 +28,24 @@ type storage struct {
 	verifications int
 	transactions  int
 	records       int
+	canvasChanges int
 }
 
+// effects counts canvas Apply calls under "Apply" with the service calls.
 func (e *env) effects() effects {
 	accounts, sessions := e.store.Counts()
-	return effects{calls: e.calls.snapshot(), storage: storage{
+	calls := e.calls.snapshot()
+	if calls == nil {
+		calls = map[string]int{}
+	}
+	calls["Apply"] = e.canvases.ApplyCalls()
+	return effects{calls: calls, storage: storage{
 		accounts:      accounts,
 		sessions:      sessions,
 		verifications: e.hasher.Verifications(),
 		transactions:  e.subs.Transactions(),
 		records:       len(e.subs.Records()),
+		canvasChanges: e.canvases.Applies(),
 	}}
 }
 
@@ -53,7 +61,7 @@ func (e *env) expectNoEffect(name string, before effects) {
 }
 
 func (e *env) callsTo(name string) int {
-	return e.calls.snapshot()[name]
+	return e.effects().calls[name]
 }
 
 func reasonCount(in *ingress.Ingress, reason ingress.Reason) uint64 {
@@ -102,6 +110,7 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 	other := e.signIn("operator@example.com")
 	e.register("op-http-web-alice1", "alice@example.com")
 	leaver := e.signIn("alice@example.com")
+	carol := e.streamer(op, "carol1", "carol@example.com")
 
 	type route struct {
 		name, method, path string
@@ -115,6 +124,7 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 		{"sign-in", http.MethodPost, "/api/sessions", credentials("alice@example.com", password), nil, http.StatusCreated, "SignIn"},
 		{"activation", http.MethodPost, "/api/activations", activation("op-http-web-act001", "alice@example.com"), &op, http.StatusOK, "Activate"},
 		{"sign-out", http.MethodDelete, "/api/session", nil, &leaver, http.StatusNoContent, "SignOut"},
+		{"resize", http.MethodPut, carol.path + "/dimensions", dimensions("op-http-web-dim001", 1280, 720), &carol.signedIn, http.StatusOK, "Apply"},
 	}
 	origins := map[string]option{
 		"absent Origin":       withoutOrigin(),
@@ -167,6 +177,8 @@ func TestStaleSessionWithoutItsCSRFTokenIsRefusedBeforeAuthenticate(t *testing.T
 	op := e.operator("op-http-stale-op01", "operator@example.com")
 	e.register("op-http-stale-al01", "alice@example.com")
 	alice := e.signIn("alice@example.com")
+	carol := e.streamer(op, "carol1", "carol@example.com")
+	resize := carol.path + "/dimensions"
 	e.clock.Advance(access.SessionIdleTimeout)
 
 	for name, c := range map[string]struct {
@@ -178,6 +190,8 @@ func TestStaleSessionWithoutItsCSRFTokenIsRefusedBeforeAuthenticate(t *testing.T
 		"sign-out, invalid CSRF":   {http.MethodDelete, "/api/session", nil, []option{withSession(alice.token), withCSRF("not-the-token")}},
 		"activation, missing CSRF": {http.MethodPost, "/api/activations", activation("op-http-stale-ac01", "alice@example.com"), []option{withSession(op.token)}},
 		"activation, other CSRF":   {http.MethodPost, "/api/activations", activation("op-http-stale-ac01", "alice@example.com"), []option{withSession(op.token), withCSRF(alice.csrf)}},
+		"resize, missing CSRF":     {http.MethodPut, resize, dimensions("op-http-stale-dm01", 1280, 720), []option{withSession(carol.token)}},
+		"resize, other CSRF":       {http.MethodPut, resize, dimensions("op-http-stale-dm01", 1280, 720), []option{withSession(carol.token), withCSRF(alice.csrf)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := e.effects()
@@ -195,13 +209,15 @@ func TestStaleSessionWithoutItsCSRFTokenIsRefusedBeforeAuthenticate(t *testing.T
 		t.Fatalf("sign-out of an ended session = %d, want 204", res.StatusCode)
 	}
 	expectError(t, e.do(http.MethodPost, "/api/activations", activation("op-http-stale-ac02", "alice@example.com"), withSession(op.token), withCSRF(op.csrf)), http.StatusUnauthorized, "unauthorized")
+	expectError(t, e.do(http.MethodPut, resize, dimensions("op-http-stale-dm02", 1280, 720), withSession(carol.token), withCSRF(carol.csrf)), http.StatusUnauthorized, "unauthorized")
+	e.expectApplies(0)
 }
 
 // L2c: CORS stays closed. Every preflight is refused before routing and no
 // answer carries an Access-Control-* header.
 func TestPreflightsAreRefusedWithoutCORSHeaders(t *testing.T) {
 	e := newEnv(t, httpapi.DefaultLimits)
-	for _, path := range []string{"/api/accounts", "/api/sessions", "/api/session", "/api/activations", "/api/canvas", "/api/tenants/t/canvases/c", "/api/unknown"} {
+	for _, path := range []string{"/api/accounts", "/api/sessions", "/api/session", "/api/activations", "/api/canvas", "/api/tenants/t/canvases/c", "/api/tenants/t/canvases/c/dimensions", "/api/unknown"} {
 		t.Run(path, func(t *testing.T) {
 			before := e.effects()
 			res := e.do(http.MethodOptions, path, nil, withOrigin(origin), func(r *http.Request) {
@@ -212,8 +228,8 @@ func TestPreflightsAreRefusedWithoutCORSHeaders(t *testing.T) {
 			e.expectNoEffect("a preflight", before)
 		})
 	}
-	if got := reasonCount(e.ingress, ingress.ReasonPreflight); got != 7 {
-		t.Fatalf("preflight rejections = %d, want 7", got)
+	if got := reasonCount(e.ingress, ingress.ReasonPreflight); got != 8 {
+		t.Fatalf("preflight rejections = %d, want 8", got)
 	}
 }
 
