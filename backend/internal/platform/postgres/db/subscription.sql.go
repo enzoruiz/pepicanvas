@@ -364,6 +364,17 @@ func (q *Queries) LockAccountByEmail(ctx context.Context, email string) (string,
 	return account_id, err
 }
 
+const lockOperation = `-- name: LockOperation :exec
+SELECT pg_advisory_xact_lock(hashtextextended('subscription-operation:' || $1::text, 0))
+`
+
+// Activations and deactivations share one operation ID space; the lock is
+// released at commit or rollback.
+func (q *Queries) LockOperation(ctx context.Context, operationID string) error {
+	_, err := q.db.Exec(ctx, lockOperation, operationID)
+	return err
+}
+
 const lockOperator = `-- name: LockOperator :one
 SELECT account_id FROM operators WHERE account_id = $1 FOR SHARE
 `

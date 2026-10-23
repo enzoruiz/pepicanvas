@@ -196,6 +196,10 @@ func (t *subscriptionTx) Activation(ctx context.Context, operationID string, not
 	return record, true, nil
 }
 
+func (t *subscriptionTx) LockOperation(ctx context.Context, operationID string) error {
+	return t.q.LockOperation(ctx, operationID)
+}
+
 func (t *subscriptionTx) LockAccount(ctx context.Context, email string) (access.AccountID, bool, error) {
 	id, err := t.q.LockAccountByEmail(ctx, email)
 	if errors.Is(err, pgx.ErrNoRows) {

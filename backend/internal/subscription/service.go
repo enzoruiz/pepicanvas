@@ -92,6 +92,10 @@ func (s *Service) activate(ctx context.Context, request ActivateRequest, email s
 		if err := access.Check(access.OperatorRequest(operator, tenantID, access.ActionActivate)); err != nil {
 			return err
 		}
+		// Locked after the operator check, so a denied caller takes no lock.
+		if err := tx.LockOperation(ctx, request.OperationID); err != nil {
+			return fmt.Errorf("subscription: lock operation: %w", err)
+		}
 
 		record, found, err := tx.Activation(ctx, request.OperationID, notBefore)
 		if err != nil {
@@ -103,6 +107,12 @@ func (s *Service) activate(ctx context.Context, request ActivateRequest, email s
 			}
 			result = record.Result
 			return nil
+		}
+		// A deactivation retaining the ID is a different payload.
+		if _, found, err := tx.Deactivation(ctx, request.OperationID, notBefore); err != nil {
+			return fmt.Errorf("subscription: find deactivation: %w", err)
+		} else if found {
+			return ErrOperationConflict
 		}
 
 		account, found, err := tx.LockAccount(ctx, email)
@@ -202,6 +212,10 @@ func (s *Service) deactivate(ctx context.Context, request DeactivateRequest, ema
 		if err := access.Check(access.OperatorRequest(operator, anyTenant, access.ActionDeactivate)); err != nil {
 			return err
 		}
+		// Locked after the operator check, so a denied caller takes no lock.
+		if err := tx.LockOperation(ctx, request.OperationID); err != nil {
+			return fmt.Errorf("subscription: lock operation: %w", err)
+		}
 
 		record, found, err := tx.Deactivation(ctx, request.OperationID, notBefore)
 		if err != nil {
@@ -213,6 +227,12 @@ func (s *Service) deactivate(ctx context.Context, request DeactivateRequest, ema
 			}
 			result = record.Result
 			return nil
+		}
+		// An activation retaining the ID is a different payload.
+		if _, found, err := tx.Activation(ctx, request.OperationID, notBefore); err != nil {
+			return fmt.Errorf("subscription: find activation: %w", err)
+		} else if found {
+			return ErrOperationConflict
 		}
 
 		account, found, err := tx.LockAccount(ctx, email)

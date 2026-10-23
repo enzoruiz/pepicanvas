@@ -10,6 +10,11 @@ SELECT account_id FROM operators WHERE account_id = $1;
 -- The grant stays locked until commit, so a revocation waits for the activation.
 SELECT account_id FROM operators WHERE account_id = $1 FOR SHARE;
 
+-- name: LockOperation :exec
+-- Activations and deactivations share one operation ID space; the lock is
+-- released at commit or rollback.
+SELECT pg_advisory_xact_lock(hashtextextended('subscription-operation:' || sqlc.arg(operation_id)::text, 0));
+
 -- name: LockAccountByEmail :one
 SELECT account_id FROM accounts WHERE email = $1 FOR UPDATE;
 

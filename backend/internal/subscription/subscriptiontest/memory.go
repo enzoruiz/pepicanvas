@@ -56,6 +56,7 @@ type MemoryStore struct {
 	beforeRecord   func()
 	transactions   int
 	accountLookups int
+	operationLocks int
 	nextCut        int64
 }
 
@@ -233,6 +234,13 @@ func (m *MemoryStore) Transactions() int {
 	return m.transactions
 }
 
+// OperationLocks counts LockOperation calls.
+func (m *MemoryStore) OperationLocks() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.operationLocks
+}
+
 // AccountLookups counts LockAccount calls.
 func (m *MemoryStore) AccountLookups() int {
 	m.mu.Lock()
@@ -309,6 +317,12 @@ func (t *memoryTx) Activation(_ context.Context, operationID string, notBefore t
 		return subscription.Record{}, false, nil
 	}
 	return record, true, nil
+}
+
+// LockOperation needs no lock: memory transactions already run one at a time.
+func (t *memoryTx) LockOperation(_ context.Context, _ string) error {
+	t.store.operationLocks++
+	return t.store.fail("LockOperation")
 }
 
 func (t *memoryTx) LockAccount(_ context.Context, email string) (access.AccountID, bool, error) {

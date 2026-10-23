@@ -123,6 +123,29 @@ func TestOperatorDeactivatesAStreamer(t *testing.T) {
 	}
 }
 
+// L10, CTRL-IDEM-01: an operation ID retained by one action is a conflict
+// for the other, in both directions, with nothing changed.
+func TestAnOperationIDIsAConflictAcrossActions(t *testing.T) {
+	e := newEnv(t, httpapi.DefaultLimits)
+	op, a, b := e.streamers()
+	activations := len(e.subs.Records())
+
+	expectError(t, e.do(http.MethodPost, "/api/deactivations", activation("op-http-dea-act-a1", "alice@example.com"), withSession(op.token), withCSRF(op.csrf)), http.StatusConflict, "conflict")
+	e.expectUnchanged(a, b)
+
+	e.deactivate(op, "op-http-cross-dea1", "alice@example.com")
+	expectError(t, e.do(http.MethodPost, "/api/activations", activation("op-http-cross-dea1", "alice@example.com"), withSession(op.token), withCSRF(op.csrf)), http.StatusConflict, "conflict")
+	if got := e.status(a["tenant_id"].(string)); got != access.SubscriptionInactive {
+		t.Fatalf("alice status after the conflict = %s, want inactive", got)
+	}
+	if n := len(e.subs.Records()); n != activations {
+		t.Fatalf("activation records = %d, want %d", n, activations)
+	}
+	if n := len(e.subs.Deactivations()); n != 1 {
+		t.Fatalf("deactivation records = %d, want 1", n)
+	}
+}
+
 // L3(g), S15: the owner of a deactivated tenant learns why its canvas is
 // denied; nobody else does.
 func TestDeactivatedOwnerIsToldTheSubscriptionIsInactive(t *testing.T) {

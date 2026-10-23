@@ -127,6 +127,10 @@ type DeactivationRecord struct {
 type Tx interface {
 	// IsOperator reads the operator grant and holds it until commit.
 	IsOperator(ctx context.Context, account access.AccountID) (bool, error)
+	// LockOperation holds the operation ID until commit, so activations and
+	// deactivations under one ID run one at a time and each sees the other's
+	// record.
+	LockOperation(ctx context.Context, operationID string) error
 	// Activation returns the record of operationID accepted after notBefore.
 	Activation(ctx context.Context, operationID string, notBefore time.Time) (Record, bool, error)
 	// LockAccount finds the account of a normalized email and locks it, so

@@ -731,3 +731,107 @@ func TestPendingCutsAreOldestFirstAndSettleOnce(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 }
+
+// CTRL-IDEM-01: an operation ID names one operation whatever its action, so
+// reusing it for the other action while retained is a conflict with no effect.
+func TestOperationIDsAreSharedAcrossActionsInPostgres(t *testing.T) {
+	clock := newAccountClock()
+	s := openSubscriptions(t, pgtest.Start(t), clock)
+	operator, a, _ := streamer(t, s, "alice@example.com")
+	activations := countActivationRows(t, s.pool)
+
+	if _, err := deactivateIn(s, operator, "op-activate-streamer", "alice@example.com"); !errors.Is(err, subscription.ErrOperationConflict) {
+		t.Fatalf("deactivation under an activation ID: err = %v, want ErrOperationConflict", err)
+	}
+	if facts := factsOf(t, s.pool, a.TenantID); facts != (tenantFacts{"active", 1}) {
+		t.Fatalf("tenant = %+v, want active at version 1", facts)
+	}
+	if rows := countDeactivationRows(t, s.pool); rows != (deactivationRows{}) {
+		t.Fatalf("deactivation rows = %+v, want none", rows)
+	}
+
+	mustDeactivate(t, s, operator, "op-cross-deactivate1", "alice@example.com")
+	deactivated := countDeactivationRows(t, s.pool)
+	if _, err := activate(s, operator, "op-cross-deactivate1", "alice@example.com"); !errors.Is(err, subscription.ErrOperationConflict) {
+		t.Fatalf("activation under a deactivation ID: err = %v, want ErrOperationConflict", err)
+	}
+	if facts := factsOf(t, s.pool, a.TenantID); facts != (tenantFacts{"inactive", 2}) {
+		t.Fatalf("tenant = %+v, want inactive at version 2", facts)
+	}
+	if rows := countActivationRows(t, s.pool); rows != activations {
+		t.Fatalf("activation rows = %+v, want %+v", rows, activations)
+	}
+	if rows := countDeactivationRows(t, s.pool); rows != deactivated {
+		t.Fatalf("deactivation rows = %+v, want %+v", rows, deactivated)
+	}
+
+	clock.Advance(subscription.ActivationRetention)
+	again := mustActivate(t, s, operator, "op-cross-deactivate1", "alice@example.com")
+	if again.TenantID != a.TenantID || again.CanvasID != a.CanvasID || again.Created {
+		t.Fatalf("reactivation under an expired deactivation ID = %+v, want A's tenant", again)
+	}
+	clock.Advance(subscription.ActivationRetention)
+	if got := mustDeactivate(t, s, operator, "op-activate-streamer", "alice@example.com"); !got.Deactivated || got.TenantID != a.TenantID {
+		t.Fatalf("deactivation under an expired activation ID = %+v, want A cut", got)
+	}
+}
+
+// A deactivation and an activation racing one new operation ID serialize on
+// the operation lock: the first commits and the second is a conflict.
+func TestConcurrentActionsUnderOneOperationIDHaveOneEffect(t *testing.T) {
+	s := openSubscriptions(t, pgtest.Start(t), newAccountClock())
+	operator, a, _ := streamer(t, s, "alice@example.com")
+	seedAccount(t, s, "bob@example.com")
+	activations := countActivationRows(t, s.pool)
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	var holdOnce, releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+	postgres.SetSubscriptionFault(s.store, func(_ context.Context, step string) error {
+		if step == "commit" {
+			holdOnce.Do(func() {
+				close(reached)
+				<-release
+			})
+		}
+		return nil
+	})
+	done, finished := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := deactivateIn(s, operator, "op-racing-operation1", "alice@example.com")
+		done <- err
+	}()
+	t.Cleanup(func() {
+		releaseHeld()
+		<-finished
+	})
+	select {
+	case <-reached:
+	case err := <-done:
+		t.Fatalf("deactivation ended before commit: %v", err)
+	}
+
+	racing := make(chan error, 1)
+	go func() {
+		_, err := activate(s, operator, "op-racing-operation1", "bob@example.com")
+		racing <- err
+	}()
+	waitForLockWaiters(t, s.pool, 1)
+	releaseHeld()
+	if err := <-done; err != nil {
+		t.Fatalf("deactivation: %v", err)
+	}
+	if err := <-racing; !errors.Is(err, subscription.ErrOperationConflict) {
+		t.Fatalf("racing activation: err = %v, want ErrOperationConflict", err)
+	}
+	if facts := factsOf(t, s.pool, a.TenantID); facts != (tenantFacts{"inactive", 2}) {
+		t.Fatalf("tenant = %+v, want inactive at version 2", facts)
+	}
+	if rows := countActivationRows(t, s.pool); rows != activations {
+		t.Fatalf("activation rows = %+v, want %+v (bob not activated)", rows, activations)
+	}
+	if rows := countDeactivationRows(t, s.pool); rows != (deactivationRows{1, 1, 1}) {
+		t.Fatalf("deactivation rows = %+v, want one record and one cut", rows)
+	}
+}

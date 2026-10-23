@@ -163,19 +163,81 @@ func TestAReusedDeactivationIDWithADifferentPayloadIsRejected(t *testing.T) {
 	requireUnchanged(t, store, before)
 }
 
-// An activation and a deactivation never share an operation answer: the
-// deactivation fingerprint covers the action.
-func TestAnActivationIDDoesNotReplayAsADeactivation(t *testing.T) {
+// An operation ID names one operation, whatever its action: while an
+// activation retains it, a deactivation under it is a different payload and
+// is rejected without effect, and the reverse (CTRL-IDEM-01).
+func TestAnActivationIDIsAConflictForADeactivation(t *testing.T) {
+	service, store, _, _, _ := activated(t)
+	before := snap(store)
+	if _, err := service.Deactivate(context.Background(), deactivate("activation-a-0001", "a@example.com")); !errors.Is(err, subscription.ErrOperationConflict) {
+		t.Fatalf("Deactivate under an activation ID: err = %v, want ErrOperationConflict", err)
+	}
+	requireUnchanged(t, store, before)
+}
+
+func TestADeactivationIDIsAConflictForAnActivation(t *testing.T) {
 	service, store, _, a, _ := activated(t)
+	if _, err := service.Deactivate(context.Background(), deactivate(deactivateOp, "a@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	before := snap(store)
+	for _, email := range []string{"a@example.com", "b@example.com"} {
+		if _, err := service.Activate(context.Background(), activate(deactivateOp, email)); !errors.Is(err, subscription.ErrOperationConflict) {
+			t.Fatalf("Activate %s under a deactivation ID: err = %v, want ErrOperationConflict", email, err)
+		}
+	}
+	requireUnchanged(t, store, before)
+	if got := before.tenants[a.TenantID].Status; got != access.SubscriptionInactive {
+		t.Fatalf("A status = %s, want inactive", got)
+	}
+}
+
+// Once the other action's record expires, the ID starts a new operation.
+func TestAnOperationIDCrossesActionsAfterRetention(t *testing.T) {
+	service, store, c, a, _ := activated(t)
+	c.advance(subscription.ActivationRetention)
 	got, err := service.Deactivate(context.Background(), deactivate("activation-a-0001", "a@example.com"))
 	if err != nil {
-		t.Fatalf("Deactivate under an activation ID: %v", err)
+		t.Fatalf("Deactivate under an expired activation ID: %v", err)
 	}
 	if !got.Deactivated || got.TenantID != a.TenantID {
-		t.Fatalf("deactivation = %+v, want a real cut", got)
+		t.Fatalf("deactivation = %+v, want A cut", got)
 	}
-	if len(store.Cuts()) != 1 {
-		t.Fatalf("cuts = %d, want 1", len(store.Cuts()))
+	if n := len(store.Cuts()); n != 1 {
+		t.Fatalf("cuts = %d, want 1", n)
+	}
+
+	c.advance(subscription.ActivationRetention)
+	again, err := service.Activate(context.Background(), activate("activation-a-0001", "a@example.com"))
+	if err != nil {
+		t.Fatalf("Activate under an expired deactivation ID: %v", err)
+	}
+	if again.TenantID != a.TenantID || again.CanvasID != a.CanvasID || again.Created {
+		t.Fatalf("reactivation = %+v, want A's tenant and canvas", again)
+	}
+}
+
+// Both actions lock the operation ID before reading either record, after the
+// operator check, so a non-operator takes no lock.
+func TestBothActionsLockTheOperationID(t *testing.T) {
+	service, store, _, _, _ := activated(t)
+	locks := store.OperationLocks()
+	if _, err := service.Deactivate(context.Background(), deactivate(deactivateOp, "a@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Activate(context.Background(), activate("activation-c-0001", "a@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.OperationLocks() - locks; got != 2 {
+		t.Fatalf("operation locks = %d, want 2", got)
+	}
+	request := deactivate("deactivation-00002", "a@example.com")
+	request.OperatorID = stranger
+	if _, err := service.Deactivate(context.Background(), request); !errors.Is(err, access.ErrAccessDenied) {
+		t.Fatalf("non-operator: err = %v, want ErrAccessDenied", err)
+	}
+	if got := store.OperationLocks() - locks; got != 2 {
+		t.Fatalf("operation locks after a denial = %d, want 2", got)
 	}
 }
 
