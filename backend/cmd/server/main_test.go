@@ -504,6 +504,89 @@ func TestGrantOperatorRejectsBadInput(t *testing.T) {
 	}
 }
 
+// pendingOutbox counts the outbox records of tenant by state.
+func pendingOutbox(t *testing.T, dsn, tenant string) (pending, delivered int) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	err = conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE settled_at IS NULL),
+		count(*) FILTER (WHERE outcome = 'delivered' AND settled_at IS NOT NULL)
+		FROM canvas_outbox WHERE tenant_id = $1`, tenant).Scan(&pending, &delivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pending, delivered
+}
+
+// TestServerPublishesCommittedResizesAndStopsThePublisher covers US-007 S9
+// and S15: the running server delivers the outbox record of a resize without
+// a restart, and SIGTERM stops the publisher and hub within the budget.
+func TestServerPublishesCommittedResizesAndStopsThePublisher(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	registerAndSignIn(t, server, "op-publish-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-publish-alice-1", "alice@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	_, a := activate(t, server, operator, "op-publish-act-a01", "alice@example.com")
+	if a == nil {
+		t.Fatal("activate alice failed")
+	}
+	tenant, canvasID := a["tenant_id"].(string), a["canvas_id"].(string)
+
+	res := requestWith(t, server, http.MethodPut, "/api/tenants/"+tenant+"/canvases/"+canvasID+"/dimensions",
+		`{"operation_id":"op-publish-size-01","width":1280,"height":720}`, alice.cookie, alice.csrf)
+	if body := decodeBody(t, res); res.StatusCode != http.StatusOK || body["revision"] != float64(1) {
+		t.Fatalf("resize = %d %v", res.StatusCode, body)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	pending, delivered := pendingOutbox(t, dsn, tenant)
+	for (pending != 0 || delivered != 1) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		pending, delivered = pendingOutbox(t, dsn, tenant)
+	}
+	if pending != 0 || delivered != 1 {
+		t.Fatalf("outbox of %s: %d pending, %d delivered; want 0 and 1\n%s", tenant, pending, delivered, server.logs)
+	}
+
+	began := time.Now()
+	server.stop(t)
+	if elapsed := time.Since(began); elapsed > 5*time.Second {
+		t.Fatalf("shutdown took %v, over the 5s budget", elapsed)
+	}
+	logs := server.logs.String()
+	for _, msg := range []string{`"msg":"outbox record delivered"`, `"msg":"stopped"`} {
+		if !strings.Contains(logs, msg) {
+			t.Errorf("process logs lack %s\n%s", msg, logs)
+		}
+	}
+	for name, s := range map[string]string{
+		"password":      "correct horse battery",
+		"session token": strings.TrimPrefix(alice.cookie, "__Host-pcs="),
+		"CSRF token":    alice.csrf,
+		"database URL":  dsn,
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}
+
 // S1, S4, L2c: the built server answers API and static requests with the
 // security headers, refuses preflights without CORS headers, and refuses
 // unsafe methods on static files.

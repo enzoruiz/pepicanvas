@@ -1,6 +1,10 @@
-// Client for the account, session, and activation API (US-001, US-002).
-// Responses are reduced to a closed set of outcomes; server text never
-// reaches the UI.
+// Client for the account, session, activation, and canvas API (US-001,
+// US-002, US-007). Responses are reduced to a closed set of outcomes; server
+// text never reaches the UI.
+
+import type { CanvasObject } from "../canvas/CanvasSurface";
+
+export type { CanvasObject };
 
 export interface Session {
   accountId: string;
@@ -14,6 +18,15 @@ export interface OwnCanvas {
   canvasId: string;
   width: number;
   height: number;
+  revision: number;
+  objects: CanvasObject[];
+}
+
+export interface Dimensions {
+  canvasId: string;
+  width: number;
+  height: number;
+  revision: number;
 }
 
 export interface Activation {
@@ -149,23 +162,108 @@ export async function signOut(csrfToken: string): Promise<Result<undefined>> {
   return result.ok ? { ok: true, value: undefined } : result;
 }
 
+function toCanvasObject(value: unknown): CanvasObject | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { id, kind, content, x, y, width, height, rotation, z } =
+    value as Record<string, unknown>;
+  if (
+    typeof id === "string" &&
+    typeof kind === "string" &&
+    typeof content === "string" &&
+    Number.isInteger(x) &&
+    Number.isInteger(y) &&
+    Number.isInteger(width) &&
+    Number.isInteger(height) &&
+    typeof rotation === "number" &&
+    Number.isFinite(rotation) &&
+    Number.isInteger(z)
+  ) {
+    return {
+      id,
+      kind,
+      content,
+      x: x as number,
+      y: y as number,
+      width: width as number,
+      height: height as number,
+      rotation,
+      z: z as number,
+    };
+  }
+  return undefined;
+}
+
 export async function getOwnCanvas(): Promise<Result<OwnCanvas>> {
   const result = await call("GET", "/api/canvas");
   if (!result.ok) return result;
   if (typeof result.value === "object" && result.value !== null) {
-    const { tenant_id, canvas_id, width, height } = result.value as Record<
-      string,
-      unknown
-    >;
+    const { tenant_id, canvas_id, width, height, revision, objects } =
+      result.value as Record<string, unknown>;
     if (
       typeof tenant_id === "string" &&
       typeof canvas_id === "string" &&
-      typeof width === "number" &&
-      typeof height === "number"
+      Number.isInteger(width) &&
+      Number.isInteger(height) &&
+      Number.isInteger(revision) &&
+      Array.isArray(objects)
+    ) {
+      const parsed = objects.map(toCanvasObject);
+      if (
+        parsed.every((object): object is CanvasObject => object !== undefined)
+      ) {
+        return {
+          ok: true,
+          value: {
+            tenantId: tenant_id,
+            canvasId: canvas_id,
+            width: width as number,
+            height: height as number,
+            revision: revision as number,
+            objects: parsed,
+          },
+        };
+      }
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+export async function setDimensions(
+  csrfToken: string,
+  tenantId: string,
+  canvasId: string,
+  operationId: string,
+  width: number,
+  height: number,
+): Promise<Result<Dimensions>> {
+  const result = await call(
+    "PUT",
+    `/api/tenants/${encodeURIComponent(tenantId)}/canvases/${encodeURIComponent(canvasId)}/dimensions`,
+    { operation_id: operationId, width, height },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const {
+      canvas_id,
+      width: confirmedWidth,
+      height: confirmedHeight,
+      revision,
+    } = result.value as Record<string, unknown>;
+    if (
+      typeof canvas_id === "string" &&
+      Number.isInteger(confirmedWidth) &&
+      Number.isInteger(confirmedHeight) &&
+      Number.isInteger(revision)
     ) {
       return {
         ok: true,
-        value: { tenantId: tenant_id, canvasId: canvas_id, width, height },
+        value: {
+          canvasId: canvas_id,
+          width: confirmedWidth as number,
+          height: confirmedHeight as number,
+          revision: revision as number,
+        },
       };
     }
   }

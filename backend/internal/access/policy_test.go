@@ -14,6 +14,7 @@ func TestAuthorizeExplicitAllowRulesAndTenantIsolation(t *testing.T) {
 	}{
 		{name: "owner views canvas", role: RoleOwner, resource: ResourceCanvas, action: ActionView},
 		{name: "owner edits canvas", role: RoleOwner, resource: ResourceCanvas, action: ActionEdit},
+		{name: "owner administers canvas", role: RoleOwner, resource: ResourceCanvas, action: ActionAdminister},
 		{name: "owner views memberships", role: RoleOwner, resource: ResourceMembership, action: ActionView},
 		{name: "owner administers owner membership", role: RoleOwner, resource: ResourceMembership, action: ActionAdminister, targetRole: RoleOwner},
 		{name: "moderator views memberships", role: RoleModerator, resource: ResourceMembership, action: ActionView},
@@ -63,6 +64,9 @@ func TestAuthorizeDeniesUnlistedRoleResourceActions(t *testing.T) {
 		targetRole Role
 	}{
 		{name: "OBS cannot edit canvas", role: RoleOBS, resource: ResourceCanvas, action: ActionEdit},
+		{name: "OBS cannot administer canvas", role: RoleOBS, resource: ResourceCanvas, action: ActionAdminister},
+		{name: "moderator cannot administer canvas", role: RoleModerator, resource: ResourceCanvas, action: ActionAdminister},
+		{name: "operator cannot administer canvas", role: RoleOperator, resource: ResourceCanvas, action: ActionAdminister},
 		{name: "OBS cannot view invitations", role: RoleOBS, resource: ResourceInvitation, action: ActionView},
 		{name: "OBS cannot view memberships", role: RoleOBS, resource: ResourceMembership, action: ActionView},
 		{name: "OBS cannot view subscription", role: RoleOBS, resource: ResourceSubscription, action: ActionView},

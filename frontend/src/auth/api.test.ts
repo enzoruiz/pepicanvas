@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
-import { activate, getOwnCanvas, getSession } from "./api";
+import { activate, getOwnCanvas, getSession, setDimensions } from "./api";
 
 let calls: Call[];
 let replies: Reply[];
@@ -57,6 +57,18 @@ describe("getSession", () => {
   );
 });
 
+const textObject = {
+  id: "obj-1",
+  kind: "text",
+  content: "Hello",
+  x: -10,
+  y: 20,
+  width: 300,
+  height: 40,
+  rotation: 12.5,
+  z: 3,
+};
+
 describe("getOwnCanvas", () => {
   it("reads the own canvas", async () => {
     replies.push(
@@ -65,14 +77,33 @@ describe("getOwnCanvas", () => {
         canvas_id: canvasId,
         width: 1920,
         height: 1080,
-        revision: 0,
-        objects: [],
+        revision: 7,
+        objects: [textObject],
       }),
     );
 
     expect(await getOwnCanvas()).toEqual({
       ok: true,
-      value: { tenantId, canvasId, width: 1920, height: 1080 },
+      value: {
+        tenantId,
+        canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 7,
+        objects: [
+          {
+            id: "obj-1",
+            kind: "text",
+            content: "Hello",
+            x: -10,
+            y: 20,
+            width: 300,
+            height: 40,
+            rotation: 12.5,
+            z: 3,
+          },
+        ],
+      },
     });
     expect(calls[0]).toMatchObject({ method: "GET", path: "/api/canvas" });
   });
@@ -87,6 +118,108 @@ describe("getOwnCanvas", () => {
     replies.push(json(200, { tenant_id: tenantId, canvas_id: canvasId }));
 
     expect(await getOwnCanvas()).toEqual({ ok: false, error: "unavailable" });
+  });
+
+  it.each([
+    ["no revision", { revision: undefined }],
+    ["a fractional revision", { revision: 1.5 }],
+    ["no objects", { objects: undefined }],
+    ["objects that are not a list", { objects: {} }],
+    ["a null object", { objects: [null] }],
+    ["an object without id", { objects: [{ ...textObject, id: 1 }] }],
+    ["an object without kind", { objects: [{ ...textObject, kind: null }] }],
+    ["an object without content", { objects: [{ ...textObject, content: 0 }] }],
+    ["a fractional x", { objects: [{ ...textObject, x: 1.5 }] }],
+    ["a string y", { objects: [{ ...textObject, y: "20" }] }],
+    ["a missing width", { objects: [{ ...textObject, width: undefined }] }],
+    ["a fractional height", { objects: [{ ...textObject, height: 0.5 }] }],
+    ["a string rotation", { objects: [{ ...textObject, rotation: "12" }] }],
+    ["a fractional z", { objects: [{ ...textObject, z: 0.5 }] }],
+    ["a fractional canvas width", { width: 1920.5 }],
+  ])("rejects a canvas with %s", async (_, change) => {
+    replies.push(
+      json(200, {
+        tenant_id: tenantId,
+        canvas_id: canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 0,
+        objects: [textObject],
+        ...change,
+      }),
+    );
+
+    expect(await getOwnCanvas()).toEqual({ ok: false, error: "unavailable" });
+  });
+});
+
+describe("setDimensions", () => {
+  it("sends the operation, size, and CSRF token to the canvas", async () => {
+    replies.push(
+      json(200, { canvas_id: canvasId, width: 320, height: 180, revision: 4 }),
+    );
+
+    expect(
+      await setDimensions(
+        "csrf",
+        tenantId,
+        canvasId,
+        "operation-id-0001",
+        320,
+        180,
+      ),
+    ).toEqual({
+      ok: true,
+      value: { canvasId, width: 320, height: 180, revision: 4 },
+    });
+    expect(calls[0]).toMatchObject({
+      method: "PUT",
+      path: `/api/tenants/${tenantId}/canvases/${canvasId}/dimensions`,
+      headers: { "X-CSRF-Token": "csrf", "Content-Type": "application/json" },
+      body: { operation_id: "operation-id-0001", width: 320, height: 180 },
+    });
+    expect(Object.keys(calls[0].body ?? {}).sort()).toEqual([
+      "height",
+      "operation_id",
+      "width",
+    ]);
+  });
+
+  it.each([
+    ["bad_request", 400],
+    ["forbidden", 403],
+    ["conflict", 409],
+    ["unauthorized", 401],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code, correlation_id: "c" }));
+
+    expect(
+      await setDimensions("csrf", tenantId, canvasId, "op", 320, 180),
+    ).toEqual({ ok: false, error: code });
+  });
+
+  it.each([json(500, { error: "internal" }), "network-error" as const])(
+    "reports %o as unavailable",
+    async (reply) => {
+      replies.push(reply);
+
+      expect(
+        await setDimensions("csrf", tenantId, canvasId, "op", 320, 180),
+      ).toEqual({ ok: false, error: "unavailable" });
+    },
+  );
+
+  it.each([
+    { width: 320, height: 180, revision: 4 },
+    { canvas_id: canvasId, width: "320", height: 180, revision: 4 },
+    { canvas_id: canvasId, width: 320, height: 180.5, revision: 4 },
+    { canvas_id: canvasId, width: 320, height: 180 },
+  ])("rejects a malformed answer %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(
+      await setDimensions("csrf", tenantId, canvasId, "op", 320, 180),
+    ).toEqual({ ok: false, error: "unavailable" });
   });
 });
 
