@@ -36,7 +36,7 @@ Issue: "Reflujo, escalado global y formatos alternativos por canvas." Also: WebS
 | T4 | S1, S2, S6, S16 | inline, test-first: frontend API client, dimensions form, shared `CanvasSurface`, Vitest | done | see L9 |
 | T5 | S1, S4, S6, S8, S16 | gentle-ai-worker: Playwright end-to-end over the real server | done | see L10 |
 | T7 | S9, S15 | gentle-ai-worker, test-first: `cmd/server` starts the outbox publisher with a realtime hub (`WithCommitted(publisher.Notify)`), closes it on shutdown; process test | done | see L8 |
-| T6 | all | docs (`docs/stack.md`), review assess, verification, per-S verdicts | pending | |
+| T6 | all | docs (`docs/stack.md`), review assess, verification, per-S verdicts | done | `e552ae2`, `a8fbc15`; native review see L12-L13 |
 
 ## Log
 
