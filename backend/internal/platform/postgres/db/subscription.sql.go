@@ -11,6 +11,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deactivateTenant = `-- name: DeactivateTenant :one
+UPDATE tenants
+SET subscription_status = 'inactive', access_version = access_version + 1
+WHERE tenant_id = $1 AND subscription_status = 'active'
+RETURNING access_version
+`
+
+// The row lock conflicts with the FOR SHARE read of every canvas mutation,
+// so mutations and deactivations of a tenant commit one at a time.
+func (q *Queries) DeactivateTenant(ctx context.Context, tenantID string) (int64, error) {
+	row := q.db.QueryRow(ctx, deactivateTenant, tenantID)
+	var access_version int64
+	err := row.Scan(&access_version)
+	return access_version, err
+}
+
 const deleteExpiredActivation = `-- name: DeleteExpiredActivation :exec
 DELETE FROM subscription_activations
 WHERE operation_id = $1 AND accepted_at <= $2
@@ -23,6 +39,21 @@ type DeleteExpiredActivationParams struct {
 
 func (q *Queries) DeleteExpiredActivation(ctx context.Context, arg DeleteExpiredActivationParams) error {
 	_, err := q.db.Exec(ctx, deleteExpiredActivation, arg.OperationID, arg.ExpiredAt)
+	return err
+}
+
+const deleteExpiredDeactivation = `-- name: DeleteExpiredDeactivation :exec
+DELETE FROM subscription_deactivations
+WHERE operation_id = $1 AND accepted_at <= $2
+`
+
+type DeleteExpiredDeactivationParams struct {
+	OperationID string
+	ExpiredAt   pgtype.Timestamptz
+}
+
+func (q *Queries) DeleteExpiredDeactivation(ctx context.Context, arg DeleteExpiredDeactivationParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredDeactivation, arg.OperationID, arg.ExpiredAt)
 	return err
 }
 
@@ -62,6 +93,46 @@ func (q *Queries) GetActivation(ctx context.Context, arg GetActivationParams) (G
 	return i, err
 }
 
+const getDeactivation = `-- name: GetDeactivation :one
+SELECT fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, correlation_id, accepted_at
+FROM subscription_deactivations
+WHERE operation_id = $1 AND accepted_at > $2
+`
+
+type GetDeactivationParams struct {
+	OperationID string
+	NotBefore   pgtype.Timestamptz
+}
+
+type GetDeactivationRow struct {
+	Fingerprint       []byte
+	OperatorAccountID string
+	AccountID         string
+	TenantID          string
+	CanvasID          string
+	Deactivated       bool
+	Version           int64
+	CorrelationID     pgtype.Text
+	AcceptedAt        pgtype.Timestamptz
+}
+
+func (q *Queries) GetDeactivation(ctx context.Context, arg GetDeactivationParams) (GetDeactivationRow, error) {
+	row := q.db.QueryRow(ctx, getDeactivation, arg.OperationID, arg.NotBefore)
+	var i GetDeactivationRow
+	err := row.Scan(
+		&i.Fingerprint,
+		&i.OperatorAccountID,
+		&i.AccountID,
+		&i.TenantID,
+		&i.CanvasID,
+		&i.Deactivated,
+		&i.Version,
+		&i.CorrelationID,
+		&i.AcceptedAt,
+	)
+	return i, err
+}
+
 const getOperator = `-- name: GetOperator :one
 SELECT account_id FROM operators WHERE account_id = $1
 `
@@ -74,7 +145,7 @@ func (q *Queries) GetOperator(ctx context.Context, accountID string) (string, er
 }
 
 const getOwnedTenant = `-- name: GetOwnedTenant :one
-SELECT tenant_id, canvas_id, subscription_status
+SELECT tenant_id, canvas_id, subscription_status, access_version
 FROM tenants
 WHERE owner_account_id = $1
 `
@@ -83,12 +154,18 @@ type GetOwnedTenantRow struct {
 	TenantID           string
 	CanvasID           pgtype.Text
 	SubscriptionStatus string
+	AccessVersion      int64
 }
 
 func (q *Queries) GetOwnedTenant(ctx context.Context, ownerAccountID pgtype.Text) (GetOwnedTenantRow, error) {
 	row := q.db.QueryRow(ctx, getOwnedTenant, ownerAccountID)
 	var i GetOwnedTenantRow
-	err := row.Scan(&i.TenantID, &i.CanvasID, &i.SubscriptionStatus)
+	err := row.Scan(
+		&i.TenantID,
+		&i.CanvasID,
+		&i.SubscriptionStatus,
+		&i.AccessVersion,
+	)
 	return i, err
 }
 
@@ -105,6 +182,28 @@ type GrantOperatorParams struct {
 
 func (q *Queries) GrantOperator(ctx context.Context, arg GrantOperatorParams) error {
 	_, err := q.db.Exec(ctx, grantOperator, arg.AccountID, arg.GrantedAt)
+	return err
+}
+
+const insertAccessCut = `-- name: InsertAccessCut :exec
+INSERT INTO access_cuts (tenant_id, version, correlation_id, created_at)
+VALUES ($1, $2, $3, $4)
+`
+
+type InsertAccessCutParams struct {
+	TenantID      string
+	Version       int64
+	CorrelationID pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) InsertAccessCut(ctx context.Context, arg InsertAccessCutParams) error {
+	_, err := q.db.Exec(ctx, insertAccessCut,
+		arg.TenantID,
+		arg.Version,
+		arg.CorrelationID,
+		arg.CreatedAt,
+	)
 	return err
 }
 
@@ -134,6 +233,40 @@ func (q *Queries) InsertActivation(ctx context.Context, arg InsertActivationPara
 		arg.TenantID,
 		arg.CanvasID,
 		arg.Created,
+		arg.CorrelationID,
+		arg.AcceptedAt,
+	)
+	return err
+}
+
+const insertDeactivation = `-- name: InsertDeactivation :exec
+INSERT INTO subscription_deactivations (operation_id, fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, correlation_id, accepted_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+`
+
+type InsertDeactivationParams struct {
+	OperationID       string
+	Fingerprint       []byte
+	OperatorAccountID string
+	AccountID         string
+	TenantID          string
+	CanvasID          string
+	Deactivated       bool
+	Version           int64
+	CorrelationID     pgtype.Text
+	AcceptedAt        pgtype.Timestamptz
+}
+
+func (q *Queries) InsertDeactivation(ctx context.Context, arg InsertDeactivationParams) error {
+	_, err := q.db.Exec(ctx, insertDeactivation,
+		arg.OperationID,
+		arg.Fingerprint,
+		arg.OperatorAccountID,
+		arg.AccountID,
+		arg.TenantID,
+		arg.CanvasID,
+		arg.Deactivated,
+		arg.Version,
 		arg.CorrelationID,
 		arg.AcceptedAt,
 	)
@@ -178,6 +311,48 @@ func (q *Queries) InsertOwnedTenant(ctx context.Context, arg InsertOwnedTenantPa
 	return err
 }
 
+const listPendingCuts = `-- name: ListPendingCuts :many
+SELECT id, tenant_id, version, correlation_id, created_at
+FROM access_cuts
+WHERE applied_at IS NULL
+ORDER BY id
+LIMIT $1
+`
+
+type ListPendingCutsRow struct {
+	ID            int64
+	TenantID      string
+	Version       int64
+	CorrelationID pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) ListPendingCuts(ctx context.Context, limit int32) ([]ListPendingCutsRow, error) {
+	rows, err := q.db.Query(ctx, listPendingCuts, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPendingCutsRow
+	for rows.Next() {
+		var i ListPendingCutsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.Version,
+			&i.CorrelationID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAccountByEmail = `-- name: LockAccountByEmail :one
 SELECT account_id FROM accounts WHERE email = $1 FOR UPDATE
 `
@@ -187,6 +362,17 @@ func (q *Queries) LockAccountByEmail(ctx context.Context, email string) (string,
 	var account_id string
 	err := row.Scan(&account_id)
 	return account_id, err
+}
+
+const lockOperation = `-- name: LockOperation :exec
+SELECT pg_advisory_xact_lock(hashtextextended('subscription-operation:' || $1::text, 0))
+`
+
+// Activations and deactivations share one operation ID space; the lock is
+// released at commit or rollback.
+func (q *Queries) LockOperation(ctx context.Context, operationID string) error {
+	_, err := q.db.Exec(ctx, lockOperation, operationID)
+	return err
 }
 
 const lockOperator = `-- name: LockOperator :one
@@ -216,6 +402,21 @@ func (q *Queries) PurgeExpiredActivations(ctx context.Context, expiredAt pgtype.
 	return err
 }
 
+const purgeExpiredDeactivations = `-- name: PurgeExpiredDeactivations :exec
+DELETE FROM subscription_deactivations
+WHERE operation_id IN (
+    SELECT d.operation_id FROM subscription_deactivations d
+    WHERE d.accepted_at <= $1
+    FOR UPDATE SKIP LOCKED
+)
+`
+
+// Rows locked by a concurrent purge are left for the next one.
+func (q *Queries) PurgeExpiredDeactivations(ctx context.Context, expiredAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, purgeExpiredDeactivations, expiredAt)
+	return err
+}
+
 const setTenantStatus = `-- name: SetTenantStatus :exec
 UPDATE tenants SET subscription_status = $2 WHERE tenant_id = $1
 `
@@ -227,5 +428,20 @@ type SetTenantStatusParams struct {
 
 func (q *Queries) SetTenantStatus(ctx context.Context, arg SetTenantStatusParams) error {
 	_, err := q.db.Exec(ctx, setTenantStatus, arg.TenantID, arg.SubscriptionStatus)
+	return err
+}
+
+const settleCut = `-- name: SettleCut :exec
+UPDATE access_cuts SET applied_at = $2
+WHERE id = $1 AND applied_at IS NULL
+`
+
+type SettleCutParams struct {
+	ID        int64
+	AppliedAt pgtype.Timestamptz
+}
+
+func (q *Queries) SettleCut(ctx context.Context, arg SettleCutParams) error {
+	_, err := q.db.Exec(ctx, settleCut, arg.ID, arg.AppliedAt)
 	return err
 }

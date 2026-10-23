@@ -193,6 +193,19 @@ func (q *Queries) LockCanvas(ctx context.Context, arg LockCanvasParams) (int64, 
 	return revision, err
 }
 
+const lockTenantStatus = `-- name: LockTenantStatus :one
+SELECT subscription_status FROM tenants WHERE tenant_id = $1 FOR SHARE
+`
+
+// Read after the canvas lock and held until commit, so a deactivation of the
+// tenant waits for the mutation, and a mutation after it sees it.
+func (q *Queries) LockTenantStatus(ctx context.Context, tenantID string) (string, error) {
+	row := q.db.QueryRow(ctx, lockTenantStatus, tenantID)
+	var subscription_status string
+	err := row.Scan(&subscription_status)
+	return subscription_status, err
+}
+
 const objectExists = `-- name: ObjectExists :one
 SELECT EXISTS (
     SELECT 1 FROM canvas_objects

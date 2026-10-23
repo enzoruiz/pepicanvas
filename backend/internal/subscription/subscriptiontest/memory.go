@@ -4,7 +4,9 @@ package subscriptiontest
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +22,14 @@ type state struct {
 	memberships map[[2]string]access.Role
 	canvases    map[canvas.Key]canvas.Dimensions
 	records     map[string]subscription.Record
+	// deactivations are the retained deactivation records by operation ID.
+	deactivations map[string]subscription.DeactivationRecord
+	cuts          []memoryCut
+}
+
+type memoryCut struct {
+	subscription.PendingCut
+	appliedAt time.Time
 }
 
 func (s state) clone() state {
@@ -30,6 +40,9 @@ func (s state) clone() state {
 		memberships: maps.Clone(s.memberships),
 		canvases:    maps.Clone(s.canvases),
 		records:     maps.Clone(s.records),
+
+		deactivations: maps.Clone(s.deactivations),
+		cuts:          slices.Clone(s.cuts),
 	}
 }
 
@@ -43,9 +56,14 @@ type MemoryStore struct {
 	beforeRecord   func()
 	transactions   int
 	accountLookups int
+	operationLocks int
+	nextCut        int64
 }
 
-var _ subscription.Store = (*MemoryStore)(nil)
+var (
+	_ subscription.Store    = (*MemoryStore)(nil)
+	_ subscription.CutStore = (*MemoryStore)(nil)
+)
 
 // NewMemoryStore returns an empty store.
 func NewMemoryStore() *MemoryStore {
@@ -57,6 +75,8 @@ func NewMemoryStore() *MemoryStore {
 			memberships: map[[2]string]access.Role{},
 			canvases:    map[canvas.Key]canvas.Dimensions{},
 			records:     map[string]subscription.Record{},
+
+			deactivations: map[string]subscription.DeactivationRecord{},
 		},
 		failures: map[string]error{},
 	}
@@ -92,16 +112,17 @@ func (m *MemoryStore) SetStatus(tenantID string, status access.SubscriptionStatu
 	m.state.tenants[tenantID] = tenant
 }
 
-// FailOnce makes the next call of step (a Tx method name, or "commit") fail with err.
+// FailOnce makes the next call of step (a Tx method name, "commit",
+// "PendingCuts", or "SettleCut") fail with err.
 func (m *MemoryStore) FailOnce(step string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failures[step] = err
 }
 
-// BeforeRecordOnce runs fn at the start of the next RecordActivation with the
-// store unlocked, as a concurrent transaction that commits before that
-// activation inserts its record.
+// BeforeRecordOnce runs fn at the start of the next RecordActivation or
+// RecordDeactivation with the store unlocked, as a concurrent transaction that
+// commits before that operation inserts its record.
 func (m *MemoryStore) BeforeRecordOnce(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,11 +162,83 @@ func (m *MemoryStore) Records() map[string]subscription.Record {
 	return maps.Clone(m.state.records)
 }
 
+// Deactivations returns the committed deactivation records by operation ID.
+func (m *MemoryStore) Deactivations() map[string]subscription.DeactivationRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.state.deactivations)
+}
+
+// Cuts returns every committed access cut, pending or applied, in order.
+func (m *MemoryStore) Cuts() []subscription.PendingCut {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cuts := make([]subscription.PendingCut, 0, len(m.state.cuts))
+	for _, cut := range m.state.cuts {
+		cuts = append(cuts, cut.PendingCut)
+	}
+	return cuts
+}
+
+// AppliedAt returns when the cut was settled, or false while it is pending
+// or unknown.
+func (m *MemoryStore) AppliedAt(id int64) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, cut := range m.state.cuts {
+		if cut.ID == id && !cut.appliedAt.IsZero() {
+			return cut.appliedAt, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// PendingCuts returns up to limit committed cuts not yet settled, oldest first.
+func (m *MemoryStore) PendingCuts(_ context.Context, limit int) ([]subscription.PendingCut, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("PendingCuts"); err != nil {
+		return nil, err
+	}
+	var pending []subscription.PendingCut
+	for _, cut := range m.state.cuts {
+		if len(pending) == limit {
+			break
+		}
+		if cut.appliedAt.IsZero() {
+			pending = append(pending, cut.PendingCut)
+		}
+	}
+	return pending, nil
+}
+
+// SettleCut marks a pending cut applied; an applied or unknown cut is unchanged.
+func (m *MemoryStore) SettleCut(_ context.Context, id int64, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("SettleCut"); err != nil {
+		return err
+	}
+	for i, cut := range m.state.cuts {
+		if cut.ID == id && cut.appliedAt.IsZero() {
+			m.state.cuts[i].appliedAt = at
+		}
+	}
+	return nil
+}
+
 // Transactions counts started transactions.
 func (m *MemoryStore) Transactions() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.transactions
+}
+
+// OperationLocks counts LockOperation calls.
+func (m *MemoryStore) OperationLocks() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.operationLocks
 }
 
 // AccountLookups counts LockAccount calls.
@@ -160,7 +253,7 @@ func (m *MemoryStore) InTx(_ context.Context, fn func(subscription.Tx) error) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.transactions++
-	tx := &memoryTx{store: m, state: m.state.clone()}
+	tx := &memoryTx{store: m, state: m.state.clone(), nextCut: m.nextCut}
 	if err := fn(tx); err != nil {
 		return err
 	}
@@ -168,6 +261,7 @@ func (m *MemoryStore) InTx(_ context.Context, fn func(subscription.Tx) error) er
 		return err
 	}
 	m.state = tx.state
+	m.nextCut = tx.nextCut
 	return nil
 }
 
@@ -202,8 +296,9 @@ func ownedBy(s state, account access.AccountID) (subscription.Tenant, bool, erro
 }
 
 type memoryTx struct {
-	store *MemoryStore
-	state state
+	store   *MemoryStore
+	state   state
+	nextCut int64
 }
 
 func (t *memoryTx) IsOperator(_ context.Context, account access.AccountID) (bool, error) {
@@ -222,6 +317,12 @@ func (t *memoryTx) Activation(_ context.Context, operationID string, notBefore t
 		return subscription.Record{}, false, nil
 	}
 	return record, true, nil
+}
+
+// LockOperation needs no lock: memory transactions already run one at a time.
+func (t *memoryTx) LockOperation(_ context.Context, _ string) error {
+	t.store.operationLocks++
+	return t.store.fail("LockOperation")
 }
 
 func (t *memoryTx) LockAccount(_ context.Context, email string) (access.AccountID, bool, error) {
@@ -283,5 +384,70 @@ func (t *memoryTx) RecordActivation(_ context.Context, record subscription.Recor
 		return subscription.ErrOperationRetained
 	}
 	t.state.records[record.OperationID] = record
+	return nil
+}
+
+func (t *memoryTx) Deactivation(_ context.Context, operationID string, notBefore time.Time) (subscription.DeactivationRecord, bool, error) {
+	if err := t.store.fail("Deactivation"); err != nil {
+		return subscription.DeactivationRecord{}, false, err
+	}
+	record, ok := t.state.deactivations[operationID]
+	if !ok || !record.AcceptedAt.After(notBefore) {
+		return subscription.DeactivationRecord{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (t *memoryTx) DeactivateTenant(_ context.Context, tenantID string) (uint64, error) {
+	if err := t.store.fail("DeactivateTenant"); err != nil {
+		return 0, err
+	}
+	tenant, ok := t.state.tenants[tenantID]
+	if !ok || tenant.Status != access.SubscriptionActive {
+		return 0, fmt.Errorf("subscriptiontest: tenant %q is not active", tenantID)
+	}
+	tenant.Status = access.SubscriptionInactive
+	tenant.Version++
+	t.state.tenants[tenantID] = tenant
+	return tenant.Version, nil
+}
+
+func (t *memoryTx) RecordCut(_ context.Context, cut subscription.AccessCut) error {
+	if err := t.store.fail("RecordCut"); err != nil {
+		return err
+	}
+	for _, existing := range t.state.cuts {
+		if existing.TenantID == cut.TenantID && existing.Version == cut.Version {
+			return fmt.Errorf("subscriptiontest: cut %s@%d exists", cut.TenantID, cut.Version)
+		}
+	}
+	t.nextCut++
+	t.state.cuts = append(t.state.cuts, memoryCut{PendingCut: subscription.PendingCut{ID: t.nextCut, AccessCut: cut}})
+	return nil
+}
+
+func (t *memoryTx) RecordDeactivation(_ context.Context, record subscription.DeactivationRecord, purgeBefore time.Time) error {
+	if fn := t.store.beforeRecord; fn != nil {
+		t.store.beforeRecord = nil
+		t.store.mu.Unlock()
+		fn()
+		t.store.mu.Lock()
+	}
+	if err := t.store.fail("RecordDeactivation"); err != nil {
+		return err
+	}
+	for id, r := range t.state.deactivations {
+		if !r.AcceptedAt.After(purgeBefore) {
+			delete(t.state.deactivations, id)
+		}
+	}
+	// The primary key also sees rows other transactions committed meanwhile.
+	if r, ok := t.store.state.deactivations[record.OperationID]; ok && r.AcceptedAt.After(purgeBefore) {
+		return subscription.ErrOperationRetained
+	}
+	if _, ok := t.state.deactivations[record.OperationID]; ok {
+		return subscription.ErrOperationRetained
+	}
+	t.state.deactivations[record.OperationID] = record
 	return nil
 }

@@ -39,6 +39,8 @@ type pgEnv struct {
 	pool     *pgxpool.Pool
 	canvases *postgres.CanvasStore
 	http     *env
+	// memberships, when set, wraps the membership store serve wires.
+	memberships func(access.MembershipStore) access.MembershipStore
 }
 
 // openPGEnv connects to the current server address, migrates, and builds the
@@ -75,11 +77,17 @@ func (p *pgEnv) serve(canvases *postgres.CanvasStore) {
 	if err != nil {
 		p.t.Fatal(err)
 	}
+	var memberships access.MembershipStore = store
+	if p.memberships != nil {
+		memberships = p.memberships(store)
+	}
+	subscriptions := postgres.NewSubscriptionStore(p.pool)
 	handler, err := httpapi.New(httpapi.Config{
 		Accounts:      accounts,
-		Memberships:   store,
+		Memberships:   memberships,
 		Canvases:      canvases,
-		Subscriptions: subscription.NewService(postgres.NewSubscriptionStore(p.pool)),
+		Subscriptions: subscription.NewService(subscriptions),
+		Tenants:       subscriptions,
 		Ingress:       in,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,
@@ -719,4 +727,86 @@ func TestPostgresResizeWithTheDatabaseDownChangesNothing(t *testing.T) {
 	recovered.http.expectCanvas(alice, 1280, 720, 1)
 	recovered.expectStored(alice, 1280, 720, 1, 1, 1)
 	expectResized(t, recovered.resize(alice.signedIn, alice.path, dimensions("op-pg-dim-down-02", 1600, 900)), alice.canvasID, 1600, 900, 2)
+}
+
+// US-003 S1, S8: a deactivated owner's resize is refused with nothing
+// written, the other tenant keeps resizing, and after reactivation the owner
+// resizes the same canvas again.
+func TestPostgresDeactivatedOwnerCannotResize(t *testing.T) {
+	p := openPGEnv(t, pgtest.Start(t))
+	op := p.operator("operator@example.com")
+	alice := p.streamer(op, "alice1", "alice@example.com")
+	bob := p.streamer(op, "bob001", "bob@example.com")
+	expectResized(t, p.resize(alice.signedIn, alice.path, dimensions("op-pg-dim-inac-01", 1280, 720)), alice.canvasID, 1280, 720, 1)
+
+	p.http.deactivate(op, "op-pg-dim-deact-01", "alice@example.com")
+	expectError(t, p.resize(alice.signedIn, alice.path, dimensions("op-pg-dim-inac-02", 1600, 900)), http.StatusForbidden, "forbidden")
+	p.expectStored(alice, 1280, 720, 1, 1, 1)
+	expectResized(t, p.resize(bob.signedIn, bob.path, dimensions("op-pg-dim-inac-03", 1600, 900)), bob.canvasID, 1600, 900, 1)
+
+	p.http.activate(op, "op-pg-dim-react-01", "alice@example.com")
+	expectResized(t, p.resize(alice.signedIn, alice.path, dimensions("op-pg-dim-inac-02", 1600, 900)), alice.canvasID, 1600, 900, 2)
+	p.expectStored(alice, 1600, 900, 2, 2, 2)
+}
+
+// deactivatingMemberships confirms a deactivation right after the given
+// MembershipOf call for tenant returns, so it lands between the resize's
+// reauthorization and its commit.
+type deactivatingMemberships struct {
+	access.MembershipStore
+	tenantID   string
+	afterCalls int
+	deactivate func()
+	mu         sync.Mutex
+	calls      int
+}
+
+func (m *deactivatingMemberships) MembershipOf(ctx context.Context, account access.AccountID, tenantID string) (access.Membership, bool, error) {
+	membership, found, err := m.MembershipStore.MembershipOf(ctx, account, tenantID)
+	if tenantID == m.tenantID {
+		m.mu.Lock()
+		m.calls++
+		now := m.calls == m.afterCalls
+		m.mu.Unlock()
+		if now {
+			m.deactivate()
+		}
+	}
+	return membership, found, err
+}
+
+// US-003 S1, S3: a deactivation confirmed after the owner was reauthorized and
+// before the resize commits wins; the resize answers forbidden and writes
+// nothing.
+func TestPostgresDeactivationBeforeTheResizeCommitWins(t *testing.T) {
+	p := openPGEnv(t, pgtest.Start(t))
+	op := p.operator("operator@example.com")
+	alice := p.streamer(op, "alice1", "alice@example.com")
+	var operatorID string
+	if err := p.pool.QueryRow(context.Background(), "SELECT account_id FROM operators").Scan(&operatorID); err != nil {
+		t.Fatalf("operator: %v", err)
+	}
+	service := subscription.NewService(postgres.NewSubscriptionStore(p.pool))
+	hook := &deactivatingMemberships{tenantID: alice.tenantID, afterCalls: 2, deactivate: func() {
+		got, err := service.Deactivate(context.Background(), subscription.DeactivateRequest{
+			OperatorID: access.AccountID(operatorID), OperationID: "op-pg-dim-deact-race", Email: "alice@example.com",
+		})
+		if err != nil || !got.Deactivated {
+			t.Errorf("Deactivate = %+v, %v", got, err)
+		}
+	}}
+	p.memberships = func(store access.MembershipStore) access.MembershipStore {
+		hook.MembershipStore = store
+		return hook
+	}
+	p.serve(p.canvases)
+
+	expectError(t, p.resize(alice.signedIn, alice.path, dimensions("op-pg-dim-race-01", 1280, 720)), http.StatusForbidden, "forbidden")
+	if hook.calls != 2 {
+		t.Fatalf("membership reads = %d, want 2 (route check and reauthorization)", hook.calls)
+	}
+	p.expectStored(alice, 1920, 1080, 0, 0, 0)
+	if got := p.count("SELECT count(*) FROM tenants WHERE tenant_id = $1 AND subscription_status = 'inactive'", alice.tenantID); got != 1 {
+		t.Fatalf("inactive tenant rows = %d, want 1", got)
+	}
 }

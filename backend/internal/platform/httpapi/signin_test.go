@@ -20,6 +20,7 @@ type faults struct {
 	authenticate error
 	isOperator   error
 	signOut      error
+	ownedTenant  error
 }
 
 // calls counts the domain calls the API makes, so tests can prove a rejected
@@ -88,11 +89,28 @@ func (s faultySubscriptions) Activate(ctx context.Context, request subscription.
 	return s.Subscriptions.Activate(ctx, request)
 }
 
+func (s faultySubscriptions) Deactivate(ctx context.Context, request subscription.DeactivateRequest) (subscription.Deactivation, error) {
+	s.calls.add("Deactivate")
+	return s.Subscriptions.Deactivate(ctx, request)
+}
+
 func (s faultySubscriptions) IsOperator(ctx context.Context, account access.AccountID) (bool, error) {
 	if s.faults.isOperator != nil {
 		return false, s.faults.isOperator
 	}
 	return s.Subscriptions.IsOperator(ctx, account)
+}
+
+type faultyTenants struct {
+	httpapi.Tenants
+	faults *faults
+}
+
+func (s faultyTenants) OwnedTenant(ctx context.Context, account access.AccountID) (subscription.Tenant, bool, error) {
+	if s.faults.ownedTenant != nil {
+		return subscription.Tenant{}, false, s.faults.ownedTenant
+	}
+	return s.Tenants.OwnedTenant(ctx, account)
 }
 
 func TestSignInThatFailsAfterCreatingTheSessionLeavesNoSession(t *testing.T) {

@@ -143,6 +143,33 @@ describe("CanvasPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("tells a deactivated streamer that the canvas and files are kept", async () => {
+    replies.push(
+      json(403, {
+        error: "subscription_inactive",
+        detail: "tenant cccc of eve@example.com",
+      }),
+    );
+    renderPanel();
+
+    const message = await screen.findByText(
+      "Your subscription is inactive. Your canvas and files are kept; ask an operator to reactivate it.",
+    );
+    expect(message).toHaveAttribute("role", "status");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Your account is not active yet. Ask an operator to activate it.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("eve@example.com");
+    expect(document.body.textContent).not.toContain("cccc");
+    expect(screen.queryByText(/×/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("form", { name: "Canvas size" }),
+    ).not.toBeInTheDocument();
+  });
+
   it.each([json(500, { error: "internal", detail: "boom" }), "network-error"])(
     "shows the unavailable message for %o",
     async (reply) => {

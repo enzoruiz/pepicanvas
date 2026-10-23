@@ -23,6 +23,9 @@ var (
 	// ErrOperationConflict reports an operation ID reused for a different
 	// mutation. A new intent requires a new operation ID.
 	ErrOperationConflict = errors.New("canvas: operation id reused with a different mutation")
+	// ErrInactive reports a new mutation of a canvas whose tenant has no
+	// active subscription. Nothing is written.
+	ErrInactive = errors.New("canvas: subscription inactive")
 )
 
 // Bounds of the persistent model.

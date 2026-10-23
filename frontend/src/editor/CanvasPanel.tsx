@@ -12,6 +12,8 @@ import { CanvasSurface } from "../canvas/CanvasSurface";
 // Safe, fixed messages: the panel shows only the signed-in account's canvas.
 const inactiveMessage =
   "Your account is not active yet. Ask an operator to activate it.";
+const deactivatedMessage =
+  "Your subscription is inactive. Your canvas and files are kept; ask an operator to reactivate it.";
 const unavailableMessage =
   "Your canvas is unavailable. Reload the page to try again.";
 
@@ -32,6 +34,7 @@ type State =
   | { kind: "loading" }
   | { kind: "ready"; canvas: OwnCanvas }
   | { kind: "inactive" }
+  | { kind: "deactivated" }
   | { kind: "unavailable" };
 
 interface PendingResize {
@@ -79,10 +82,12 @@ export function CanvasPanel({
         setState({ kind: "ready", canvas: result.value });
         setWidth(String(result.value.width));
         setHeight(String(result.value.height));
+      } else if (result.error === "forbidden") {
+        setState({ kind: "inactive" });
+      } else if (result.error === "subscription_inactive") {
+        setState({ kind: "deactivated" });
       } else {
-        setState({
-          kind: result.error === "forbidden" ? "inactive" : "unavailable",
-        });
+        setState({ kind: "unavailable" });
       }
     });
     return () => {
@@ -205,6 +210,9 @@ export function CanvasPanel({
         </>
       )}
       {state.kind === "inactive" && <p role="status">{inactiveMessage}</p>}
+      {state.kind === "deactivated" && (
+        <p role="status">{deactivatedMessage}</p>
+      )}
       {state.kind === "unavailable" && <p role="alert">{unavailableMessage}</p>}
     </section>
   );

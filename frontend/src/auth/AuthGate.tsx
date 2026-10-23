@@ -24,6 +24,7 @@ const messages: Record<ApiError, string> = {
   conflict: "The request changed while it was being retried. Try again.",
   identity_taken: "An account with this email already exists.",
   rate_limited: "Too many attempts. Wait a few minutes and try again.",
+  subscription_inactive: "The service is unavailable. Try again.",
   unavailable: "The service is unavailable. Try again.",
 };
 

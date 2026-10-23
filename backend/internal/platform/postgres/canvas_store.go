@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
@@ -127,7 +128,10 @@ func (s *CanvasStore) Load(ctx context.Context, key canvas.Key) (canvas.Canvas, 
 
 // Apply validates one mutation and commits it in a single transaction. A
 // retained operation ID replays its result when the mutation is equal and
-// returns canvas.ErrOperationConflict when it differs.
+// returns canvas.ErrOperationConflict when it differs. A new mutation of a
+// tenant whose subscription is not active returns canvas.ErrInactive and
+// writes nothing; an equal retry of a mutation committed before the
+// deactivation still replays its result, since a replay has no effect.
 func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error) {
 	if err := canvas.Validate(key, operation, mutation); err != nil {
 		return canvas.Result{}, err
@@ -146,9 +150,20 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		} else if err != nil {
 			return err
 		}
+		// The tenant row stays shared-locked until commit, so a deactivation
+		// commits either before this read, and the mutation is rejected, or
+		// after this commit. Canvases without a tenant row predate US-002.
+		status, err := q.LockTenantStatus(ctx, key.TenantID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		active := errors.Is(err, pgx.ErrNoRows) || status == string(access.SubscriptionActive)
 		// Read the clock after the lock wait, so retention starts at acceptance.
 		now := s.now()
-		replayed, found, err := retained(ctx, q, key, operation, fingerprint, now.Add(-s.retention))
+		replayed, found, err := retained(ctx, q, key, operation, fingerprint, now.Add(-s.retention), active)
+		if !active && (errors.Is(err, canvas.ErrOperationConflict) || (err == nil && !found)) {
+			return canvas.ErrInactive
+		}
 		if err != nil || found {
 			result, replay = replayed, found
 			return err
@@ -189,16 +204,20 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 	return result, nil
 }
 
-// retained purges the canvas operations accepted at or before expiredAt and
-// returns the result of an equal retry, or canvas.ErrOperationConflict.
-func retained(ctx context.Context, q *db.Queries, key canvas.Key, operation canvas.Operation, fingerprint [32]byte, expiredAt time.Time) (canvas.Result, bool, error) {
-	if err := q.PurgeExpiredOperations(ctx, db.PurgeExpiredOperationsParams{
-		TenantID: key.TenantID, CanvasID: key.CanvasID, ExpiredAt: pgtype.Timestamptz{Time: expiredAt, Valid: true},
-	}); err != nil {
-		return canvas.Result{}, false, err
+// retained returns the result of an equal retry of an operation accepted
+// after expiredAt, or canvas.ErrOperationConflict. With purge it first deletes
+// the canvas operations accepted at or before expiredAt; without it nothing
+// is written.
+func retained(ctx context.Context, q *db.Queries, key canvas.Key, operation canvas.Operation, fingerprint [32]byte, expiredAt time.Time, purge bool) (canvas.Result, bool, error) {
+	if purge {
+		if err := q.PurgeExpiredOperations(ctx, db.PurgeExpiredOperationsParams{
+			TenantID: key.TenantID, CanvasID: key.CanvasID, ExpiredAt: pgtype.Timestamptz{Time: expiredAt, Valid: true},
+		}); err != nil {
+			return canvas.Result{}, false, err
+		}
 	}
 	row, err := q.GetOperation(ctx, db.GetOperationParams{TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operation.ID})
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !row.AcceptedAt.Time.After(expiredAt)) {
 		return canvas.Result{}, false, nil
 	}
 	if err != nil {
@@ -305,7 +324,7 @@ func newObjectID() (string, error) {
 
 // wrap keeps domain errors comparable and labels storage failures.
 func wrap(action string, err error) error {
-	for _, domain := range []error{canvas.ErrNotFound, canvas.ErrInvalid, canvas.ErrOperationConflict} {
+	for _, domain := range []error{canvas.ErrNotFound, canvas.ErrInvalid, canvas.ErrOperationConflict, canvas.ErrInactive} {
 		if errors.Is(err, domain) {
 			return err
 		}

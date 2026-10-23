@@ -123,6 +123,7 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 		{"register", http.MethodPost, "/api/accounts", registration("op-http-web-reg001", "bob@example.com", password), nil, http.StatusCreated, "Register"},
 		{"sign-in", http.MethodPost, "/api/sessions", credentials("alice@example.com", password), nil, http.StatusCreated, "SignIn"},
 		{"activation", http.MethodPost, "/api/activations", activation("op-http-web-act001", "alice@example.com"), &op, http.StatusOK, "Activate"},
+		{"deactivation", http.MethodPost, "/api/deactivations", activation("op-http-web-dea001", "alice@example.com"), &op, http.StatusOK, "Deactivate"},
 		{"sign-out", http.MethodDelete, "/api/session", nil, &leaver, http.StatusNoContent, "SignOut"},
 		{"resize", http.MethodPut, carol.path + "/dimensions", dimensions("op-http-web-dim001", 1280, 720), &carol.signedIn, http.StatusOK, "Apply"},
 	}

@@ -1,10 +1,10 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
-// (US-001), the manual streamer activation and own-canvas read (US-002), and
-// the owner-only canvas resize (US-007). Every response is private and
-// correlated, and every route is guarded by the ingress (TE-014): unsafe
-// methods need the exact Origin, session mutations need the session's CSRF
-// token before the session is read, and the abuse limits answer 429
-// (CTRL-WEB-01, CTRL-RATE-01).
+// (US-001), the manual streamer activation and own-canvas read (US-002), the
+// operator deactivation (US-003), and the owner-only canvas resize (US-007).
+// Every response is private and correlated, and every route is guarded by the
+// ingress (TE-014): unsafe methods need the exact Origin, session mutations
+// need the session's CSRF token before the session is read, and the abuse
+// limits answer 429 (CTRL-WEB-01, CTRL-RATE-01).
 package httpapi
 
 import (
@@ -72,11 +72,18 @@ type CanvasStore interface {
 	Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error)
 }
 
-// Subscriptions is the streamer activation service.
+// Subscriptions is the streamer activation and deactivation service.
 type Subscriptions interface {
 	Activate(ctx context.Context, request subscription.ActivateRequest) (subscription.Activation, error)
+	Deactivate(ctx context.Context, request subscription.DeactivateRequest) (subscription.Deactivation, error)
 	CanvasOf(ctx context.Context, account access.AccountID) (canvas.Key, error)
 	IsOperator(ctx context.Context, account access.AccountID) (bool, error)
+}
+
+// Tenants reads the tenant an account owns. A denied own-canvas read uses it
+// to tell the owner of a deactivated tenant why, and nobody else.
+type Tenants interface {
+	OwnedTenant(ctx context.Context, account access.AccountID) (subscription.Tenant, bool, error)
 }
 
 // Config wires the API.
@@ -85,6 +92,7 @@ type Config struct {
 	Memberships   access.MembershipStore
 	Canvases      CanvasStore
 	Subscriptions Subscriptions
+	Tenants       Tenants
 	// Ingress guards every route; it holds the allowed origins.
 	Ingress *ingress.Ingress
 	Logger  *slog.Logger
@@ -106,8 +114,8 @@ func New(config Config) (http.Handler, error) {
 	if config.Ingress == nil {
 		return nil, errors.New("httpapi: ingress is required")
 	}
-	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil {
-		return nil, errors.New("httpapi: accounts, memberships, canvases, and subscriptions are required")
+	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil {
+		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, and tenants are required")
 	}
 	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP} {
 		if rate.Limit < 1 || rate.Window <= 0 {
@@ -137,6 +145,7 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}", a.canvas)
 	mux.Handle("PUT /api/tenants/{tenantID}/canvases/{canvasID}/dimensions", in.Route(ingress.Session, http.HandlerFunc(a.setDimensions)))
 	mux.Handle("POST /api/activations", in.Route(ingress.Session, http.HandlerFunc(a.activate)))
+	mux.Handle("POST /api/deactivations", in.Route(ingress.Session, http.HandlerFunc(a.deactivate)))
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
 }
@@ -331,6 +340,61 @@ func (a *api) activate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type deactivationResult struct {
+	AccountID   string `json:"account_id"`
+	TenantID    string `json:"tenant_id"`
+	CanvasID    string `json:"canvas_id"`
+	Deactivated bool   `json:"deactivated"`
+}
+
+// deactivate lets an operator cut the access of the tenant owned by the
+// account of an email; reactivation is activate. The ingress checks Origin
+// and the CSRF token before the session is read, and the rest runs in the
+// order of activate. The cut is effective when the answer is sent; the access
+// version stays internal.
+func (a *api) deactivate(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var body activationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	result, err := a.Subscriptions.Deactivate(r.Context(), subscription.DeactivateRequest{
+		OperatorID:    principal.AccountID,
+		OperationID:   body.OperationID,
+		Email:         body.Email,
+		CorrelationID: correlationID.String(),
+	})
+	switch {
+	case err == nil:
+		a.Logger.InfoContext(r.Context(), "deactivation confirmed",
+			slog.String("account_id", string(result.AccountID)),
+			slog.String("tenant_id", result.TenantID),
+			slog.String("canvas_id", result.CanvasID),
+		)
+		writeJSON(w, http.StatusOK, deactivationResult{
+			AccountID:   string(result.AccountID),
+			TenantID:    result.TenantID,
+			CanvasID:    result.CanvasID,
+			Deactivated: result.Deactivated,
+		})
+	case errors.Is(err, access.ErrAccessDenied):
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	case errors.Is(err, subscription.ErrInvalidDeactivation):
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+	case errors.Is(err, subscription.ErrAccountNotFound):
+		a.responder.Error(w, r, httpx.ErrNotFound, err)
+	case errors.Is(err, subscription.ErrOperationConflict):
+		a.responder.Error(w, r, httpx.ErrConflict, err)
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+	}
+}
+
 // signOut ends the session. The ingress has already checked the CSRF token
 // of a presented cookie, so only the session's own page can end it.
 func (a *api) signOut(w http.ResponseWriter, r *http.Request) {
@@ -398,8 +462,10 @@ func newCanvasBody(loaded canvas.Canvas) canvasBody {
 	return body
 }
 
-// ownCanvas answers the canvas of the tenant the account owns. Every denial,
-// including a missing canvas, is the forbidden answer of the canvas route.
+// ownCanvas answers the canvas of the tenant the account owns. The owner of
+// a deactivated tenant is told its subscription is inactive; every other
+// denial, including a missing canvas, is the forbidden answer of the canvas
+// route.
 func (a *api) ownCanvas(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -407,7 +473,17 @@ func (a *api) ownCanvas(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := a.Subscriptions.CanvasOf(r.Context(), principal.AccountID)
 	if errors.Is(err, access.ErrAccessDenied) {
-		a.responder.Error(w, r, httpx.ErrForbidden, err)
+		// Only the account's own tenant is read, so the answer reveals
+		// nothing about any other tenant.
+		tenant, owns, readErr := a.Tenants.OwnedTenant(r.Context(), principal.AccountID)
+		switch {
+		case readErr != nil:
+			a.responder.Error(w, r, httpx.ErrInternal, readErr)
+		case owns && tenant.Status == access.SubscriptionInactive:
+			a.responder.Error(w, r, httpx.ErrSubscriptionInactive, err)
+		default:
+			a.responder.Error(w, r, httpx.ErrForbidden, err)
+		}
 		return
 	}
 	if err != nil {
@@ -556,6 +632,10 @@ func (a *api) setDimensions(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrForbidden, err)
 	case errors.Is(err, canvas.ErrNotFound):
 		// A missing canvas is the access denial of the read route.
+		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
+	case errors.Is(err, canvas.ErrInactive):
+		// A deactivation confirmed after the reauthorization (US-003) is the
+		// tenant route's access denial.
 		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
 	case errors.Is(err, canvas.ErrOperationConflict):
 		a.responder.Error(w, r, httpx.ErrConflict, err)

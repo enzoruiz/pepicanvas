@@ -3,7 +3,7 @@ DELETE FROM canvas_operations
 WHERE tenant_id = $1 AND canvas_id = $2 AND accepted_at <= sqlc.arg(expired_at);
 
 -- name: GetOperation :one
-SELECT fingerprint, revision, object_id, z
+SELECT fingerprint, revision, object_id, z, accepted_at
 FROM canvas_operations
 WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3;
 

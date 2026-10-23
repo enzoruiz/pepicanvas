@@ -97,6 +97,7 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 		{httpx.ErrBadRequest, http.StatusBadRequest},
 		{httpx.ErrUnauthorized, http.StatusUnauthorized},
 		{httpx.ErrForbidden, http.StatusForbidden},
+		{httpx.ErrSubscriptionInactive, http.StatusForbidden},
 		{httpx.ErrIdentityTaken, http.StatusConflict},
 		{httpx.ErrNotFound, http.StatusNotFound},
 		{httpx.ErrConflict, http.StatusConflict},
@@ -137,6 +138,13 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 		if rec2["correlation_id"] != id || rec2["error_code"] != string(tc.code) {
 			t.Errorf("%s: log record = %v, want correlation %s", tc.code, rec2, id)
 		}
+	}
+}
+
+func TestSubscriptionInactiveCodeIsStable(t *testing.T) {
+	// The editor matches this exact public identifier (US-003 T5).
+	if httpx.ErrSubscriptionInactive != "subscription_inactive" {
+		t.Fatalf("code = %q", httpx.ErrSubscriptionInactive)
 	}
 }
 

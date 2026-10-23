@@ -1,6 +1,6 @@
-// Client for the account, session, activation, and canvas API (US-001,
-// US-002, US-007). Responses are reduced to a closed set of outcomes; server
-// text never reaches the UI.
+// Client for the account, session, activation, deactivation, and canvas API
+// (US-001, US-002, US-003, US-007). Responses are reduced to a closed set of
+// outcomes; server text never reaches the UI.
 
 import type { CanvasObject } from "../canvas/CanvasSurface";
 
@@ -36,6 +36,13 @@ export interface Activation {
   created: boolean;
 }
 
+export interface Deactivation {
+  accountId: string;
+  tenantId: string;
+  canvasId: string;
+  deactivated: boolean;
+}
+
 export type ApiError =
   | "bad_request"
   | "unauthorized"
@@ -44,6 +51,7 @@ export type ApiError =
   | "conflict"
   | "identity_taken"
   | "rate_limited"
+  | "subscription_inactive"
   | "unavailable";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ApiError };
@@ -56,6 +64,7 @@ const knownErrors = new Set<ApiError>([
   "conflict",
   "identity_taken",
   "rate_limited",
+  "subscription_inactive",
 ]);
 
 async function call(
@@ -298,6 +307,41 @@ export async function activate(
           tenantId: tenant_id,
           canvasId: canvas_id,
           created,
+        },
+      };
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+export async function deactivate(
+  csrfToken: string,
+  operationId: string,
+  email: string,
+): Promise<Result<Deactivation>> {
+  const result = await call(
+    "POST",
+    "/api/deactivations",
+    { operation_id: operationId, email },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { account_id, tenant_id, canvas_id, deactivated } =
+      result.value as Record<string, unknown>;
+    if (
+      typeof account_id === "string" &&
+      typeof tenant_id === "string" &&
+      typeof canvas_id === "string" &&
+      typeof deactivated === "boolean"
+    ) {
+      return {
+        ok: true,
+        value: {
+          accountId: account_id,
+          tenantId: tenant_id,
+          canvasId: canvas_id,
+          deactivated,
         },
       };
     }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,18 +17,24 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
-// SubscriptionStore implements subscription.Store. An activation commits the
-// tenant, its owner membership, its canvas, and the operation record in one
-// transaction.
+// SubscriptionStore implements subscription.Store and subscription.CutStore.
+// An activation commits the tenant, its owner membership, its canvas, and the
+// operation record in one transaction; a deactivation commits the tenant's
+// status and access version, its pending access cut, and the operation record
+// in one transaction.
 type SubscriptionStore struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
-	// fault, when set by tests, runs after a step ("CreateTenant") and before
-	// commit ("commit"); an error aborts the transaction.
+	// fault, when set by tests, runs after a step ("CreateTenant",
+	// "RecordCut") and before commit ("commit"); an error aborts the
+	// transaction.
 	fault func(ctx context.Context, step string) error
 }
 
-var _ subscription.Store = (*SubscriptionStore)(nil)
+var (
+	_ subscription.Store    = (*SubscriptionStore)(nil)
+	_ subscription.CutStore = (*SubscriptionStore)(nil)
+)
 
 // NewSubscriptionStore returns a store over a migrated pool.
 func NewSubscriptionStore(pool *pgxpool.Pool) *SubscriptionStore {
@@ -103,6 +110,36 @@ func (s *SubscriptionStore) GrantOperator(ctx context.Context, email string) (ac
 	return account, nil
 }
 
+// PendingCuts returns up to limit access cuts not yet applied, oldest first.
+func (s *SubscriptionStore) PendingCuts(ctx context.Context, limit int) ([]subscription.PendingCut, error) {
+	if limit <= 0 || limit > math.MaxInt32 {
+		return nil, fmt.Errorf("postgres: pending cuts: invalid limit %d", limit)
+	}
+	rows, err := db.New(s.pool).ListPendingCuts(ctx, int32(limit))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: pending cuts: %w", err)
+	}
+	cuts := make([]subscription.PendingCut, 0, len(rows))
+	for _, row := range rows {
+		cuts = append(cuts, subscription.PendingCut{ID: row.ID, AccessCut: subscription.AccessCut{
+			TenantID:      row.TenantID,
+			Version:       uint64(row.Version),
+			CorrelationID: row.CorrelationID.String,
+			CreatedAt:     row.CreatedAt.Time,
+		}})
+	}
+	return cuts, nil
+}
+
+// SettleCut marks a pending cut applied at at. An applied cut keeps its first
+// applied time; an unknown cut changes nothing.
+func (s *SubscriptionStore) SettleCut(ctx context.Context, id int64, at time.Time) error {
+	if err := db.New(s.pool).SettleCut(ctx, db.SettleCutParams{ID: id, AppliedAt: timestamptz(at)}); err != nil {
+		return fmt.Errorf("postgres: settle cut: %w", err)
+	}
+	return nil
+}
+
 func ownedTenant(ctx context.Context, q *db.Queries, account access.AccountID) (subscription.Tenant, bool, error) {
 	row, err := q.GetOwnedTenant(ctx, pgtype.Text{String: string(account), Valid: true})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -116,6 +153,7 @@ func ownedTenant(ctx context.Context, q *db.Queries, account access.AccountID) (
 		Owner:    account,
 		CanvasID: row.CanvasID.String,
 		Status:   access.SubscriptionStatus(row.SubscriptionStatus),
+		Version:  uint64(row.AccessVersion),
 	}, true, nil
 }
 
@@ -156,6 +194,10 @@ func (t *subscriptionTx) Activation(ctx context.Context, operationID string, not
 	}
 	copy(record.Fingerprint[:], row.Fingerprint)
 	return record, true, nil
+}
+
+func (t *subscriptionTx) LockOperation(ctx context.Context, operationID string) error {
+	return t.q.LockOperation(ctx, operationID)
 }
 
 func (t *subscriptionTx) LockAccount(ctx context.Context, email string) (access.AccountID, bool, error) {
@@ -220,6 +262,88 @@ func (t *subscriptionTx) RecordActivation(ctx context.Context, record subscripti
 	})
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == "subscription_activations_pkey" {
+		return subscription.ErrOperationRetained
+	}
+	return err
+}
+
+func (t *subscriptionTx) Deactivation(ctx context.Context, operationID string, notBefore time.Time) (subscription.DeactivationRecord, bool, error) {
+	row, err := t.q.GetDeactivation(ctx, db.GetDeactivationParams{OperationID: operationID, NotBefore: timestamptz(notBefore)})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return subscription.DeactivationRecord{}, false, nil
+	}
+	if err != nil {
+		return subscription.DeactivationRecord{}, false, err
+	}
+	record := subscription.DeactivationRecord{
+		OperationID: operationID,
+		OperatorID:  access.AccountID(row.OperatorAccountID),
+		Result: subscription.Deactivation{
+			AccountID:   access.AccountID(row.AccountID),
+			TenantID:    row.TenantID,
+			CanvasID:    row.CanvasID,
+			Deactivated: row.Deactivated,
+			Version:     uint64(row.Version),
+		},
+		CorrelationID: row.CorrelationID.String,
+		AcceptedAt:    row.AcceptedAt.Time,
+	}
+	copy(record.Fingerprint[:], row.Fingerprint)
+	return record, true, nil
+}
+
+func (t *subscriptionTx) DeactivateTenant(ctx context.Context, tenantID string) (uint64, error) {
+	version, err := t.q.DeactivateTenant(ctx, tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("tenant %q is not active", tenantID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return uint64(version), nil
+}
+
+func (t *subscriptionTx) RecordCut(ctx context.Context, cut subscription.AccessCut) error {
+	if cut.Version == 0 || cut.Version > math.MaxInt64 {
+		return fmt.Errorf("invalid cut version %d", cut.Version)
+	}
+	if err := t.q.InsertAccessCut(ctx, db.InsertAccessCutParams{
+		TenantID:      cut.TenantID,
+		Version:       int64(cut.Version),
+		CorrelationID: pgtype.Text{String: cut.CorrelationID, Valid: cut.CorrelationID != ""},
+		CreatedAt:     timestamptz(cut.CreatedAt),
+	}); err != nil {
+		return err
+	}
+	return t.store.step(ctx, "RecordCut")
+}
+
+func (t *subscriptionTx) RecordDeactivation(ctx context.Context, record subscription.DeactivationRecord, purgeBefore time.Time) error {
+	if record.Result.Version == 0 || record.Result.Version > math.MaxInt64 {
+		return fmt.Errorf("invalid deactivation version %d", record.Result.Version)
+	}
+	expired := timestamptz(purgeBefore)
+	// The expired row of this operation must go, or its key blocks the insert.
+	if err := t.q.DeleteExpiredDeactivation(ctx, db.DeleteExpiredDeactivationParams{OperationID: record.OperationID, ExpiredAt: expired}); err != nil {
+		return err
+	}
+	if err := t.q.PurgeExpiredDeactivations(ctx, expired); err != nil {
+		return err
+	}
+	err := t.q.InsertDeactivation(ctx, db.InsertDeactivationParams{
+		OperationID:       record.OperationID,
+		Fingerprint:       record.Fingerprint[:],
+		OperatorAccountID: string(record.OperatorID),
+		AccountID:         string(record.Result.AccountID),
+		TenantID:          record.Result.TenantID,
+		CanvasID:          record.Result.CanvasID,
+		Deactivated:       record.Result.Deactivated,
+		Version:           int64(record.Result.Version),
+		CorrelationID:     pgtype.Text{String: record.CorrelationID, Valid: record.CorrelationID != ""},
+		AcceptedAt:        timestamptz(record.AcceptedAt),
+	})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == "subscription_deactivations_pkey" {
 		return subscription.ErrOperationRetained
 	}
 	return err
