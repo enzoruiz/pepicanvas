@@ -166,7 +166,7 @@ func TestActivationRollbackRefusesToLoseActivationsAndGrants(t *testing.T) {
 	}
 }
 
-// deactivationSchema reports what 00007 adds and the rows it would lose.
+// deactivationSchema reports what 00008 adds and the rows it would lose.
 type deactivationSchema struct {
 	version       int64
 	versionColumn bool
@@ -188,7 +188,7 @@ func readDeactivationSchema(t *testing.T, pool *pgxpool.Pool) deactivationSchema
 		t.Fatalf("read schema: %v", err)
 	}
 	if recordsTable != s.versionColumn || cutsTable != s.versionColumn {
-		t.Fatalf("00007 is partly applied: records %v, cuts %v, version column %v", recordsTable, cutsTable, s.versionColumn)
+		t.Fatalf("00008 is partly applied: records %v, cuts %v, version column %v", recordsTable, cutsTable, s.versionColumn)
 	}
 	if s.versionColumn {
 		if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM subscription_deactivations), (SELECT count(*) FROM access_cuts)").Scan(&s.records, &s.cuts); err != nil {
@@ -220,8 +220,8 @@ func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 7); err != nil {
-		t.Fatalf("DownTo(7): %v", err)
+	if _, err := provider.DownTo(ctx, 8); err != nil {
+		t.Fatalf("DownTo(8): %v", err)
 	}
 
 	for _, account := range []string{streamerAccount, operatorAccount} {
@@ -237,7 +237,7 @@ func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
 
 	refuse := func(name, message string, want deactivationSchema) {
 		t.Helper()
-		_, err := provider.DownTo(ctx, 6)
+		_, err := provider.DownTo(ctx, 7)
 		if err == nil || !strings.Contains(err.Error(), message) {
 			t.Fatalf("%s: rollback error = %v, want %q", name, err, message)
 		}
@@ -248,29 +248,29 @@ func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
 			t.Fatalf("%s: rows = %q, want %q", name, got, kept)
 		}
 	}
-	intact := deactivationSchema{version: 7, versionColumn: true}
+	intact := deactivationSchema{version: 8, versionColumn: true}
 
 	exec(t, pool, `INSERT INTO subscription_deactivations (operation_id, fingerprint, operator_account_id, account_id, tenant_id, canvas_id, deactivated, version, accepted_at)
 		VALUES ('op-migration-deactivate', decode(repeat('ab', 32), 'hex'), $1, $2, 'streamer-tenant', 'streamer-canvas', true, 2, now())`, operatorAccount, streamerAccount)
 	withRecord := intact
 	withRecord.records = 1
-	refuse("deactivation record", "00007_deactivation down refused: 1 deactivation record(s)", withRecord)
+	refuse("deactivation record", "00008_deactivation down refused: 1 deactivation record(s)", withRecord)
 
 	exec(t, pool, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('streamer-tenant', 2, now())")
 	withBoth := withRecord
 	withBoth.cuts = 1
-	refuse("record and cut", "00007_deactivation down refused: 1 deactivation record(s)", withBoth)
+	refuse("record and cut", "00008_deactivation down refused: 1 deactivation record(s)", withBoth)
 	exec(t, pool, "DELETE FROM subscription_deactivations")
 	withCut := intact
 	withCut.cuts = 1
-	refuse("access cut", "00007_deactivation down refused: 1 access cut(s)", withCut)
+	refuse("access cut", "00008_deactivation down refused: 1 access cut(s)", withCut)
 
 	// Without records and cuts the rollback runs and keeps the activated rows.
 	exec(t, pool, "DELETE FROM access_cuts")
-	if _, err := provider.DownTo(ctx, 6); err != nil {
+	if _, err := provider.DownTo(ctx, 7); err != nil {
 		t.Fatalf("rollback without records and cuts: %v", err)
 	}
-	if got, want := readDeactivationSchema(t, pool), (deactivationSchema{version: 6}); got != want {
+	if got, want := readDeactivationSchema(t, pool), (deactivationSchema{version: 7}); got != want {
 		t.Fatalf("after the rollback %+v, want %+v", got, want)
 	}
 	if got := activatedRows(t, pool); got != kept {
@@ -278,8 +278,8 @@ func TestDeactivationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
 	}
 
 	// Migrating up again restarts every tenant at access version 1.
-	if _, err := provider.UpTo(ctx, 7); err != nil {
-		t.Fatalf("UpTo(7) after the rollback: %v", err)
+	if _, err := provider.UpTo(ctx, 8); err != nil {
+		t.Fatalf("UpTo(8) after the rollback: %v", err)
 	}
 	if got := readDeactivationSchema(t, pool); got != intact {
 		t.Fatalf("after re-applying %+v, want %+v", got, intact)

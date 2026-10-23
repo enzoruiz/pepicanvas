@@ -274,6 +274,101 @@ func (s *MediaStore) Abandoned(ctx context.Context, key media.CanvasKey, operati
 	}, nil
 }
 
+// Inventory counts the assets of every canvas of a tenant by state, aged by
+// the store clock since each asset entered its state. It names no asset.
+func (s *MediaStore) Inventory(ctx context.Context, tenantID string) ([]media.StateInventory, error) {
+	if err := media.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	now := s.now()
+	rows, err := db.New(s.pool).MediaInventory(ctx, db.MediaInventoryParams{
+		TenantID: tenantID,
+		HourAgo:  pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		DayAgo:   pgtype.Timestamptz{Time: now.Add(-24 * time.Hour), Valid: true},
+	})
+	if err != nil {
+		return nil, wrapMedia("read media inventory", err)
+	}
+	inventory := make([]media.StateInventory, len(media.InventoryStates))
+	for i, state := range media.InventoryStates {
+		inventory[i].State = state
+		for _, row := range rows {
+			if media.State(row.State) != state {
+				continue
+			}
+			inventory[i].Assets, inventory[i].Bytes = row.Assets, row.Bytes
+			inventory[i].ByAge = [3]int64{
+				media.AgeUnderHour: row.UnderHour,
+				media.AgeUnderDay:  row.UnderDay,
+				media.AgeDayOrMore: row.Assets - row.UnderHour - row.UnderDay,
+			}
+			inventory[i].Oldest = max(now.Sub(row.OldestChangedAt.Time), 0)
+		}
+	}
+	return inventory, nil
+}
+
+// HeldKeys returns which storage keys an asset of any tenant, in any state,
+// still holds.
+func (s *MediaStore) HeldKeys(ctx context.Context, storageKeys []string) (map[string]bool, error) {
+	if err := media.ValidateStorageKeys(storageKeys); err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool)
+	if len(storageKeys) == 0 {
+		return held, nil
+	}
+	keys, err := db.New(s.pool).HeldStorageKeys(ctx, storageKeys)
+	if err != nil {
+		return nil, wrapMedia("read held storage keys", err)
+	}
+	for _, key := range keys {
+		held[key] = true
+	}
+	return held, nil
+}
+
+// AssetExists reports whether the owner's asset exists in any state.
+func (s *MediaStore) AssetExists(ctx context.Context, owner media.Owner) (bool, error) {
+	if err := media.ValidateOwner(owner); err != nil {
+		return false, err
+	}
+	exists, err := db.New(s.pool).AssetExists(ctx, db.AssetExistsParams{TenantID: owner.Key.TenantID, CanvasID: owner.Key.CanvasID, AssetID: owner.AssetID})
+	if err != nil {
+		return false, wrapMedia("read asset existence", err)
+	}
+	return exists, nil
+}
+
+// ReadyPage returns up to limit ready assets of every tenant, ordered by
+// tenant, canvas, and asset, strictly after the owner after. The zero Owner
+// starts from the beginning; any other cursor must be a valid owner.
+func (s *MediaStore) ReadyPage(ctx context.Context, after media.Owner, limit int) ([]media.StoredAsset, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("%w: page limit must be positive", media.ErrInvalid)
+	}
+	if after != (media.Owner{}) {
+		if err := media.ValidateOwner(after); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := db.New(s.pool).ReadyAssetsAfter(ctx, db.ReadyAssetsAfterParams{
+		AfterTenant: after.Key.TenantID, AfterCanvas: after.Key.CanvasID, AfterAsset: after.AssetID,
+		MaxAssets: int32(min(limit, math.MaxInt32)),
+	})
+	if err != nil {
+		return nil, wrapMedia("list ready assets", err)
+	}
+	page := make([]media.StoredAsset, 0, len(rows))
+	for _, row := range rows {
+		page = append(page, media.StoredAsset{
+			Owner:      media.Owner{Key: media.CanvasKey{TenantID: row.TenantID, CanvasID: row.CanvasID}, AssetID: row.AssetID},
+			StorageKey: row.StorageKey,
+		})
+	}
+	return page, nil
+}
+
 // lock creates the quota row of an existing canvas, locks it, and returns its
 // usage with the time read after the lock wait, so retention and expiry start
 // at acceptance.
@@ -292,10 +387,11 @@ func (s *MediaStore) lock(ctx context.Context, q *db.Queries, key media.CanvasKe
 }
 
 // expire marks the pending assets reserved at or before now - ttl as deleting
-// and returns the locked usage without their reservations.
+// at now and returns the locked usage without their reservations.
 func (s *MediaStore) expire(ctx context.Context, q *db.Queries, key media.CanvasKey, usage media.Usage, now time.Time) (media.Usage, error) {
 	released, err := q.ExpireReservations(ctx, db.ExpireReservationsParams{
 		TenantID: key.TenantID, CanvasID: key.CanvasID,
+		ChangedAt: pgtype.Timestamptz{Time: now, Valid: true},
 		ExpiredAt: pgtype.Timestamptz{Time: now.Add(-s.reservationTTL), Valid: true},
 	})
 	usage.ReservedBytes -= released
@@ -382,7 +478,7 @@ func applyMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, usage m
 			if err := q.MoveReference(ctx, db.MoveReferenceParams{TenantID: tenant, CanvasID: canvasID, ReferenceID: c.ReferenceID, AssetID: c.AssetID}); err != nil {
 				return media.Result{}, err
 			}
-			if usage, err = releaseIfUnreferenced(ctx, q, key, old, usage); err != nil {
+			if usage, err = releaseIfUnreferenced(ctx, q, key, old, usage, now); err != nil {
 				return media.Result{}, err
 			}
 		} else if err := insertReference(ctx, q, key, c.ReferenceID, c.AssetID); err != nil {
@@ -391,6 +487,7 @@ func applyMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, usage m
 		if err := q.SetAssetState(ctx, db.SetAssetStateParams{
 			TenantID: tenant, CanvasID: canvasID, AssetID: c.AssetID,
 			State: string(media.StateReady), Kind: pgtype.Text{String: string(c.Kind), Valid: true},
+			ChangedAt: pgtype.Timestamptz{Time: now, Valid: true},
 		}); err != nil {
 			return media.Result{}, err
 		}
@@ -407,7 +504,10 @@ func applyMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, usage m
 		if c.Reason == media.AbandonRejected {
 			state = media.StateQuarantined
 		}
-		if err := q.SetAssetState(ctx, db.SetAssetStateParams{TenantID: tenant, CanvasID: canvasID, AssetID: c.AssetID, State: string(state)}); err != nil {
+		if err := q.SetAssetState(ctx, db.SetAssetStateParams{
+			TenantID: tenant, CanvasID: canvasID, AssetID: c.AssetID, State: string(state),
+			ChangedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}); err != nil {
 			return media.Result{}, err
 		}
 		usage.ReservedBytes -= asset.DeclaredBytes
@@ -430,7 +530,7 @@ func applyMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, usage m
 		if err != nil {
 			return media.Result{}, err
 		}
-		if usage, err = releaseIfUnreferenced(ctx, q, key, assetID, usage); err != nil {
+		if usage, err = releaseIfUnreferenced(ctx, q, key, assetID, usage, now); err != nil {
 			return media.Result{}, err
 		}
 		return media.Result{AssetID: assetID, Usage: usage}, nil
@@ -484,8 +584,8 @@ func insertReference(ctx context.Context, q *db.Queries, key media.CanvasKey, re
 }
 
 // releaseIfUnreferenced marks a ready asset with no references left as
-// deleting and releases its used quota at once.
-func releaseIfUnreferenced(ctx context.Context, q *db.Queries, key media.CanvasKey, assetID string, usage media.Usage) (media.Usage, error) {
+// deleting at now and releases its used quota at once.
+func releaseIfUnreferenced(ctx context.Context, q *db.Queries, key media.CanvasKey, assetID string, usage media.Usage, now time.Time) (media.Usage, error) {
 	references, err := q.CountReferences(ctx, db.CountReferencesParams{TenantID: key.TenantID, CanvasID: key.CanvasID, AssetID: assetID})
 	if err != nil || references > 0 {
 		return usage, err
@@ -494,7 +594,10 @@ func releaseIfUnreferenced(ctx context.Context, q *db.Queries, key media.CanvasK
 	if err != nil {
 		return usage, err
 	}
-	if err := q.SetAssetState(ctx, db.SetAssetStateParams{TenantID: key.TenantID, CanvasID: key.CanvasID, AssetID: assetID, State: string(media.StateDeleting)}); err != nil {
+	if err := q.SetAssetState(ctx, db.SetAssetStateParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, AssetID: assetID, State: string(media.StateDeleting),
+		ChangedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	}); err != nil {
 		return usage, err
 	}
 	usage.UsedBytes -= asset.DeclaredBytes

@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
@@ -20,6 +24,9 @@ import (
 // largeBytes exceeds the client's default part size, so only a disabled
 // multipart upload sends it in a single PUT.
 const largeBytes = 17 << 20
+
+// owner is recorded with every object these tests store.
+var owner = media.Owner{Key: media.CanvasKey{TenantID: "tenant-a", CanvasID: "canvas-1"}, AssetID: "asset-1"}
 
 func config(server *s3test.Server) s3.Config {
 	return s3.Config{
@@ -139,7 +146,7 @@ func TestStorage(t *testing.T) {
 		for _, n := range []int{0, 1, 300 << 10, largeBytes} {
 			key := fmt.Sprintf("assets/round-trip-%d", n)
 			data := random(t, n)
-			if err := storage.Put(ctx, key, bytes.NewReader(data), int64(n)); err != nil {
+			if err := storage.Put(ctx, key, owner, bytes.NewReader(data), int64(n)); err != nil {
 				t.Fatalf("Put(%d bytes): %v", n, err)
 			}
 			if got := read(t, storage, key); !bytes.Equal(got, data) {
@@ -160,7 +167,7 @@ func TestStorage(t *testing.T) {
 			t.Fatalf("Delete(missing) = %v, want nil", err)
 		}
 		key := "assets/delete-me"
-		if err := storage.Put(ctx, key, strings.NewReader("bytes"), 5); err != nil {
+		if err := storage.Put(ctx, key, owner, strings.NewReader("bytes"), 5); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
 		if err := storage.Delete(ctx, key); err != nil {
@@ -178,7 +185,7 @@ func TestStorage(t *testing.T) {
 			body := &stallingReader{prefix: bytes.NewReader(random(t, 128<<10)), started: make(chan struct{}, 1), release: make(chan struct{})}
 			putCtx, cancel := context.WithCancel(ctx)
 			done := make(chan error, 1)
-			go func() { done <- storage.Put(putCtx, key, body, int64(n)) }()
+			go func() { done <- storage.Put(putCtx, key, owner, body, int64(n)) }()
 			select {
 			case <-body.started:
 			case err := <-done:
@@ -204,7 +211,7 @@ func TestStorage(t *testing.T) {
 	t.Run("a Put whose body is shorter than its size leaves nothing", func(t *testing.T) {
 		for _, n := range []int{1000, largeBytes} {
 			key := fmt.Sprintf("assets/short-%d", n)
-			if err := storage.Put(ctx, key, bytes.NewReader(random(t, n/2)), int64(n)); err == nil {
+			if err := storage.Put(ctx, key, owner, bytes.NewReader(random(t, n/2)), int64(n)); err == nil {
 				t.Fatalf("Put of %d of %d bytes = nil, want an error", n/2, n)
 			}
 			wantNoObject(t, server, storage, key)
@@ -214,7 +221,7 @@ func TestStorage(t *testing.T) {
 	t.Run("a Put whose body is longer than its size leaves nothing", func(t *testing.T) {
 		for _, n := range []int{1000, largeBytes} {
 			key := fmt.Sprintf("assets/long-%d", n)
-			if err := storage.Put(ctx, key, bytes.NewReader(random(t, n+1)), int64(n)); err == nil {
+			if err := storage.Put(ctx, key, owner, bytes.NewReader(random(t, n+1)), int64(n)); err == nil {
 				t.Fatalf("Put of %d of %d bytes = nil, want an error", n+1, n)
 			}
 			wantNoObject(t, server, storage, key)
@@ -225,7 +232,7 @@ func TestStorage(t *testing.T) {
 		for _, n := range []int{0, 1, 1000} {
 			key := fmt.Sprintf("assets/late-tail-%d", n)
 			body := &slowTail{data: bytes.NewReader(random(t, n)), delay: 300 * time.Millisecond}
-			if err := storage.Put(ctx, key, body, int64(n)); err == nil {
+			if err := storage.Put(ctx, key, owner, body, int64(n)); err == nil {
 				t.Errorf("Put of %d bytes plus a late byte = nil, want an error", n)
 			}
 			wantNoObject(t, server, storage, key)
@@ -235,7 +242,7 @@ func TestStorage(t *testing.T) {
 	t.Run("a Put whose body fails after its size leaves nothing", func(t *testing.T) {
 		key := "assets/failing-tail"
 		body := &failingTail{data: bytes.NewReader(random(t, 1000)), err: errors.New("body is too long")}
-		if err := storage.Put(ctx, key, body, 1000); err == nil {
+		if err := storage.Put(ctx, key, owner, body, 1000); err == nil {
 			t.Fatal("Put = nil, want the body's error")
 		}
 		wantNoObject(t, server, storage, key)
@@ -243,16 +250,166 @@ func TestStorage(t *testing.T) {
 
 	t.Run("a Put never replaces an existing object", func(t *testing.T) {
 		key := "assets/conditional"
-		if err := storage.Put(ctx, key, strings.NewReader("first"), 5); err != nil {
+		if err := storage.Put(ctx, key, owner, strings.NewReader("first"), 5); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
-		if err := storage.Put(ctx, key, strings.NewReader("other"), 5); !errors.Is(err, media.ErrObjectExists) {
+		if err := storage.Put(ctx, key, owner, strings.NewReader("other"), 5); !errors.Is(err, media.ErrObjectExists) {
 			t.Fatalf("second Put = %v, want ErrObjectExists", err)
 		}
 		if got := read(t, storage, key); string(got) != "first" {
 			t.Fatalf("Open(%s) = %q, want %q", key, got, "first")
 		}
 	})
+}
+
+// TE-013 S5 and S8: an object records the asset that owns it, so the
+// reconciler can prove ownership of an object without a row.
+func TestObjectStore(t *testing.T) {
+	server := s3test.Start(t)
+	storage := open(t, server)
+	var _ media.ObjectStore = storage
+	ctx := context.Background()
+
+	t.Run("Stat returns the owner recorded by Put", func(t *testing.T) {
+		before := time.Now().Add(-time.Minute)
+		other := media.Owner{Key: media.CanvasKey{TenantID: "tenant-b", CanvasID: "canvas-1"}, AssetID: "asset-1"}
+		for key, want := range map[string]media.Owner{"assets/owned-a": owner, "assets/owned-b": other} {
+			if err := storage.Put(ctx, key, want, strings.NewReader("bytes"), 5); err != nil {
+				t.Fatalf("Put(%s): %v", key, err)
+			}
+			object, err := storage.Stat(ctx, key)
+			if err != nil {
+				t.Fatalf("Stat(%s): %v", key, err)
+			}
+			if object.Key != key || !object.Owned || object.Owner != want {
+				t.Fatalf("Stat(%s) = %+v, want key %s owned by %+v", key, object, key, want)
+			}
+			if object.ModifiedAt.Before(before) || object.ModifiedAt.After(time.Now().Add(time.Minute)) {
+				t.Fatalf("Stat(%s).ModifiedAt = %v, want about now", key, object.ModifiedAt)
+			}
+		}
+	})
+
+	t.Run("Stat of a missing key is ErrNotFound", func(t *testing.T) {
+		if object, err := storage.Stat(ctx, "assets/never-stored"); !errors.Is(err, media.ErrNotFound) {
+			t.Fatalf("Stat = %+v, %v; want ErrNotFound", object, err)
+		}
+	})
+
+	t.Run("an object without valid owner metadata is unowned", func(t *testing.T) {
+		cases := map[string]map[string]string{
+			"assets/no-metadata": nil,
+			"assets/partial":     {"Pepicanvas-Tenant": "tenant-a", "Pepicanvas-Canvas": "canvas-1"},
+			"assets/malformed":   {"Pepicanvas-Tenant": "tenant a", "Pepicanvas-Canvas": "canvas-1", "Pepicanvas-Asset": "asset-1"},
+		}
+		for key, metadata := range cases {
+			if _, err := server.Client.PutObject(ctx, s3test.Bucket, key, strings.NewReader("x"), 1, minio.PutObjectOptions{UserMetadata: metadata}); err != nil {
+				t.Fatalf("raw put %s: %v", key, err)
+			}
+			object, err := storage.Stat(ctx, key)
+			if err != nil {
+				t.Fatalf("Stat(%s): %v", key, err)
+			}
+			if object.Owned || object.Owner != (media.Owner{}) {
+				t.Fatalf("Stat(%s) = %+v, want unowned with no owner", key, object)
+			}
+		}
+	})
+
+	t.Run("Put rejects an invalid owner and stores nothing", func(t *testing.T) {
+		for _, bad := range []media.Owner{{}, {Key: owner.Key}, {Key: media.CanvasKey{TenantID: "tenant a", CanvasID: "c"}, AssetID: "a"}} {
+			key := "assets/bad-owner"
+			if err := storage.Put(ctx, key, bad, strings.NewReader("bytes"), 5); !errors.Is(err, media.ErrInvalid) {
+				t.Fatalf("Put(owner %+v) = %v, want ErrInvalid", bad, err)
+			}
+			wantNoObject(t, server, storage, key)
+		}
+	})
+
+	t.Run("List pages keys in order after a cursor", func(t *testing.T) {
+		if _, err := storage.List(ctx, "", 0); !errors.Is(err, media.ErrInvalid) {
+			t.Fatalf("List(limit 0) = %v, want ErrInvalid", err)
+		}
+		want := server.Keys(t)
+		if len(want) < 5 {
+			t.Fatalf("bucket holds %v, want at least 5 objects", want)
+		}
+		var got []string
+		after := ""
+		for page := 0; ; page++ {
+			objects, err := storage.List(ctx, after, 2)
+			if err != nil {
+				t.Fatalf("List(%q, 2): %v", after, err)
+			}
+			if len(objects) > 2 {
+				t.Fatalf("List(%q, 2) returned %d objects", after, len(objects))
+			}
+			if len(objects) == 0 {
+				break
+			}
+			for _, object := range objects {
+				if object.ModifiedAt.IsZero() || object.Owned {
+					t.Fatalf("listed %+v, want a modification time and no owner", object)
+				}
+				got = append(got, object.Key)
+			}
+			after = objects[len(objects)-1].Key
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("paged keys = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("List stopped before the last key leaves no listing goroutine", func(t *testing.T) {
+		// A limit past one S3 page stops the listing while minio still holds
+		// keys of the next page to send.
+		const limit = 1001
+		var wg sync.WaitGroup
+		slots := make(chan struct{}, 16)
+		errs := make(chan error, limit+10)
+		for i := range limit + 10 {
+			slots <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-slots }()
+				if _, err := server.Client.PutObject(ctx, s3test.Bucket, fmt.Sprintf("bulk/%04d", i), strings.NewReader("x"), 1, minio.PutObjectOptions{}); err != nil {
+					errs <- err
+				}
+			})
+		}
+		wg.Wait()
+		close(errs)
+		if err := <-errs; err != nil {
+			t.Fatalf("raw put: %v", err)
+		}
+		for range 3 {
+			if objects, err := storage.List(ctx, "", limit); err != nil || len(objects) != limit {
+				t.Fatalf("List(%d) = %d objects, %v", limit, len(objects), err)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			leaked := listingGoroutines()
+			if leaked == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d listing goroutines still running after List returned", leaked)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+}
+
+// listingGoroutines counts goroutines started by minio's ListObjects.
+func listingGoroutines() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "minio-go/v7.(*Client).ListObjects.func")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }
 
 func TestOpenFailsWithoutEchoingCredentials(t *testing.T) {

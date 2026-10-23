@@ -1,23 +1,20 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
 // (US-001), the manual streamer activation and own-canvas read (US-002), and
 // the operator deactivation (US-003).
-// Every response is private and correlated; unsafe methods must
-// come from the configured origin, and authenticated mutations must carry the
-// session's CSRF token (CTRL-WEB-01 early primitive; TE-014 owns the control).
+// Every response is private and correlated, and every route is guarded by the
+// ingress (TE-014): unsafe methods need the exact Origin, session mutations
+// need the session's CSRF token before the session is read, and the abuse
+// limits answer 429 (CTRL-WEB-01, CTRL-RATE-01).
 package httpapi
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +22,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ratelimit"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
@@ -33,9 +31,9 @@ import (
 const (
 	// SessionCookie holds the session token. The __Host- prefix makes the
 	// browser require Secure, Path=/, and no Domain.
-	SessionCookie = "__Host-pcs"
+	SessionCookie = ingress.SessionCookie
 	// CSRFHeader carries the session's CSRF token on authenticated mutations.
-	CSRFHeader = "X-CSRF-Token"
+	CSRFHeader = ingress.CSRFHeader
 
 	maxBodyBytes = 4096
 	// maxLimiterKeys bounds each limiter's memory; a full table fails closed.
@@ -43,13 +41,10 @@ const (
 )
 
 // Rate is a number of attempts allowed per window.
-type Rate struct {
-	Limit  int
-	Window time.Duration
-}
+type Rate = ratelimit.Rate
 
-// Limits are the abuse limits of the sign-in and registration routes
-// (CTRL-RATE-01 early primitive). Addresses come from the TCP peer.
+// Limits are the abuse limits of the sign-in and registration routes,
+// answered through the ingress. Addresses come from the TCP peer.
 type Limits struct {
 	SignInPerAccount Rate
 	SignInPerIP      Rate
@@ -97,9 +92,9 @@ type Config struct {
 	Canvases      CanvasLoader
 	Subscriptions Subscriptions
 	Tenants       Tenants
-	// AllowedOrigin is the exact scheme://host[:port] of the editor.
-	AllowedOrigin string
-	Logger        *slog.Logger
+	// Ingress guards every route; it holds the allowed origins.
+	Ingress *ingress.Ingress
+	Logger  *slog.Logger
 	// Now is the limiter clock; nil uses time.Now.
 	Now    func() time.Time
 	Limits Limits
@@ -115,8 +110,8 @@ type api struct {
 
 // New validates the configuration and returns the API handler.
 func New(config Config) (http.Handler, error) {
-	if err := validateOrigin(config.AllowedOrigin); err != nil {
-		return nil, err
+	if config.Ingress == nil {
+		return nil, errors.New("httpapi: ingress is required")
 	}
 	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil {
 		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, and tenants are required")
@@ -141,40 +136,16 @@ func New(config Config) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/accounts", a.register)
-	mux.HandleFunc("POST /api/sessions", a.signIn)
+	in := config.Ingress
+	mux.Handle("POST /api/accounts", in.Route(ingress.Anonymous, http.HandlerFunc(a.register)))
+	mux.Handle("POST /api/sessions", in.Route(ingress.Anonymous, http.HandlerFunc(a.signIn)))
 	mux.HandleFunc("GET /api/session", a.currentSession)
-	mux.HandleFunc("DELETE /api/session", a.signOut)
+	mux.Handle("DELETE /api/session", in.Route(ingress.Session, http.HandlerFunc(a.signOut)))
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}", a.canvas)
-	mux.HandleFunc("POST /api/activations", a.activate)
-	mux.HandleFunc("POST /api/deactivations", a.deactivate)
+	mux.Handle("POST /api/activations", in.Route(ingress.Session, http.HandlerFunc(a.activate)))
+	mux.Handle("POST /api/deactivations", in.Route(ingress.Session, http.HandlerFunc(a.deactivate)))
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
-	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(a.checkOrigin(mux)))), nil
-}
-
-func validateOrigin(origin string) error {
-	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
-		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || origin != u.Scheme+"://"+u.Host {
-		return fmt.Errorf("httpapi: allowed origin must be exactly scheme://host[:port]")
-	}
-	return nil
-}
-
-// checkOrigin rejects unsafe methods from any origin but the configured one,
-// before routing, body parsing, or the domain run.
-func (a *api) checkOrigin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-		default:
-			if r.Header.Get("Origin") != a.AllowedOrigin {
-				a.responder.Error(w, r, httpx.ErrForbidden, errors.New("origin rejected"))
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
 }
 
 type registerBody struct {
@@ -184,7 +155,7 @@ type registerBody struct {
 }
 
 func (a *api) register(w http.ResponseWriter, r *http.Request) {
-	if !a.allow(w, r, a.registerPerIP, clientIP(r), "registration limit reached for address") {
+	if !a.Ingress.Allow(w, r, a.registerPerIP, ingress.ClientIP(r), ingress.ReasonRateIP) {
 		return
 	}
 	var body registerBody
@@ -230,8 +201,8 @@ func (a *api) signIn(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrBadRequest, err)
 		return
 	}
-	if !a.allow(w, r, a.signInPerIP, clientIP(r), "sign-in limit reached for address") ||
-		!a.allow(w, r, a.signInPerAccount, accountKey(body.Email), "sign-in limit reached for account") {
+	if !a.Ingress.Allow(w, r, a.signInPerIP, ingress.ClientIP(r), ingress.ReasonRateIP) ||
+		!a.Ingress.Allow(w, r, a.signInPerAccount, accountKey(body.Email), ingress.ReasonRateAccount) {
 		return
 	}
 	session, err := a.Accounts.SignIn(r.Context(), body.Email, secret.New(secret.KindPassword, body.Password))
@@ -320,16 +291,13 @@ type activationResult struct {
 	Created   bool   `json:"created"`
 }
 
-// activate lets an operator activate the account of an email. The session
-// and its CSRF token are checked before the body is read; the operator role
-// is checked by the domain before the account is looked up.
+// activate lets an operator activate the account of an email. The ingress
+// checks the CSRF token before the session is read, and the session is
+// checked before the body is read; the operator role is checked by the domain
+// before the account is looked up.
 func (a *api) activate(w http.ResponseWriter, r *http.Request) {
-	token, principal, ok := a.authenticate(w, r)
+	_, principal, ok := a.authenticate(w, r)
 	if !ok {
-		return
-	}
-	if !access.VerifyCSRF(token, r.Header.Get(CSRFHeader)) {
-		a.responder.Error(w, r, httpx.ErrForbidden, errors.New("csrf token rejected"))
 		return
 	}
 	var body activationBody
@@ -378,16 +346,13 @@ type deactivationResult struct {
 }
 
 // deactivate lets an operator cut the access of the tenant owned by the
-// account of an email; reactivation is activate. The checks run in the order
-// of activate. The cut is effective when the answer is sent; the access
+// account of an email; reactivation is activate. The ingress checks Origin
+// and the CSRF token before the session is read, and the rest runs in the
+// order of activate. The cut is effective when the answer is sent; the access
 // version stays internal.
 func (a *api) deactivate(w http.ResponseWriter, r *http.Request) {
-	token, principal, ok := a.authenticate(w, r)
+	_, principal, ok := a.authenticate(w, r)
 	if !ok {
-		return
-	}
-	if !access.VerifyCSRF(token, r.Header.Get(CSRFHeader)) {
-		a.responder.Error(w, r, httpx.ErrForbidden, errors.New("csrf token rejected"))
 		return
 	}
 	var body activationBody
@@ -428,6 +393,8 @@ func (a *api) deactivate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// signOut ends the session. The ingress has already checked the CSRF token
+// of a presented cookie, so only the session's own page can end it.
 func (a *api) signOut(w http.ResponseWriter, r *http.Request) {
 	token := sessionToken(r)
 	principal, err := a.Accounts.Authenticate(r.Context(), token)
@@ -439,10 +406,6 @@ func (a *api) signOut(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		a.responder.Error(w, r, httpx.ErrInternal, err)
-		return
-	}
-	if !access.VerifyCSRF(token, r.Header.Get(CSRFHeader)) {
-		a.responder.Error(w, r, httpx.ErrForbidden, errors.New("csrf token rejected"))
 		return
 	}
 	if err := a.Accounts.SignOut(r.Context(), token); err != nil {
@@ -595,17 +558,6 @@ func (a *api) authenticate(w http.ResponseWriter, r *http.Request) (secret.Value
 	return token, principal, true
 }
 
-func (a *api) allow(w http.ResponseWriter, r *http.Request, limiter *ratelimit.Limiter, key, reason string) bool {
-	ok, retry := limiter.Allow(key)
-	if ok {
-		return true
-	}
-	seconds := int((retry + time.Second - 1) / time.Second)
-	w.Header().Set("Retry-After", strconv.Itoa(max(seconds, 1)))
-	a.responder.Error(w, r, httpx.ErrRateLimited, errors.New(reason))
-	return false
-}
-
 func sessionToken(r *http.Request) secret.Value {
 	cookie, err := r.Cookie(SessionCookie)
 	if err != nil || cookie.Value == "" {
@@ -624,15 +576,6 @@ func clearSessionCookie(w http.ResponseWriter) {
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-}
-
-// clientIP is the TCP peer address. Trusting forwarding headers is TE-014's decision.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // accountKey keys the per-account limit by normalized email, so casing or

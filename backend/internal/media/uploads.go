@@ -36,13 +36,48 @@ var (
 	errBodyLong  = errors.New("body is longer than the declared size")
 )
 
-// Storage holds asset bytes under internal keys. Put never replaces an
+// Storage holds asset bytes under internal keys. Put records owner with the
+// object and rejects an invalid owner with ErrInvalid. Put never replaces an
 // existing object: it returns ErrObjectExists. Open of a missing key returns
 // ErrNotFound; Delete of a missing key succeeds.
 type Storage interface {
-	Put(ctx context.Context, key string, body io.Reader, size int64) error
+	Put(ctx context.Context, key string, owner Owner, body io.Reader, size int64) error
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
 	Delete(ctx context.Context, key string) error
+}
+
+// Owner names the asset whose bytes an object holds. Storage records it with
+// the object, so cleanup can prove who owned an object that has no row.
+type Owner struct {
+	Key     CanvasKey
+	AssetID string
+}
+
+// Valid reports whether every identifier of the owner is well formed.
+func (owner Owner) Valid() bool {
+	return ValidateKey(owner.Key) == nil && validateIdentifier("asset", owner.AssetID) == nil
+}
+
+// Object describes one stored object. Owner is set, and Owned true, only when
+// the object carries valid owner metadata.
+type Object struct {
+	Key        string
+	ModifiedAt time.Time
+	Owner      Owner
+	Owned      bool
+}
+
+// ObjectStore is a Storage that can also list and describe its objects, for
+// reconciliation against the committed assets.
+type ObjectStore interface {
+	Storage
+	// Stat describes the object stored under key, with its owner, or returns
+	// ErrNotFound.
+	Stat(ctx context.Context, key string) (Object, error)
+	// List returns up to limit objects whose keys sort after after, in key
+	// order. Listed objects carry no owner; Stat reads it. A non-positive
+	// limit is ErrInvalid.
+	List(ctx context.Context, after string, limit int) ([]Object, error)
 }
 
 // UploadRequest is one client upload. Operation.ID identifies the whole
@@ -113,7 +148,8 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 	}
 
 	body := &exactReader{r: req.Body, remaining: req.DeclaredBytes}
-	if err := u.storage.Put(ctx, reserved.StorageKey, body, req.DeclaredBytes); err != nil {
+	owner := Owner{Key: req.Key, AssetID: reserved.AssetID}
+	if err := u.storage.Put(ctx, reserved.StorageKey, owner, body, req.DeclaredBytes); err != nil {
 		// Another attempt of this upload stored its bytes first, and storage
 		// never replaces them. This attempt never aborts that one: it receives
 		// its result once completed, its recorded abandon, or ErrUploadInProgress.

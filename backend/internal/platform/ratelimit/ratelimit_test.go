@@ -102,3 +102,41 @@ func TestConcurrentAttemptsNeverExceedTheLimit(t *testing.T) {
 		t.Fatalf("allowed = %d, want 10", allowed)
 	}
 }
+
+func TestCheckTellsAFullTableFromAKeyOverItsLimit(t *testing.T) {
+	c := newClock()
+	l := ratelimit.New(1, time.Minute, 1, c.Now)
+	if res := l.Check("a"); res != (ratelimit.Result{Allowed: true}) {
+		t.Fatalf("first attempt = %+v", res)
+	}
+	c.Advance(10 * time.Second)
+	if res := l.Check("a"); res != (ratelimit.Result{RetryAfter: 50 * time.Second}) {
+		t.Fatalf("over the limit = %+v, want denied for 50s and not full", res)
+	}
+	if res := l.Check("b"); res != (ratelimit.Result{RetryAfter: time.Minute, Full: true}) {
+		t.Fatalf("full table = %+v, want denied for one window and full", res)
+	}
+}
+
+func TestPeekReportsWithoutRecording(t *testing.T) {
+	c := newClock()
+	l := ratelimit.New(1, time.Minute, 1, c.Now)
+	if res := l.Peek("alice"); !res.Allowed {
+		t.Fatalf("peek of a new key = %+v, want allowed", res)
+	}
+	// Peeking recorded nothing: the table still has room and alice her attempt.
+	if res := l.Check("alice"); !res.Allowed {
+		t.Fatalf("check after peek = %+v, want allowed", res)
+	}
+	c.Advance(10 * time.Second)
+	if res := l.Peek("alice"); res.Allowed || res.RetryAfter != 50*time.Second || res.Full {
+		t.Fatalf("peek over the limit = %+v, want denied with 50s", res)
+	}
+	if res := l.Peek("bob"); res.Allowed || !res.Full || res.RetryAfter != time.Minute {
+		t.Fatalf("peek with a full table = %+v, want full", res)
+	}
+	c.Advance(50 * time.Second)
+	if res := l.Peek("bob"); !res.Allowed {
+		t.Fatalf("peek after alice expired = %+v, want allowed", res)
+	}
+}

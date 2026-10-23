@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,14 +27,22 @@ var (
 	errDeleteB = errors.New("delete failed: second")
 )
 
-// fakeStorage is an in-memory object store. A fault or block can be set per
-// method; a block waits until the call's context is done.
+// fakeStorage is an in-memory object store. A fault, block, or gate can be
+// set per method; a block waits until the call's context is done, a gate
+// until it is released or the context is done.
 type fakeStorage struct {
 	mu      sync.Mutex
 	objects map[string][]byte
 	puts    []string
+	owners  map[string]media.Owner
+	// modified is the modification time of each object, read from now.
+	modified map[string]time.Time
+	now      func() time.Time
+	// deletes counts the successful Delete calls per key.
+	deletes map[string]int
 	faults  map[string]func(key string) error
 	blocks  map[string]bool
+	gates   map[string]chan struct{}
 	started chan struct{}
 	// beforePut runs before Put reads the body.
 	beforePut func()
@@ -44,16 +53,22 @@ type fakeStorage struct {
 
 func newFakeStorage() *fakeStorage {
 	return &fakeStorage{
-		objects: map[string][]byte{},
-		faults:  map[string]func(string) error{},
-		blocks:  map[string]bool{},
-		started: make(chan struct{}, 16),
+		objects:  map[string][]byte{},
+		owners:   map[string]media.Owner{},
+		modified: map[string]time.Time{},
+		now:      time.Now,
+		deletes:  map[string]int{},
+		faults:   map[string]func(string) error{},
+		blocks:   map[string]bool{},
+		gates:    map[string]chan struct{}{},
+		started:  make(chan struct{}, 16),
 	}
 }
 
-func (s *fakeStorage) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+func (s *fakeStorage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) error {
 	s.mu.Lock()
 	s.puts = append(s.puts, key)
+	s.owners[key] = owner
 	beforePut, overread := s.beforePut, s.overread
 	s.mu.Unlock()
 	if beforePut != nil {
@@ -75,6 +90,7 @@ func (s *fakeStorage) Put(ctx context.Context, key string, body io.Reader, size 
 		return media.ErrObjectExists
 	}
 	s.objects[key] = data
+	s.modified[key] = s.now()
 	s.mu.Unlock()
 	// A fault or cancellation after the write leaves an ambiguous object behind.
 	return s.interrupt(ctx, "put", key)
@@ -99,18 +115,70 @@ func (s *fakeStorage) Delete(ctx context.Context, key string) error {
 	}
 	s.mu.Lock()
 	delete(s.objects, key)
+	delete(s.owners, key)
+	delete(s.modified, key)
+	s.deletes[key]++
 	s.mu.Unlock()
 	return nil
 }
 
+// Stat returns the owner recorded by Put, Owned only when it is valid.
+func (s *fakeStorage) Stat(ctx context.Context, key string) (media.Object, error) {
+	if err := s.interrupt(ctx, "stat", key); err != nil {
+		return media.Object{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[key]; !ok {
+		return media.Object{}, media.ErrNotFound
+	}
+	object := media.Object{Key: key, ModifiedAt: s.modified[key]}
+	if owner, ok := s.owners[key]; ok && owner.Valid() {
+		object.Owner, object.Owned = owner, true
+	}
+	return object, nil
+}
+
+// List returns up to limit objects after the cursor in key order, without owner.
+func (s *fakeStorage) List(ctx context.Context, after string, limit int) ([]media.Object, error) {
+	if limit <= 0 {
+		return nil, media.ErrInvalid
+	}
+	if err := s.interrupt(ctx, "list", after); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.objects))
+	for key := range s.objects {
+		if key > after {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	var page []media.Object
+	for _, key := range keys[:min(limit, len(keys))] {
+		page = append(page, media.Object{Key: key, ModifiedAt: s.modified[key]})
+	}
+	return page, nil
+}
+
 func (s *fakeStorage) interrupt(ctx context.Context, method, key string) error {
 	s.mu.Lock()
-	fault, block := s.faults[method], s.blocks[method]
+	fault, block, gate := s.faults[method], s.blocks[method], s.gates[method]
 	s.mu.Unlock()
 	if block {
 		s.started <- struct{}{}
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if gate != nil {
+		s.started <- struct{}{}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	if fault != nil {
 		if err := fault(key); err != nil {
@@ -138,6 +206,57 @@ func (s *fakeStorage) unblock(method string) {
 	delete(s.blocks, method)
 }
 
+// hold makes calls of method wait until the returned release runs or their
+// context is done.
+func (s *fakeStorage) hold(method string) (release func()) {
+	gate := make(chan struct{})
+	s.mu.Lock()
+	s.gates[method] = gate
+	s.mu.Unlock()
+	return sync.OnceFunc(func() {
+		s.mu.Lock()
+		delete(s.gates, method)
+		s.mu.Unlock()
+		close(gate)
+	})
+}
+
+// plant stores an object directly, as an external write or a restore would,
+// with owner metadata unless owner is nil.
+func (s *fakeStorage) plant(key string, owner *media.Owner, modifiedAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objects[key] = []byte("planted")
+	s.modified[key] = modifiedAt
+	delete(s.owners, key)
+	if owner != nil {
+		s.owners[key] = *owner
+	}
+}
+
+// relabel replaces the owner metadata and modification time of an object.
+func (s *fakeStorage) relabel(key string, owner media.Owner, modifiedAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owners[key] = owner
+	s.modified[key] = modifiedAt
+}
+
+// lose removes an object without counting a Delete, as lost bytes would.
+func (s *fakeStorage) lose(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	delete(s.owners, key)
+	delete(s.modified, key)
+}
+
+func (s *fakeStorage) deleteCount(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deletes[key]
+}
+
 func (s *fakeStorage) object(key string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,6 +268,12 @@ func (s *fakeStorage) objectCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.objects)
+}
+
+func (s *fakeStorage) ownerOf(key string) media.Owner {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.owners[key]
 }
 
 func (s *fakeStorage) putKeys() []string {
@@ -234,7 +359,7 @@ type server struct {
 	canvases *postgres.CanvasStore
 }
 
-func startServer(t *testing.T) *server {
+func startServer(t *testing.T, options ...postgres.MediaStoreOption) *server {
 	t.Helper()
 	ctx := context.Background()
 	pg := pgtest.Start(t)
@@ -246,7 +371,7 @@ func startServer(t *testing.T) *server {
 	if err := postgres.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	return &server{store: postgres.NewMediaStore(pool), canvases: postgres.NewCanvasStore(pool)}
+	return &server{store: postgres.NewMediaStore(pool, options...), canvases: postgres.NewCanvasStore(pool)}
 }
 
 var canvasSeq, operationSeq atomic.Int64
@@ -263,10 +388,17 @@ type fixture struct {
 func (s *server) fixture(t *testing.T) *fixture {
 	t.Helper()
 	key := media.CanvasKey{TenantID: "tenant-a", CanvasID: fmt.Sprintf("canvas-%d", canvasSeq.Add(1))}
+	return s.fixtureWith(t, key, newFakeStorage())
+}
+
+// fixtureWith creates the canvas key over the given storage, which several
+// fixtures may share like one bucket.
+func (s *server) fixtureWith(t *testing.T, key media.CanvasKey, storage *fakeStorage) *fixture {
+	t.Helper()
 	if _, err := s.canvases.Create(context.Background(), canvas.Key{TenantID: key.TenantID, CanvasID: key.CanvasID}); err != nil {
 		t.Fatalf("Create canvas: %v", err)
 	}
-	storage, inspector := newFakeStorage(), &fakeInspector{started: make(chan struct{}, 16)}
+	inspector := &fakeInspector{started: make(chan struct{}, 16)}
 	return &fixture{key: key, store: s.store, storage: storage, inspector: inspector, uploads: media.NewUploads(s.store, storage, inspector)}
 }
 
@@ -455,6 +587,10 @@ func TestUploadPipeline(t *testing.T) {
 		}
 		if keys := f.storage.putKeys(); len(keys) != 1 || keys[0] != reserved.StorageKey || f.storage.objectCount() != 1 {
 			t.Fatalf("storage puts = %v with %d objects, want one put under %s", keys, f.storage.objectCount(), reserved.StorageKey)
+		}
+		// TE-013 S5: the object records the asset that owns it.
+		if got, want := f.storage.ownerOf(reserved.StorageKey), (media.Owner{Key: f.key, AssetID: reserved.AssetID}); got != want {
+			t.Fatalf("stored owner = %+v, want %+v", got, want)
 		}
 	})
 

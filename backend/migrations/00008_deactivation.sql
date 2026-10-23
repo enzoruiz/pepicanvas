@@ -48,11 +48,11 @@ DECLARE
 BEGIN
     SELECT count(*) INTO records FROM subscription_deactivations;
     IF records > 0 THEN
-        RAISE EXCEPTION '00007_deactivation down refused: % deactivation record(s) would be lost', records;
+        RAISE EXCEPTION '00008_deactivation down refused: % deactivation record(s) would be lost', records;
     END IF;
     SELECT count(*) INTO cuts FROM access_cuts;
     IF cuts > 0 THEN
-        RAISE EXCEPTION '00007_deactivation down refused: % access cut(s) would be lost', cuts;
+        RAISE EXCEPTION '00008_deactivation down refused: % access cut(s) would be lost', cuts;
     END IF;
 END
 $$;

@@ -220,6 +220,14 @@ func eventually(t *testing.T, what string, condition func() bool) {
 	}
 }
 
+// settledCount reports the records the publisher has counted as settled. It
+// settles a record in the store before it counts it, so a test that observes
+// the store must also wait for this count before it reads the counters.
+func settledCount(p *outbox.Publisher) uint64 {
+	c := p.Counters()
+	return c.Delivered + c.Rejected
+}
+
 func start(t *testing.T, config outbox.Config) *outbox.Publisher {
 	t.Helper()
 	publisher, err := outbox.NewPublisher(config)
@@ -301,7 +309,9 @@ func TestPublisherRetriesWithBoundedBackoffAndBlocksOnlyThatCanvas(t *testing.T)
 		now.Advance(backoff * time.Millisecond)
 		publisher.Notify()
 	}
-	eventually(t, "canvas A delivered", func() bool { return store.get(a2).outcome == outbox.OutcomeDelivered })
+	eventually(t, "canvas A delivered and counted", func() bool {
+		return store.get(a2).outcome == outbox.OutcomeDelivered && publisher.Counters().Delivered == 3
+	})
 	if got := out.calls(canvasA); !slices.Equal(got, []int64{1, 1, 1, 1, 1, 2}) {
 		t.Fatalf("canvas A calls = %v, want four failed attempts of 1, then 1 and 2", got)
 	}
@@ -322,7 +332,9 @@ func TestPublisherSettlesUndeliverableRecordsWithoutRetry(t *testing.T) {
 	second := store.add(canvasA, 2, "", t0)
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour})
 
-	eventually(t, "both records settled", func() bool { return store.get(second).outcome != "" })
+	eventually(t, "both records settled and counted", func() bool {
+		return store.get(second).outcome != "" && settledCount(publisher) == 2
+	})
 	if r := store.get(first); r.outcome != outbox.OutcomeRejected || r.lastError != "outbox: undeliverable: access denied" || r.record.Attempts != 0 {
 		t.Fatalf("undeliverable record = %+v, want rejected with its reason and no retry", r)
 	}
@@ -348,8 +360,8 @@ func TestPublisherRejectsMalformedRecordsWithoutDeliveringThem(t *testing.T) {
 	other := store.add(canvasB, 1, "", t0)
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour, Logger: logger})
 
-	eventually(t, "every record settled", func() bool {
-		return store.get(next).outcome != "" && store.get(other).outcome != ""
+	eventually(t, "every record settled and counted", func() bool {
+		return store.get(next).outcome != "" && store.get(other).outcome != "" && settledCount(publisher) == 3
 	})
 	if r := store.get(poison); r.outcome != outbox.OutcomeRejected || r.lastError != reason.Error() || r.record.Attempts != 0 || !r.settledAt.Equal(t0) {
 		t.Fatalf("malformed record = %+v, want rejected at %v with %q and no retry", r, t0, reason)
@@ -437,7 +449,12 @@ func TestPublisherCountsAndLogsEventsInvalidForTheActor(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&lockedWriter{w: &buffer, mu: &mu}, nil))
 	id := store.add(canvasA, 3, "corr-3", t0)
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour, Logger: logger})
-	eventually(t, "the record settled", func() bool { return store.get(id).outcome != "" })
+	// The invalid counter and the error log follow the rejected settle.
+	eventually(t, "the record settled, counted and logged", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return store.get(id).outcome != "" && publisher.Counters().Invalid == 1 && strings.Contains(buffer.String(), "outbox record invalid for the actor")
+	})
 	if r := store.get(id); r.outcome != outbox.OutcomeRejected || r.record.Attempts != 0 {
 		t.Fatalf("record = %+v, want rejected without retry", r)
 	}
@@ -458,7 +475,9 @@ func TestPublisherKeepsRunningThroughStoreFailures(t *testing.T) {
 	store, out, now := &memStore{failRead: 2}, &sink{}, &clock{now: t0}
 	id := store.add(canvasA, 1, "", t0)
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: 5 * time.Millisecond})
-	eventually(t, "delivered after the store recovered", func() bool { return store.get(id).outcome == outbox.OutcomeDelivered })
+	eventually(t, "delivered and counted after the store recovered", func() bool {
+		return store.get(id).outcome == outbox.OutcomeDelivered && publisher.Counters().Delivered == 1
+	})
 	if c := publisher.Counters(); c.StoreErrors != 2 || c.Delivered != 1 {
 		t.Fatalf("Counters = %+v, want 2 store errors and 1 delivered", c)
 	}
@@ -565,7 +584,12 @@ func TestPublisherLogsTheCorrelationOfEachDelivery(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&lockedWriter{w: &buffer, mu: &mu}, nil))
 	id := store.add(canvasA, 7, "corr-1", t0)
 	publisher := start(t, outbox.Config{Store: store, Sink: out, Now: now.Now, PollInterval: time.Hour, Logger: logger})
-	eventually(t, "delivered", func() bool { return publisher.Counters().Delivered == 1 })
+	// The delivery is logged after it is counted.
+	eventually(t, "delivered and logged", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return publisher.Counters().Delivered == 1 && strings.Contains(buffer.String(), "outbox record delivered")
+	})
 	mu.Lock()
 	line := buffer.String()
 	mu.Unlock()
@@ -632,8 +656,8 @@ func TestUndecodableRecordIsRejectedWithoutStallingOtherCanvases(t *testing.T) {
 
 	hub := newHub(t, realtime.Config{Authorize: allowAll})
 	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(hub), PollInterval: time.Hour})
-	eventually(t, "both canvases to drain", func() bool {
-		return mustStats(t, events, canvasA.TenantID).Pending == 0 && mustStats(t, events, canvasB.TenantID).Pending == 0
+	eventually(t, "both canvases to drain and be counted", func() bool {
+		return mustStats(t, events, canvasA.TenantID).Pending == 0 && mustStats(t, events, canvasB.TenantID).Pending == 0 && settledCount(publisher) == 3
 	})
 
 	assertDeliveredInOrder(t, hubEvents(t, hub, canvasB), 1, 1)

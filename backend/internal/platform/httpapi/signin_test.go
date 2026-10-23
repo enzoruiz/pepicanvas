@@ -3,8 +3,10 @@ package httpapi_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
@@ -21,12 +23,47 @@ type faults struct {
 	ownedTenant  error
 }
 
+// calls counts the domain calls the API makes, so tests can prove a rejected
+// request never reached the domain.
+type calls struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (c *calls) add(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = map[string]int{}
+	}
+	c.counts[name]++
+}
+
+// snapshot returns the calls made so far by method name.
+func (c *calls) snapshot() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.counts)
+}
+
 type faultyAccounts struct {
 	httpapi.Accounts
 	faults *faults
+	calls  *calls
+}
+
+func (a faultyAccounts) Register(ctx context.Context, request access.RegisterRequest) (access.AccountID, error) {
+	a.calls.add("Register")
+	return a.Accounts.Register(ctx, request)
+}
+
+func (a faultyAccounts) SignIn(ctx context.Context, email string, password secret.Value) (access.Session, error) {
+	a.calls.add("SignIn")
+	return a.Accounts.SignIn(ctx, email, password)
 }
 
 func (a faultyAccounts) Authenticate(ctx context.Context, token secret.Value) (access.Principal, error) {
+	a.calls.add("Authenticate")
 	if a.faults.authenticate != nil {
 		return access.Principal{}, a.faults.authenticate
 	}
@@ -34,6 +71,7 @@ func (a faultyAccounts) Authenticate(ctx context.Context, token secret.Value) (a
 }
 
 func (a faultyAccounts) SignOut(ctx context.Context, token secret.Value) error {
+	a.calls.add("SignOut")
 	if a.faults.signOut != nil {
 		return a.faults.signOut
 	}
@@ -43,6 +81,12 @@ func (a faultyAccounts) SignOut(ctx context.Context, token secret.Value) error {
 type faultySubscriptions struct {
 	httpapi.Subscriptions
 	faults *faults
+	calls  *calls
+}
+
+func (s faultySubscriptions) Activate(ctx context.Context, request subscription.ActivateRequest) (subscription.Activation, error) {
+	s.calls.add("Activate")
+	return s.Subscriptions.Activate(ctx, request)
 }
 
 func (s faultySubscriptions) IsOperator(ctx context.Context, account access.AccountID) (bool, error) {
