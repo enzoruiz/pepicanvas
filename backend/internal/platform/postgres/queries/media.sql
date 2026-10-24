@@ -11,10 +11,12 @@ FROM media_usage
 WHERE tenant_id = $1 AND canvas_id = $2
 FOR UPDATE;
 
--- name: SetMediaUsage :exec
+-- name: SetMediaUsage :one
+-- Every change of the usage bumps its version.
 UPDATE media_usage
-SET used_bytes = $3, reserved_bytes = $4
-WHERE tenant_id = $1 AND canvas_id = $2;
+SET used_bytes = $3, reserved_bytes = $4, version = version + 1
+WHERE tenant_id = $1 AND canvas_id = $2
+RETURNING version;
 
 -- name: ExpireReservations :one
 WITH expired AS (

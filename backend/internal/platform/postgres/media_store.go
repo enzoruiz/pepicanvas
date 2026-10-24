@@ -14,6 +14,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
+	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
 )
 
@@ -21,11 +22,18 @@ import (
 // before it expires and is released.
 const DefaultReservationTTL = 30 * time.Minute
 
+// expiryOperationID is the stored operation of a media usage record written
+// by a reservation expiry, which no client operation caused.
+const expiryOperationID = "reservation-expiry"
+
 // MediaStore implements media.Store. Every command locks the quota row of its
 // canvas, so the accounting of one canvas changes one transaction at a time,
 // and the database check keeps every committed state within the quota. Each
 // accepted command retains its operation ID and result in the same
 // transaction, so a retry returns the committed result without a second effect.
+// Every transaction that changes the used or reserved bytes of a canvas also
+// bumps its usage version and writes one media usage outbox record, so the
+// realtime actor learns every committed usage (CTRL-CONS-01).
 type MediaStore struct {
 	pool           *pgxpool.Pool
 	now            func() time.Time
@@ -33,6 +41,7 @@ type MediaStore struct {
 	reservationTTL time.Duration
 	// beforeCommit, when set by tests, runs after the command and before commit.
 	beforeCommit func(context.Context) error
+	committed    func(media.CanvasKey)
 }
 
 var _ media.Store = (*MediaStore)(nil)
@@ -57,6 +66,13 @@ func WithReservationTTL(ttl time.Duration) MediaStoreOption {
 	return func(s *MediaStore) { s.reservationTTL = ttl }
 }
 
+// WithMediaCommitted sets a hook that runs after each commit that wrote a
+// media usage outbox record, for example to wake the outbox publisher. It
+// must not block.
+func WithMediaCommitted(hook func(media.CanvasKey)) MediaStoreOption {
+	return func(s *MediaStore) { s.committed = hook }
+}
+
 // NewMediaStore returns a store over a migrated pool.
 func NewMediaStore(pool *pgxpool.Pool, options ...MediaStoreOption) *MediaStore {
 	s := &MediaStore{pool: pool, now: time.Now, retention: DefaultOperationRetention, reservationTTL: DefaultReservationTTL}
@@ -73,6 +89,7 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 		return media.Usage{}, err
 	}
 	var usage media.Usage
+	var written bool
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := db.New(tx)
 		locked, now, err := s.lock(ctx, q, key)
@@ -82,11 +99,13 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 		if usage, err = s.expire(ctx, q, key, locked, now); err != nil {
 			return err
 		}
-		return setUsage(ctx, q, key, usage)
+		written, err = commitUsage(ctx, q, key, locked, usage, media.Operation{}, now)
+		return err
 	})
 	if err != nil {
 		return media.Usage{}, wrapMedia("read media usage", err)
 	}
+	s.notify(key, written)
 	return usage, nil
 }
 
@@ -103,7 +122,9 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 	}
 	fingerprint := media.Fingerprint(command)
 	var result media.Result
+	var written bool
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		written = false
 		q := db.New(tx)
 		locked, now, err := s.lock(ctx, q, key)
 		if err != nil {
@@ -136,7 +157,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		if result, err = applyMedia(ctx, q, key, usage, command, now); err != nil {
 			return err
 		}
-		if err := setUsage(ctx, q, key, result.Usage); err != nil {
+		if written, err = commitUsage(ctx, q, key, locked, result.Usage, operation, now); err != nil {
 			return err
 		}
 		// An Abandon retains its outcome, so a retry repeats its response.
@@ -164,6 +185,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 	if err != nil {
 		return media.Result{}, wrapMedia("apply media command", err)
 	}
+	s.notify(key, written)
 	return result, nil
 }
 
@@ -209,6 +231,7 @@ func (s *MediaStore) Collect(ctx context.Context, limit int) ([]media.Garbage, e
 	}
 	for _, row := range canvases {
 		key := media.CanvasKey{TenantID: row.TenantID, CanvasID: row.CanvasID}
+		var written bool
 		err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 			q := db.New(tx)
 			locked, now, err := s.lock(ctx, q, key)
@@ -219,11 +242,13 @@ func (s *MediaStore) Collect(ctx context.Context, limit int) ([]media.Garbage, e
 			if err != nil {
 				return err
 			}
-			return setUsage(ctx, q, key, usage)
+			written, err = commitUsage(ctx, q, key, locked, usage, media.Operation{}, now)
+			return err
 		})
 		if err != nil {
 			return nil, wrapMedia("expire reservations", err)
 		}
+		s.notify(key, written)
 	}
 	rows, err := q.ListGarbage(ctx, bound)
 	if err != nil {
@@ -418,10 +443,47 @@ func (s *MediaStore) expire(ctx context.Context, q *db.Queries, key media.Canvas
 	return usage, err
 }
 
-func setUsage(ctx context.Context, q *db.Queries, key media.CanvasKey, usage media.Usage) error {
-	return q.SetMediaUsage(ctx, db.SetMediaUsageParams{
-		TenantID: key.TenantID, CanvasID: key.CanvasID, UsedBytes: usage.UsedBytes, ReservedBytes: usage.ReservedBytes,
+// commitUsage stores the usage after a command or an expiry, inside the
+// transaction that holds the quota lock. A changed usage bumps the usage
+// version and writes one media usage outbox record carrying only the
+// aggregate usage, the version, and the operation's correlation ID; an
+// unchanged usage writes nothing. It reports whether a record was written.
+func commitUsage(ctx context.Context, q *db.Queries, key media.CanvasKey, before, after media.Usage, operation media.Operation, now time.Time) (bool, error) {
+	if after == before {
+		return false, nil
+	}
+	version, err := q.SetMediaUsage(ctx, db.SetMediaUsageParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, UsedBytes: after.UsedBytes, ReservedBytes: after.ReservedBytes,
 	})
+	if err != nil {
+		return false, err
+	}
+	payload, err := outbox.EncodeMediaUsage(outbox.MediaUsage{
+		Version: version, QuotaBytes: after.QuotaBytes, UsedBytes: after.UsedBytes, ReservedBytes: after.ReservedBytes,
+	})
+	if err != nil {
+		return false, err
+	}
+	operationID := operation.ID
+	if operationID == "" {
+		operationID = expiryOperationID
+	}
+	if err := q.InsertMediaUsageOutbox(ctx, db.InsertMediaUsageOutboxParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operationID,
+		CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
+		Usage:         payload,
+		CreatedAt:     pgtype.Timestamptz{Time: now, Valid: true},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// notify runs the commit hook after a commit that wrote a usage record.
+func (s *MediaStore) notify(key media.CanvasKey, written bool) {
+	if written && s.committed != nil {
+		s.committed(key)
+	}
 }
 
 // retainedMedia returns the result of an equal retry of an operation accepted
