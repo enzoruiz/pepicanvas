@@ -992,3 +992,112 @@ func TestOwnerManagesInvitationsAcrossRestart(t *testing.T) {
 		}
 	}
 }
+
+// US-005: an account accepts an owner's link over real PostgreSQL, the
+// acceptance retried after a restart replays its answer, and the new
+// moderator lists the canvas and is refused owner routes.
+func TestModeratorAcceptsAnInvitationAcrossRestart(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	bob := registerAndSignIn(t, server, "op-process-bob-001", "bob@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	res, activation := activate(t, server, operator, "op-process-act-a01", "alice@example.com")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("activate alice = %d", res.StatusCode)
+	}
+	tenantID, canvasID := activation["tenant_id"].(string), activation["canvas_id"].(string)
+	canvasPath := "/api/tenants/" + tenantID + "/canvases/" + canvasID
+
+	const token = "pci_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-c01","token":"`+token+`"}`, alice.cookie, alice.csrf); res.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d", res.StatusCode)
+	}
+
+	// S1: no session, no acceptance and no list.
+	if res := request(t, server, http.MethodPost, "/api/invitations/accept", `{"operation_id":"op-process-acc-n01","token":"`+token+`"}`, ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous accept = %d, want 401", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/memberships", "", ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous memberships = %d, want 401", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, canvasPath, "", bob.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("canvas before acceptance = %d, want 403", res.StatusCode)
+	}
+
+	accept := `{"operation_id":"op-process-acc-a01","token":"` + token + `"}`
+	res = requestWith(t, server, http.MethodPost, "/api/invitations/accept", accept, bob.cookie, bob.csrf)
+	accepted, _ := io.ReadAll(res.Body)
+	want := `{"tenant_id":"` + tenantID + `","canvas_id":"` + canvasID + `"}` + "\n"
+	if res.StatusCode != http.StatusOK || string(accepted) != want {
+		t.Fatalf("accept = %d %s, want %s", res.StatusCode, accepted, want)
+	}
+	if n := count(t, dsn, `SELECT count(*) FROM memberships WHERE tenant_id = $1 AND role = 'moderator'`, tenantID); n != 1 {
+		t.Fatalf("moderator memberships = %d, want 1", n)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	// S12: the acceptance retried after a restart returns the identical body.
+	server = start(t, bin, env...)
+	res = requestWith(t, server, http.MethodPost, "/api/invitations/accept", accept, bob.cookie, bob.csrf)
+	if again, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusOK || string(again) != string(accepted) {
+		t.Fatalf("replay after restart = %d %s, want %s", res.StatusCode, again, accepted)
+	}
+	// The consumed link under another operation is unavailable.
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations/accept", `{"operation_id":"op-process-acc-a02","token":"`+token+`"}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("consumed link = %d, want 404", res.StatusCode)
+	}
+	if n := count(t, dsn, `SELECT count(*) FROM memberships WHERE tenant_id = $1 AND role = 'moderator'`, tenantID); n != 1 {
+		t.Fatalf("moderator memberships after replay = %d, want 1", n)
+	}
+
+	// S17: the moderated canvas is listed and readable.
+	res = request(t, server, http.MethodGet, "/api/memberships", "", bob.cookie)
+	listed, _ := io.ReadAll(res.Body)
+	if want := `{"memberships":[{"tenant_id":"` + tenantID + `","canvas_id":"` + canvasID + `","role":"moderator"}]}` + "\n"; res.StatusCode != http.StatusOK || string(listed) != want {
+		t.Fatalf("memberships = %d %s, want %s", res.StatusCode, listed, want)
+	}
+	if res := request(t, server, http.MethodGet, canvasPath, "", bob.cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("moderated canvas = %d, want 200", res.StatusCode)
+	}
+
+	// S8: the moderator is refused the owner's dimensions and invitations.
+	if res := requestWith(t, server, http.MethodPut, canvasPath+"/dimensions", `{"operation_id":"op-process-dim-b01","width":1280,"height":720}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator resize = %d, want 403", res.StatusCode)
+	}
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-b01","token":"pci_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator create = %d, want 403", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/invitations", "", bob.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator list = %d, want 403", res.StatusCode)
+	}
+	server.stop(t)
+	logs += server.logs.String()
+
+	if !strings.Contains(logs, `"msg":"invitation accepted"`) {
+		t.Fatal("no invitation accepted log")
+	}
+	for name, s := range map[string]string{
+		"invitation token": "pci_",
+		"session token":    strings.TrimPrefix(bob.cookie, "__Host-pcs="),
+		"CSRF token":       bob.csrf,
+		"moderator email":  "bob@example.com",
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}

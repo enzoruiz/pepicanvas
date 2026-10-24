@@ -1,7 +1,8 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
 // (US-001), the manual streamer activation and own-canvas read (US-002), the
 // operator deactivation (US-003), the owner's moderator invitations (US-004),
-// and the owner-only canvas resize (US-007). Every response is private and
+// their acceptance and the moderated-canvas list (US-005), and the owner-only
+// canvas resize (US-007). Every response is private and
 // correlated, and every route is guarded by the ingress (TE-014): unsafe
 // methods need the exact Origin, session mutations need the session's CSRF
 // token before the session is read, and the abuse limits answer 429
@@ -47,21 +48,26 @@ const (
 type Rate = ratelimit.Rate
 
 // Limits are the abuse limits of the sign-in, registration, and invitation
-// creation routes, answered through the ingress. Addresses come from the TCP
-// peer; invitation creation is keyed by the session's account.
+// creation and acceptance routes, answered through the ingress. Addresses
+// come from the TCP peer; invitation creation and acceptance are keyed by the
+// session's account.
 type Limits struct {
 	SignInPerAccount      Rate
 	SignInPerIP           Rate
 	RegisterPerIP         Rate
 	InvitationsPerAccount Rate
+	// InvitationAcceptsPerAccount limits acceptances by the session's
+	// account, before the body is read.
+	InvitationAcceptsPerAccount Rate
 }
 
 // DefaultLimits are the pilot limits.
 var DefaultLimits = Limits{
-	SignInPerAccount:      Rate{Limit: 10, Window: 15 * time.Minute},
-	SignInPerIP:           Rate{Limit: 50, Window: 15 * time.Minute},
-	RegisterPerIP:         Rate{Limit: 10, Window: time.Hour},
-	InvitationsPerAccount: Rate{Limit: 20, Window: time.Hour},
+	SignInPerAccount:            Rate{Limit: 10, Window: 15 * time.Minute},
+	SignInPerIP:                 Rate{Limit: 50, Window: 15 * time.Minute},
+	RegisterPerIP:               Rate{Limit: 10, Window: time.Hour},
+	InvitationsPerAccount:       Rate{Limit: 20, Window: time.Hour},
+	InvitationAcceptsPerAccount: Rate{Limit: 20, Window: time.Hour},
 }
 
 // Accounts is the account and session service.
@@ -97,6 +103,8 @@ type Invitations interface {
 	Create(ctx context.Context, request invitation.CreateRequest) (invitation.Invitation, error)
 	List(ctx context.Context, owner access.AccountID) ([]invitation.Invitation, error)
 	Revoke(ctx context.Context, request invitation.RevokeRequest) (invitation.Revocation, error)
+	Accept(ctx context.Context, request invitation.AcceptRequest) (invitation.Acceptance, error)
+	Moderations(ctx context.Context, account access.AccountID) ([]invitation.Moderation, error)
 }
 
 // Config wires the API.
@@ -122,6 +130,7 @@ type api struct {
 	signInPerIP           *ratelimit.Limiter
 	registerPerIP         *ratelimit.Limiter
 	invitationsPerAccount *ratelimit.Limiter
+	acceptsPerAccount     *ratelimit.Limiter
 }
 
 // New validates the configuration and returns the API handler.
@@ -132,7 +141,7 @@ func New(config Config) (http.Handler, error) {
 	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil || config.Invitations == nil {
 		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, tenants, and invitations are required")
 	}
-	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP, config.Limits.InvitationsPerAccount} {
+	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP, config.Limits.InvitationsPerAccount, config.Limits.InvitationAcceptsPerAccount} {
 		if rate.Limit < 1 || rate.Window <= 0 {
 			return nil, errors.New("httpapi: every limit needs a positive count and window")
 		}
@@ -151,6 +160,7 @@ func New(config Config) (http.Handler, error) {
 		registerPerIP:    limiter(config.Limits.RegisterPerIP),
 		// Invitation creation is keyed by account ID, never by email.
 		invitationsPerAccount: limiter(config.Limits.InvitationsPerAccount),
+		acceptsPerAccount:     limiter(config.Limits.InvitationAcceptsPerAccount),
 	}
 
 	mux := http.NewServeMux()
@@ -167,6 +177,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/invitations", in.Route(ingress.Session, http.HandlerFunc(a.createInvitation)))
 	mux.HandleFunc("GET /api/invitations", a.listInvitations)
 	mux.Handle("POST /api/invitations/{invitationID}/revoke", in.Route(ingress.Session, http.HandlerFunc(a.revokeInvitation)))
+	mux.Handle("POST /api/invitations/accept", in.Route(ingress.Session, http.HandlerFunc(a.acceptInvitation)))
+	mux.HandleFunc("GET /api/memberships", a.listMemberships)
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
 }
 
@@ -545,6 +557,82 @@ func (a *api) revokeInvitation(w http.ResponseWriter, r *http.Request) {
 		slog.String("status", string(revoked.Status)),
 	)
 	writeJSON(w, http.StatusOK, revocationResult{InvitationID: revoked.InvitationID, Status: string(revoked.Status)})
+}
+
+type acceptanceResult struct {
+	TenantID string `json:"tenant_id"`
+	CanvasID string `json:"canvas_id"`
+}
+
+type moderationResult struct {
+	TenantID string `json:"tenant_id"`
+	CanvasID string `json:"canvas_id"`
+	Role     string `json:"role"`
+}
+
+type moderationList struct {
+	Memberships []moderationResult `json:"memberships"`
+}
+
+// acceptInvitation makes the session's account a moderator of the tenant of
+// the token in the body. The ingress has already checked the Origin and the
+// CSRF token; the acceptance limit is checked after the session and before
+// the body is read. Every unusable link gets the one not-found answer.
+func (a *api) acceptInvitation(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !a.Ingress.Allow(w, r, a.acceptsPerAccount, string(principal.AccountID), ingress.ReasonRateAccount) {
+		return
+	}
+	var body invitationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	accepted, err := a.Invitations.Accept(r.Context(), invitation.AcceptRequest{
+		AccountID:     principal.AccountID,
+		OperationID:   body.OperationID,
+		Token:         secret.New(secret.KindInvitationToken, body.Token),
+		CorrelationID: correlationID.String(),
+	})
+	switch {
+	case err == nil:
+		a.Logger.InfoContext(r.Context(), "invitation accepted",
+			slog.String("tenant_id", accepted.TenantID),
+			slog.String("invitation_id", accepted.InvitationID),
+		)
+		writeJSON(w, http.StatusOK, acceptanceResult{TenantID: accepted.TenantID, CanvasID: accepted.CanvasID})
+	case errors.Is(err, invitation.ErrUnavailable):
+		a.responder.Error(w, r, httpx.ErrNotFound, err)
+	case errors.Is(err, invitation.ErrInvalid):
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+	case errors.Is(err, invitation.ErrOperationConflict):
+		a.responder.Error(w, r, httpx.ErrConflict, err)
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+	}
+}
+
+// listMemberships answers the canvases the session's account moderates in
+// active tenants.
+func (a *api) listMemberships(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	moderations, err := a.Invitations.Moderations(r.Context(), principal.AccountID)
+	if err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return
+	}
+	body := moderationList{Memberships: make([]moderationResult, 0, len(moderations))}
+	for _, m := range moderations {
+		body.Memberships = append(body.Memberships, moderationResult{TenantID: m.TenantID, CanvasID: m.CanvasID, Role: string(m.Role)})
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // signOut ends the session. The ingress has already checked the CSRF token
