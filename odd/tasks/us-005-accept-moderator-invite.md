@@ -1,0 +1,46 @@
+# US-005 accept an authenticated moderator invitation
+
+Issue #15 (US-005), stage 5 critical path. Branch `feat/us-005-accept-moderator-invite`, worktree `/home/enzo/projects/pepicanvas-us-005`, base `dbee2ac` (origin/main).
+Scope: an authenticated account explicitly confirms a pending `pci_` link and becomes moderator of exactly that tenant's canvas; acceptance route, moderated-canvas listing, editor confirmation screen, and the moderator capability matrix.
+
+## Specs
+
+- **S1 — Authentication first.** Business rule: "Aceptar requiere cuenta autenticada y confirmación explícita." Criterion: "Abrir un enlace vigente sin sesión exige autenticación y no muestra estado del canvas."
+- **S2 — Successful acceptance.** Criterion: "Una cuenta autenticada que confirma un enlace vigente obtiene membresía en ese canvas y el enlace queda consumido." Business rule: "El enlace se consume una sola vez en la confirmación del servidor."
+- **S3 — Concurrent acceptances.** Criterion: "Dos aceptaciones concurrentes producen una sola membresía; la segunda recibe rechazo seguro."
+- **S4 — Unusable links.** Criterion: "Enlaces vencidos, revocados, consumidos o de suscripción inactiva se rechazan sin acceso parcial."
+- **S5 — Failure before confirmation.** Criterion: "Una falla anterior a la confirmación no consume el enlace ni crea membresía."
+- **S6 — Failure after confirmation.** Criterion: "Una falla posterior a la confirmación mantiene una única membresía y la reconexión refleja el resultado confirmado."
+- **S7 — Cached resend.** Criterion: "Reenviar desde caché no vuelve a consumir ni cambia el resultado."
+- **S8 — Moderator capability matrix.** Business rule: "La membresía concede permisos de contenido, no ajustes de propietario, acceso ni dimensiones." Criterion: "El nuevo moderador no puede cambiar dimensiones, miembros, invitaciones, suscripción ni credencial OBS." DoD: "Se demuestra la matriz exacta de capacidades del moderador."
+- **S9 — Exact binding and two tenants.** "La aceptación vincula exactamente cuenta, invitación y canvas. Se prueba con invitaciones simultáneas de dos tenants y sin intercambio de acceso o metadatos."
+- **S10 — Link secrecy.** DoD: "No se registra ni expone el enlace completo."
+- **S11 — Definition of Done tests.** "Flujo exitoso, doble aceptación, falla antes/después, caché, expiración, revocación y dos tenants tienen pruebas."
+- **S12 — CTRL-IDEM-01 (owner TE-007 closed: full proof).** "reintentos de US-005 (#15) antes y después de timeout o reconexión producen un único efecto y la misma respuesta; un payload distinto con el mismo operation ID se rechaza y la retención acotada se prueba en su vencimiento."
+- **S13 — CTRL-WEB-01 (owner TE-014 closed: full proof).** "pruebas de US-005 (#15) cubren CSRF válido, faltante e inválido y Origin permitido, ausente y hostil, con rechazo antes del dominio, almacenamiento o upgrade WebSocket."
+- **S14 — CTRL-RATE-01 (owner TE-014 closed: full proof).** "pruebas deterministas de US-005 (#15) alcanzan el límite por cuenta, sesión, streamer o IP aplicable, observan 429 o cierre documentado, verifican recuperación e independencia entre streamers."
+- **S15 — CTRL-TRACE-01 (owner TE-015 open: Diferido a TE-015).** "recorrido instrumentado de US-005 (#15) conserva una correlación consultable desde aceptación por HTTP/WebSocket hasta dominio, PostgreSQL, outbox, actor, S3 o subproceso aplicable, con redacción verificada." Own part: the request `correlation_id` reaches the acceptance log and the stored operation record; logs carry no token, link, email, or CSRF token.
+- **S16 — CTRL-RESTORE-01 (owner TE-017 open: Diferido a TE-017).** "una restauración de copias reales vinculadas a US-005 (#15) en entorno aislado verifica integridad PostgreSQL/assets, reconciliación y RPO/RTO observados sin exponer secretos." Own part: memberships, consumed invitations, and acceptance records live only in PostgreSQL, and only the token hash is stored.
+- **S17 — User decision (L2).** "Nueva ruta GET /api/memberships (Recomendado)" — "Lista {tenant_id, canvas_id, role} de las membresías de moderador de la cuenta en tenants activos. El editor muestra esos canvas con la ruta de canvas que ya autoriza por membresía."
+
+### Non-goals
+
+Issue: "Aceptación anónima, permisos granulares y correo de invitación." Also: revoking a moderator (US-006), WebSocket editing (US-017), member and OBS credential routes (they do not exist yet; S8 is proven at the TE-001 policy for them).
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S8 | inline, test-first: remove the moderator `membership administer` rule from TE-001; exact moderator capability matrix test | pending | |
+| T2 | S2-S7, S9, S12, S15 | inline, test-first: `invitation.Service.Accept` with operation ID, replay, conflict, retention, member race → `ErrUnavailable`; `Moderations`; in-memory fake | pending | |
+| T3 | S2-S7, S9, S11, S12, S16 | inline, test-first: migration `00010`, sqlc, `InvitationStore`; real PostgreSQL concurrency, faults before/after commit, restart replay, retention, two tenants | pending | |
+| T4 | S1, S2, S4, S8-S10, S12-S15, S17 | inline, test-first: `POST /api/invitations/accept`, `GET /api/memberships`, accept limit, logs, `cmd/server` wiring; WEB/RATE and moderator HTTP matrix | pending | |
+| T5 | S1, S2, S6, S7, S10, S17 | test-first: editor confirmation screen, moderated canvases, API client, Vitest, Playwright E2E | pending | |
+| T6 | all | docs (`docs/stack.md`), issue control lines, review assess, verification, per-S verdicts | pending | |
+
+## Log
+
+- **L1** (user, 2026-10-24): "Empezá el desarrollo del issue #15 [US-005] Aceptar una invitación autenticada de moderador, en la rama feat/us-005-accept-moderator-invite. Es el camino crítico de la etapa 5. Estás en un worktree dedicado sobre origin/main; trabajá solo acá y en tu rama. Leé el issue completo con gh issue view, docs/roadmap.md y docs/stack.md antes de tocar código. Reglas de la etapa 5 (en paralelo están US-005 #15, US-016 #19 y TE-010 #36): (1) solo un issue de la etapa puede agregar dependencias a backend/go.mod o frontend/package.json; si necesitás agregar una, frená y preguntame antes. (2) Revisá las líneas de controles del issue según las reglas 6 a 8 de docs/stack.md: control con propietario cerrado se demuestra completo; propietario abierto se declara Diferido a. La etapa 4 todavía tiene issues abiertos (US-003, US-007, TE-013, TE-014): no mergees nada; podés commitear y pushear tu rama, pero no abras PR hasta que te lo pida."
+- **L2** (user decision, 2026-10-24): moderator canvas after reload: "Nueva ruta GET /api/memberships (Recomendado)".
+- **L3** (finding, parent): `gh` shows US-003 #13, US-007 #17, TE-013 #41, TE-014 #42 CLOSED (TE-015 #43, TE-017 #45 open). So WEB and RATE are proven in full (owner TE-014 closed), TRACE is deferred to TE-015, RESTORE to TE-017, IDEM in full. No merge, no PR (L1).
+- **L4** (design, parent): (a) TE-001 grants `moderator / membership / administer` over moderators; US-005 S8 and US-006 ("Un moderador no puede revocar a otro") forbid it, so the rule is removed. (b) `AcceptRequest` gains `OperationID` and `CorrelationID`; fingerprint SHA-256(`accept`, account, token hash); records kind `accept` in `invitation_operations` with the tenant, invitation, and canvas; retention 10 min. In one transaction: lock invitation by token hash `FOR UPDATE`, then read the operation (after the lock wait, READ COMMITTED sees a concurrent commit, so a same-operation retry replays), then tenant `FOR SHARE`, membership check, insert moderator, mark accepted, record. A record found with another fingerprint is `ErrOperationConflict`; a concurrent insert of the same ID is `ErrOperationRetained` → one retry → replay or conflict. A unique violation on `memberships_pkey` (US-004 advisory A1) becomes `ErrUnavailable`. Unknown, revoked, accepted, expired, inactive, already-member: one `ErrUnavailable`, nothing written. (c) `Tenant` gains `CanvasID`; `Acceptance` gains `CanvasID`. (d) `Service.Moderations(account)` lists `{tenant, canvas, role}` of moderator memberships, filtered by TE-001 canvas view (active tenants only). (e) Routes: `POST /api/invitations/accept` (`operation_id`, `token`), ingress class `Session`, session then per-account limit (20 per hour, `rate_account`) before the body; 200 `{tenant_id, canvas_id}`; unusable → 404 `not_found`, malformed → 400, conflict → 409. `GET /api/memberships` → 200 `{memberships: [{tenant_id, canvas_id, role}]}`. (f) Migration `00010_invitation_acceptance.sql`: kind `accept`, nullable `canvas_id`, answer check per kind. (g) Editor: `#pci_…` without a session shows only sign-in (no canvas request); with a session, an explicit "Accept invitation" button; the operation ID persists in `sessionStorage` keyed by the token's SHA-256 until a definitive answer; success or rejection clears the fragment with `history.replaceState`; moderated canvases render from `/api/memberships`.
