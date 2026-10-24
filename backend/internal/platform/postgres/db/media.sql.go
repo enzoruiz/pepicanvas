@@ -203,7 +203,7 @@ func (q *Queries) GetAbandonOperation(ctx context.Context, arg GetAbandonOperati
 }
 
 const getMediaOperation = `-- name: GetMediaOperation :one
-SELECT fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes
+SELECT fingerprint, asset_id, storage_key, quota_bytes, used_bytes, reserved_bytes, accepted_at
 FROM media_operations
 WHERE tenant_id = $1 AND canvas_id = $2 AND operation_id = $3
 `
@@ -221,6 +221,7 @@ type GetMediaOperationRow struct {
 	QuotaBytes    int64
 	UsedBytes     int64
 	ReservedBytes int64
+	AcceptedAt    pgtype.Timestamptz
 }
 
 func (q *Queries) GetMediaOperation(ctx context.Context, arg GetMediaOperationParams) (GetMediaOperationRow, error) {
@@ -233,6 +234,7 @@ func (q *Queries) GetMediaOperation(ctx context.Context, arg GetMediaOperationPa
 		&i.QuotaBytes,
 		&i.UsedBytes,
 		&i.ReservedBytes,
+		&i.AcceptedAt,
 	)
 	return i, err
 }

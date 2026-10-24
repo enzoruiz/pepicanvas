@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
 )
@@ -91,7 +92,11 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 
 // Apply validates one command and commits it in a single transaction. A
 // retained operation ID replays its result when the command is equal and
-// returns media.ErrOperationConflict when it differs.
+// returns media.ErrOperationConflict when it differs. A new command for a
+// tenant whose subscription is not active returns media.ErrInactive and
+// writes nothing, except Abandon: a failed upload always releases its
+// reservation. An equal retry of a command committed before the deactivation
+// still replays its result, since a replay has no effect.
 func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (media.Result, error) {
 	if err := media.ValidateCommand(key, operation, command); err != nil {
 		return media.Result{}, err
@@ -104,7 +109,22 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		if err != nil {
 			return err
 		}
-		replayed, found, err := retainedMedia(ctx, q, key, operation, fingerprint, now.Add(-s.retention))
+		// The tenant row stays shared-locked until commit, so a deactivation
+		// commits either before this read, and the command is rejected, or
+		// after this commit. Canvases without a tenant row predate US-002.
+		status, err := q.LockTenantStatus(ctx, key.TenantID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		_, abandon := command.(media.Abandon)
+		accepted := abandon || errors.Is(err, pgx.ErrNoRows) || status == string(access.SubscriptionActive)
+		// As in CanvasStore.Apply, the replay check runs after the status read:
+		// a rejected tenant still replays an equal retry, and without purging
+		// expired operations, so the replay writes nothing.
+		replayed, found, err := retainedMedia(ctx, q, key, operation, fingerprint, now.Add(-s.retention), accepted)
+		if !accepted && (errors.Is(err, media.ErrOperationConflict) || (err == nil && !found)) {
+			return media.ErrInactive
+		}
 		if err != nil || found {
 			result = replayed
 			return err
@@ -404,16 +424,20 @@ func setUsage(ctx context.Context, q *db.Queries, key media.CanvasKey, usage med
 	})
 }
 
-// retainedMedia purges the canvas operations accepted at or before expiredAt
-// and returns the result of an equal retry, or media.ErrOperationConflict.
-func retainedMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, operation media.Operation, fingerprint [32]byte, expiredAt time.Time) (media.Result, bool, error) {
-	if err := q.PurgeExpiredMediaOperations(ctx, db.PurgeExpiredMediaOperationsParams{
-		TenantID: key.TenantID, CanvasID: key.CanvasID, ExpiredAt: pgtype.Timestamptz{Time: expiredAt, Valid: true},
-	}); err != nil {
-		return media.Result{}, false, err
+// retainedMedia returns the result of an equal retry of an operation accepted
+// after expiredAt, or media.ErrOperationConflict. With purge it first deletes
+// the canvas operations accepted at or before expiredAt; without it nothing is
+// written.
+func retainedMedia(ctx context.Context, q *db.Queries, key media.CanvasKey, operation media.Operation, fingerprint [32]byte, expiredAt time.Time, purge bool) (media.Result, bool, error) {
+	if purge {
+		if err := q.PurgeExpiredMediaOperations(ctx, db.PurgeExpiredMediaOperationsParams{
+			TenantID: key.TenantID, CanvasID: key.CanvasID, ExpiredAt: pgtype.Timestamptz{Time: expiredAt, Valid: true},
+		}); err != nil {
+			return media.Result{}, false, err
+		}
 	}
 	row, err := q.GetMediaOperation(ctx, db.GetMediaOperationParams{TenantID: key.TenantID, CanvasID: key.CanvasID, OperationID: operation.ID})
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !row.AcceptedAt.Time.After(expiredAt)) {
 		return media.Result{}, false, nil
 	}
 	if err != nil {
@@ -609,7 +633,7 @@ func wrapMedia(action string, err error) error {
 	if err == nil {
 		return nil
 	}
-	for _, domain := range []error{media.ErrNotFound, media.ErrInvalid, media.ErrQuotaExceeded, media.ErrReferenceExists, media.ErrOperationConflict} {
+	for _, domain := range []error{media.ErrNotFound, media.ErrInvalid, media.ErrQuotaExceeded, media.ErrReferenceExists, media.ErrOperationConflict, media.ErrInactive} {
 		if errors.Is(err, domain) {
 			return err
 		}

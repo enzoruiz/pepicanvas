@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
@@ -357,6 +359,7 @@ func dimensionsRejection(t *testing.T) *media.Rejection {
 type server struct {
 	store    *postgres.MediaStore
 	canvases *postgres.CanvasStore
+	pool     *pgxpool.Pool
 }
 
 func startServer(t *testing.T, options ...postgres.MediaStoreOption) *server {
@@ -371,7 +374,7 @@ func startServer(t *testing.T, options ...postgres.MediaStoreOption) *server {
 	if err := postgres.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	return &server{store: postgres.NewMediaStore(pool, options...), canvases: postgres.NewCanvasStore(pool)}
+	return &server{store: postgres.NewMediaStore(pool, options...), canvases: postgres.NewCanvasStore(pool), pool: pool}
 }
 
 var canvasSeq, operationSeq atomic.Int64
@@ -1197,4 +1200,39 @@ func TestSweepContinuesPastFailingItem(t *testing.T) {
 	if f.storage.objectCount() != 0 {
 		t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
 	}
+}
+
+// US-016 S9: a deactivation that commits while the bytes are inspected
+// rejects the completion; the upload releases its reservation, deletes the
+// bytes, and returns ErrInactive. A new upload of the inactive tenant stores
+// nothing.
+func TestUploadOfADeactivatedTenantReleasesItsReservation(t *testing.T) {
+	srv := startServer(t)
+	ctx := context.Background()
+	tenant := "tenant-deactivated"
+	if _, err := srv.pool.Exec(ctx, "INSERT INTO tenants (tenant_id, subscription_status) VALUES ($1, 'active')", tenant); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	f := srv.fixtureWith(t, media.CanvasKey{TenantID: tenant, CanvasID: fmt.Sprintf("canvas-%d", canvasSeq.Add(1))}, newFakeStorage())
+	f.inspector.set(func(ctx context.Context, data []byte) (media.Inspection, error) {
+		if _, err := srv.pool.Exec(ctx, "UPDATE tenants SET subscription_status = 'inactive' WHERE tenant_id = $1", tenant); err != nil {
+			return media.Inspection{}, err
+		}
+		return imageOf(data), nil
+	})
+	req := f.request("hello", "ref-1")
+	if _, err := f.uploads.Upload(ctx, req); !errors.Is(err, media.ErrInactive) || errors.Is(err, media.ErrUploadFailed) {
+		t.Fatalf("Upload error = %v, want ErrInactive", err)
+	}
+	f.wantUsage(t, 0, 0)
+	f.wantGone(t, f.reservation(t, req))
+
+	puts := len(f.storage.putKeys())
+	if _, err := f.uploads.Upload(ctx, f.request("again", "ref-2")); !errors.Is(err, media.ErrInactive) {
+		t.Fatalf("Upload of an inactive tenant = %v, want ErrInactive", err)
+	}
+	if got := len(f.storage.putKeys()); got != puts || f.storage.objectCount() != 0 {
+		t.Fatalf("inactive upload stored %d objects (%d puts, want %d)", f.storage.objectCount(), got, puts)
+	}
+	f.wantUsage(t, 0, 0)
 }
