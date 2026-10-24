@@ -1,7 +1,7 @@
 // Package invitation lets the owner of an active tenant create, list, and
-// revoke single-use moderator invitations (US-004), and provides the
-// acceptance primitive that turns a pending invitation into a moderator
-// membership.
+// revoke single-use moderator invitations (US-004), lets an authenticated
+// account accept one to become moderator of exactly that tenant's canvas, and
+// lists the canvases an account moderates (US-005).
 package invitation
 
 import (
@@ -32,6 +32,9 @@ var (
 	// ErrTokenTaken is returned by Tx.InsertInvitation when an invitation
 	// with the same token hash is already stored.
 	ErrTokenTaken = errors.New("invitation: token already stored")
+	// ErrMemberTaken is returned by Tx.AddModerator when the account already
+	// has a membership in the tenant, including by a concurrent commit.
+	ErrMemberTaken = errors.New("invitation: membership already stored")
 )
 
 const (
@@ -63,8 +66,11 @@ type RevokeRequest struct {
 
 // AcceptRequest is one account's request to accept the invitation of Token.
 type AcceptRequest struct {
-	AccountID access.AccountID
-	Token     secret.Value
+	AccountID   access.AccountID
+	OperationID string
+	// Token is the secret of kind secret.KindInvitationToken.
+	Token         secret.Value
+	CorrelationID string
 }
 
 // Invitation is what the owner sees of an invitation. It never carries the token.
@@ -82,17 +88,34 @@ type Revocation struct {
 	Status       access.InvitationStatus
 }
 
-// Acceptance is the answer to a confirmed acceptance.
+// Acceptance is the answer to a confirmed acceptance: the tenant and canvas
+// the account now moderates.
 type Acceptance struct {
 	TenantID     string
+	CanvasID     string
 	InvitationID string
 }
 
-// Tenant is the tenant an owner administers.
+// Moderation is a canvas the account moderates in an active tenant.
+type Moderation struct {
+	TenantID string
+	CanvasID string
+	Role     access.Role
+}
+
+// ModeratedCanvas is a moderator membership with its tenant's canvas and
+// subscription status, whatever that status is.
+type ModeratedCanvas struct {
+	Membership access.Membership
+	CanvasID   string
+}
+
+// Tenant is a streamer tenant and its one canvas.
 type Tenant struct {
-	ID     string
-	Owner  access.AccountID
-	Status access.SubscriptionStatus
+	ID       string
+	Owner    access.AccountID
+	CanvasID string
+	Status   access.SubscriptionStatus
 }
 
 // Stored is an invitation row. Zero times mean the event did not happen.
@@ -119,17 +142,20 @@ func (s Stored) Invitation() Invitation {
 	return Invitation{ID: s.ID, TenantID: s.TenantID, CreatedAt: s.CreatedAt, ExpiresAt: s.ExpiresAt}
 }
 
-// OperationKind names the owner action an operation record retains.
+// OperationKind names the action an operation record retains.
 type OperationKind string
 
 const (
 	OperationCreate OperationKind = "create"
 	OperationRevoke OperationKind = "revoke"
+	OperationAccept OperationKind = "accept"
 )
 
-// Record is the retained answer of one owner operation. Fingerprint is the
-// SHA-256 of the kind, the owner ID, and the payload (the token hash or the
-// invitation ID). Invitation holds a create answer and Revocation a revoke one.
+// Record is the retained answer of one operation. OwnerID is the acting
+// account: the owner for create and revoke, the accepting account for
+// accept. Fingerprint is the SHA-256 of the kind, that account ID, and the
+// payload (the token hash or the invitation ID). Invitation holds a create
+// answer, Revocation a revoke one, and Acceptance an accept one.
 type Record struct {
 	OperationID   string
 	Kind          OperationKind
@@ -137,6 +163,7 @@ type Record struct {
 	Fingerprint   [32]byte
 	Invitation    Invitation
 	Revocation    Revocation
+	Acceptance    Acceptance
 	CorrelationID string
 	AcceptedAt    time.Time
 }
@@ -164,13 +191,18 @@ type Tx interface {
 	RevokeInvitation(ctx context.Context, invitationID string, at time.Time) error
 	// IsMember reports whether the account has any role in the tenant.
 	IsMember(ctx context.Context, tenantID string, account access.AccountID) (bool, error)
-	// AddModerator stores a moderator membership.
+	// AddModerator stores a moderator membership. It returns ErrMemberTaken
+	// when the account already has one in the tenant, including by a
+	// concurrent commit.
 	AddModerator(ctx context.Context, tenantID string, account access.AccountID) error
 	// MarkAccepted sets the invitation's accepted_at and accepted_by.
 	MarkAccepted(ctx context.Context, invitationID string, account access.AccountID, at time.Time) error
 	// RecordOperation drops records accepted at or before purgeBefore and
 	// retains record. It returns ErrOperationRetained for a retained ID.
 	RecordOperation(ctx context.Context, record Record, purgeBefore time.Time) error
+	// ModeratedCanvases returns the account's moderator memberships with
+	// their tenant's canvas and status, by tenant ID.
+	ModeratedCanvases(ctx context.Context, account access.AccountID) ([]ModeratedCanvas, error)
 }
 
 // Store runs invitation transactions.

@@ -110,6 +110,7 @@ type InvitationOperation struct {
 	Status         pgtype.Text
 	CorrelationID  pgtype.Text
 	AcceptedAt     pgtype.Timestamptz
+	CanvasID       pgtype.Text
 }
 
 type MediaAsset struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -369,4 +370,114 @@ func TestInvitationRollbackRefusesToLoseInvitations(t *testing.T) {
 	if got, want := readInvitationSchema(t, pool), (invitationSchema{version: 9, invitationsTable: true, operationsTable: true}); got != want {
 		t.Fatalf("after re-applying %+v, want %+v", got, want)
 	}
+}
+
+// acceptanceSchema reports what 00010 adds and the operation records it keeps.
+type acceptanceSchema struct {
+	version      int64
+	canvasColumn bool
+	records      string
+}
+
+func readAcceptanceSchema(t *testing.T, pool *pgxpool.Pool) acceptanceSchema {
+	t.Helper()
+	s := acceptanceSchema{version: schemaVersion(t, pool)}
+	err := pool.QueryRow(context.Background(), `SELECT
+		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'invitation_operations' AND column_name = 'canvas_id'),
+		coalesce((SELECT string_agg(operation_id || ':' || kind, ',' ORDER BY operation_id) FROM invitation_operations), '')`).
+		Scan(&s.canvasColumn, &s.records)
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	return s
+}
+
+func TestInvitationAcceptanceMigrationRollsBackAndReapplies(t *testing.T) {
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, pgtest.Start(t).DSN(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	provider := migrationProvider(t, pool)
+	// The test exercises 00010 as the latest applied migration.
+	if _, err := provider.DownTo(ctx, 10); err != nil {
+		t.Fatalf("DownTo(10): %v", err)
+	}
+
+	for _, account := range []string{streamerAccount, legacyAccount} {
+		exec(t, pool, "INSERT INTO accounts (account_id, email, password_hash, created_at) VALUES ($1, $1 || '@example.com', 'stub', now())", account)
+	}
+	exec(t, pool, "INSERT INTO tenants (tenant_id, subscription_status, owner_account_id, canvas_id) VALUES ('invited-tenant', 'active', $1, 'invited-canvas')", streamerAccount)
+	for _, id := range []string{"0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"} {
+		exec(t, pool, `INSERT INTO invitations (invitation_id, tenant_id, token_hash, created_by, created_at, expires_at)
+			VALUES ($1, 'invited-tenant', sha256(convert_to($1, 'UTF8')), $2, now(), now() + interval '168 hours')`, id, streamerAccount)
+	}
+	exec(t, pool, `UPDATE invitations SET accepted_at = now(), accepted_by = $1 WHERE invitation_id = 'fedcba9876543210fedcba9876543210'`, legacyAccount)
+	exec(t, pool, "INSERT INTO memberships (tenant_id, account_id, role) VALUES ('invited-tenant', $1, 'moderator')", legacyAccount)
+	insert := `INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, accepted_at)
+		VALUES ($1, $2, $3, decode(repeat('ab', 32), 'hex'), 'invited-tenant', $4, $5, $6, $7, $8, now())`
+	created, expires := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC), time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	exec(t, pool, insert, "op-migration-create", "create", streamerAccount, "0123456789abcdef0123456789abcdef", created, expires, nil, nil)
+	exec(t, pool, insert, "op-migration-revoke", "revoke", streamerAccount, "fedcba9876543210fedcba9876543210", nil, nil, "accepted", nil)
+	exec(t, pool, insert, "op-migration-accept", "accept", legacyAccount, "fedcba9876543210fedcba9876543210", nil, nil, "accepted", "invited-canvas")
+
+	// Each kind keeps exactly its own answer columns.
+	for _, bad := range []struct {
+		name                     string
+		kind                     string
+		created, expires, status any
+		canvas                   any
+	}{
+		{"create with a canvas", "create", created, expires, nil, "invited-canvas"},
+		{"revoke with a canvas", "revoke", nil, nil, "revoked", "invited-canvas"},
+		{"accept without a canvas", "accept", nil, nil, "accepted", nil},
+		{"accept with status revoked", "accept", nil, nil, "revoked", "invited-canvas"},
+		{"accept without a status", "accept", nil, nil, nil, "invited-canvas"},
+		{"accept with dates", "accept", created, expires, "accepted", "invited-canvas"},
+		{"accept with an empty canvas", "accept", nil, nil, "accepted", ""},
+		{"unknown kind", "delete", nil, nil, "accepted", "invited-canvas"},
+	} {
+		_, err := pool.Exec(ctx, insert, "op-migration-bad-0001", bad.kind, legacyAccount, "fedcba9876543210fedcba9876543210", bad.created, bad.expires, bad.status, bad.canvas)
+		if err == nil || !strings.Contains(err.Error(), "23514") {
+			t.Fatalf("%s: error = %v, want check_violation", bad.name, err)
+		}
+	}
+	intact := acceptanceSchema{version: 10, canvasColumn: true, records: "op-migration-accept:accept,op-migration-create:create,op-migration-revoke:revoke"}
+	if got := readAcceptanceSchema(t, pool); got != intact {
+		t.Fatalf("schema = %+v, want %+v", got, intact)
+	}
+	kept := activatedRows(t, pool)
+
+	// Rolling back drops only the acceptance replay records; invitations and
+	// memberships stay.
+	if _, err := provider.DownTo(ctx, 9); err != nil {
+		t.Fatalf("DownTo(9): %v", err)
+	}
+	want := acceptanceSchema{version: 9, records: "op-migration-create:create,op-migration-revoke:revoke"}
+	if got := readAcceptanceSchema(t, pool); got != want {
+		t.Fatalf("after the rollback %+v, want %+v", got, want)
+	}
+	if got := activatedRows(t, pool); got != kept {
+		t.Fatalf("rows after the rollback = %q, want %q", got, kept)
+	}
+	if n := count(t, pool, "SELECT count(*) FROM invitations i JOIN memberships m ON m.account_id = i.accepted_by AND m.tenant_id = i.tenant_id"); n != 1 {
+		t.Fatal("the rollback lost the accepted invitation or its membership")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, status, accepted_at)
+		VALUES ('op-migration-accept', 'accept', $1, decode(repeat('ab', 32), 'hex'), 'invited-tenant', 'fedcba9876543210fedcba9876543210', 'accepted', now())`, legacyAccount); err == nil {
+		t.Fatal("00009 accepted an accept record")
+	}
+
+	if _, err := provider.UpTo(ctx, 10); err != nil {
+		t.Fatalf("UpTo(10) after the rollback: %v", err)
+	}
+	want = acceptanceSchema{version: 10, canvasColumn: true, records: "op-migration-create:create,op-migration-revoke:revoke"}
+	if got := readAcceptanceSchema(t, pool); got != want {
+		t.Fatalf("after re-applying %+v, want %+v", got, want)
+	}
+	exec(t, pool, insert, "op-migration-accept", "accept", legacyAccount, "fedcba9876543210fedcba9876543210", nil, nil, "accepted", "invited-canvas")
 }
