@@ -92,7 +92,7 @@ One JSON file per transmission, decoded strictly (unknown fields, duplicate keys
 
 ## Delivery slices
 
-- Slice 1 (past ~400 lines, recorded at a969dbf): T0-T2, the evaluator and its CLI. Slice 2: T3-T5, the live harness (T3 at 63f37d8, T4 at 718f4b7). Slice 3: T6 docs. Chained PRs follow these boundaries when the user asks for a PR.
+- Slice 1 (past ~400 lines, recorded at a969dbf): T0-T2, the evaluator and its CLI. Slice 2: T3-T5, the live harness (T3 at 63f37d8, T4 at 718f4b7, T5 at 35837d2). Slice 3: T6 docs. Chained PRs follow these boundaries when the user asks for a PR.
 
 ## Tasks
 
@@ -101,7 +101,7 @@ One JSON file per transmission, decoded strictly (unknown fields, duplicate keys
 - [x] T2 — `backend/cmd/latencycheck`: CLI that loads the release manifest and repository pins, evaluates evidence files, prints per-transmission results, exit codes (S5, S6, S10). Route: gentle-ai-worker, test-first. Commit: a969dbf
 - [x] T3 — `backend/cmd/latencyprobe`: loopback harness server with the real hub, SSE events, ping, commands, static probe page (S1, S3, S8). Route: gentle-ai-worker, test-first. Commit: 63f37d8
 - [x] T4 — Frontend probe page and latency primitives (render mark, pings, event stream disconnects), separate Vite config (S1-S3). Route: gentle-ai-worker, test-first (Vitest). Commit: 718f4b7
-- [ ] T5 — Playwright latency runner over the browser matrix writing evidence and validating it with `latencycheck`; real run (S1-S6, S10). Route: inline. Commit: —
+- [x] T5 — Playwright latency runner over the browser matrix writing evidence and validating it with `latencycheck`; real run (S1-S6, S10). Route: gentle-ai-worker. Commit: 35837d2
 - [ ] T6 — Docs (`docs/stack.md`), close-out checks, native review per commit if due. Route: inline. Commit: —
 
 ## Log
@@ -112,3 +112,9 @@ One JSON file per transmission, decoded strictly (unknown fields, duplicate keys
 - **L4 (evidence):** T1/T2 verified by the parent: gofmt empty, vet clean, `go test -race` ok for both packages. Worker resolutions accepted: an invalid sample counts under every failing reason; malformed equal correlations count as `correlation_mismatch`; lists in `versions` must match in order; negative latency is reported as-is; any structural error in any file exits 2 with no stdout. Evidence `versions` must hold OBSERVED values (never copied from the manifest), so the live run uses `GOTOOLCHAIN=go1.27.2`.
 - **L5 (evidence):** T3 verified by the parent: gofmt empty, vet clean, `go test -race -count=3` ok. Worker contract clarifications accepted: set requires an object payload; delete omits `payload` (`null` is 400); same operation ID with another intent is 409 `operation_conflict`; a retry returns 200 with the original sequence, a fresh `acceptedAtNs`, and no second broadcast; publish reads `Events(after=lastPublished)`; `localhost` is refused (literal loopback IP only); subscriber buffer 256 frames.
 - **L6 (evidence):** T4 verified by the parent: tsc ok, eslint `src/latency vite.latency.config.ts` ok (`latency/` holds only HTML, which ESLint does not lint), prettier ok, Vitest 39/39; production build still emits only editor and overlay. Accepted: the audio element is muted and loops (play() needs no gesture; `playing`/`pause` still fire), so the runner alternates play and pause; a frame that fails parsing never settles `rendered()`, so the runner times out per sample. Browser cache downloaded and SHA-256 verified; `go1.27.2` toolchain downloaded.
+- **L7 (evidence):** Real run `npm run latency:probe:offline` (GOTOOLCHAIN=go1.27.2), recomputed by the parent with `latencycheck`, exit 0:
+  - chrome-current 155.0.8059.79: MEASURED, 120/120 valid, RTT p95 1.100 ms, latency p95 25.826 ms
+  - chrome-previous 154.0.8037.92: MEASURED, 120/120, RTT p95 1.200 ms, latency p95 26.008 ms
+  - edge-current 155.0.4283.45: MEASURED, 120/120, RTT p95 1.200 ms, latency p95 25.550 ms
+  - edge-previous 154.0.4258.62: MEASURED, 120/120, RTT p95 1.500 ms, latency p95 24.566 ms
+  - Every kind 20 valid samples per transmission; versions go 1.27.2, node 24.16.0, npm 11.13.0, 73 Go modules, 258 frontend packages, release manifest SHA-256 matches. Negative paths on copies: 99 samples → INCONCLUSIVE `insufficient_samples` (exit 1); go 1.27.3 → INCONCLUSIVE `version_mismatch:go` (exit 1); one disconnected and one correlation-mismatched sample → excluded, 118 valid, MEASURED. Evidence lives in gitignored `frontend/.cache/latency/evidence/` (durability is TE-015, S9). OBS was not run live (its harness is Windows-only); OBS versions are pinned through the release manifest.
