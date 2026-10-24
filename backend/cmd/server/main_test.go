@@ -244,6 +244,42 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 	for name, o := range invalidOrigins {
 		cases[name] = []string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + o}
 	}
+	// US-016 S17: media storage is configured completely or not at all, and
+	// a bad media configuration stops the process before the database is
+	// opened, without echoing a credential.
+	const (
+		accessKey = "PEPICANVAS_S3_ACCESS_KEY=s3-access-decoy"
+		secretKey = "PEPICANVAS_S3_SECRET_KEY=s3-secret-decoy"
+	)
+	s3 := []string{"PEPICANVAS_S3_ENDPOINT=127.0.0.1:1", "PEPICANVAS_S3_BUCKET=media", accessKey, secretKey}
+	invalidMedia := map[string]struct {
+		env  []string
+		want []string
+	}{
+		"partial S3": {
+			env:  []string{"PEPICANVAS_S3_ENDPOINT=127.0.0.1:1", accessKey, "PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"},
+			want: []string{"media storage is partially configured", "PEPICANVAS_S3_BUCKET", "PEPICANVAS_S3_SECRET_KEY"},
+		},
+		"S3 without a cgroup root": {
+			env:  s3,
+			want: []string{"media storage is partially configured", "PEPICANVAS_MEDIA_CGROUP_ROOT"},
+		},
+		"cgroup root without S3": {
+			env:  []string{"PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"},
+			want: []string{"media storage is partially configured", "PEPICANVAS_S3_ENDPOINT", "PEPICANVAS_S3_BUCKET", "PEPICANVAS_S3_ACCESS_KEY", "PEPICANVAS_S3_SECRET_KEY"},
+		},
+		"invalid S3 secure": {
+			env:  append([]string{"PEPICANVAS_S3_SECURE=yes", "PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"}, s3...),
+			want: []string{"PEPICANVAS_S3_SECURE must be true or false"},
+		},
+		"cgroup root that is not delegated": {
+			env:  append([]string{"PEPICANVAS_MEDIA_CGROUP_ROOT=" + t.TempDir()}, s3...),
+			want: []string{"media inspection containment is unavailable"},
+		},
+	}
+	for name, c := range invalidMedia {
+		cases[name] = append([]string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin}, c.env...)
+	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command(bin)
@@ -263,7 +299,60 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 				(!strings.Contains(string(out), "allowed origin must be exactly scheme://host[:port]") || strings.Contains(string(out), "127.0.0.1:1")) {
 				t.Fatalf("the origin was not rejected before the database was opened:\n%s", out)
 			}
+			if c, invalid := invalidMedia[name]; invalid {
+				for _, want := range c.want {
+					if !strings.Contains(string(out), want) {
+						t.Fatalf("output lacks %q:\n%s", want, out)
+					}
+				}
+				for _, leak := range []string{"s3-access-decoy", "s3-secret-decoy", "127.0.0.1:1/pepicanvas"} {
+					if strings.Contains(string(out), leak) {
+						t.Fatalf("output contains %q:\n%s", leak, out)
+					}
+				}
+			}
 		})
+	}
+}
+
+// US-016 S17: without object storage the server still answers the storage
+// quota of a canvas, refuses uploads with media_unavailable, and says once
+// that media is disabled.
+func TestServerServesMediaUsageWithoutObjectStorage(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	server := start(t, bin,
+		"PEPICANVAS_DATABASE_URL="+dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN="+origin,
+	)
+	alice := registerAndSignIn(t, server, "op-media-alice-01", "alice@example.com")
+	seed(t, dsn,
+		"INSERT INTO tenants (tenant_id, subscription_status) VALUES ('tenant-a', 'active')",
+		"INSERT INTO canvases (tenant_id, canvas_id) VALUES ('tenant-a', 'main')",
+		"INSERT INTO memberships (tenant_id, account_id, role) SELECT 'tenant-a', account_id, 'owner' FROM accounts WHERE email = 'alice@example.com'",
+	)
+	mediaPath := "/api/tenants/tenant-a/canvases/main/media"
+
+	res := request(t, server, http.MethodGet, mediaPath+"/usage", "", alice.cookie)
+	body, _ := io.ReadAll(res.Body)
+	const want = `{"quota_bytes":1000000000,"used_bytes":0,"reserved_bytes":0,"available_bytes":1000000000}` + "\n"
+	if res.StatusCode != http.StatusOK || string(body) != want {
+		t.Fatalf("usage = %d %s, want 200 %s", res.StatusCode, body, want)
+	}
+
+	res = requestWith(t, server, http.MethodPost, mediaPath+"/uploads?operation_id=op-media-up-01&reference_id=ref-01", "bytes", alice.cookie, alice.csrf)
+	if got := decodeBody(t, res); res.StatusCode != http.StatusServiceUnavailable || got["error"] != "media_unavailable" {
+		t.Fatalf("upload = %d %v, want 503 media_unavailable", res.StatusCode, got)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM media_operations"); n != 0 {
+		t.Fatalf("media operations after a refused upload = %d, want 0", n)
+	}
+	server.stop(t)
+
+	if n := strings.Count(server.logs.String(), `"msg":"media storage disabled"`); n != 1 {
+		t.Fatalf("media disabled logs = %d, want 1\n%s", n, server.logs)
 	}
 }
 
