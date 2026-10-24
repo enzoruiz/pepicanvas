@@ -1,6 +1,7 @@
-// Client for the account, session, activation, deactivation, invitation, and
-// canvas API (US-001, US-002, US-003, US-004, US-007). Responses are reduced
-// to a closed set of outcomes; server text never reaches the UI.
+// Client for the account, session, activation, deactivation, invitation,
+// membership, and canvas API (US-001, US-002, US-003, US-004, US-005,
+// US-007). Responses are reduced to a closed set of outcomes; server text
+// never reaches the UI.
 
 import type { CanvasObject } from "../canvas/CanvasSurface";
 
@@ -13,7 +14,8 @@ export interface Session {
   operator: boolean;
 }
 
-export interface OwnCanvas {
+// A canvas read through the own-canvas route or the tenant route.
+export interface Canvas {
   tenantId: string;
   canvasId: string;
   width: number;
@@ -21,6 +23,8 @@ export interface OwnCanvas {
   revision: number;
   objects: CanvasObject[];
 }
+
+export type OwnCanvas = Canvas;
 
 export interface Dimensions {
   canvasId: string;
@@ -52,6 +56,17 @@ export interface Invitation {
 export interface Revocation {
   invitationId: string;
   status: "revoked" | "accepted";
+}
+
+export interface Acceptance {
+  tenantId: string;
+  canvasId: string;
+}
+
+export interface Membership {
+  tenantId: string;
+  canvasId: string;
+  role: "moderator";
 }
 
 export type ApiError =
@@ -213,39 +228,66 @@ function toCanvasObject(value: unknown): CanvasObject | undefined {
   return undefined;
 }
 
+// Reads the canvas fields shared by both canvas routes; the tenant route
+// answers no tenant_id, so the caller supplies the tenant it asked for.
+function toCanvas(value: unknown, tenantId: string): Canvas | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { canvas_id, width, height, revision, objects } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof canvas_id === "string" &&
+    Number.isInteger(width) &&
+    Number.isInteger(height) &&
+    Number.isInteger(revision) &&
+    Array.isArray(objects)
+  ) {
+    const parsed = objects.map(toCanvasObject);
+    if (
+      parsed.every((object): object is CanvasObject => object !== undefined)
+    ) {
+      return {
+        tenantId,
+        canvasId: canvas_id,
+        width: width as number,
+        height: height as number,
+        revision: revision as number,
+        objects: parsed,
+      };
+    }
+  }
+  return undefined;
+}
+
 export async function getOwnCanvas(): Promise<Result<OwnCanvas>> {
   const result = await call("GET", "/api/canvas");
   if (!result.ok) return result;
   if (typeof result.value === "object" && result.value !== null) {
-    const { tenant_id, canvas_id, width, height, revision, objects } =
-      result.value as Record<string, unknown>;
-    if (
-      typeof tenant_id === "string" &&
-      typeof canvas_id === "string" &&
-      Number.isInteger(width) &&
-      Number.isInteger(height) &&
-      Number.isInteger(revision) &&
-      Array.isArray(objects)
-    ) {
-      const parsed = objects.map(toCanvasObject);
-      if (
-        parsed.every((object): object is CanvasObject => object !== undefined)
-      ) {
-        return {
-          ok: true,
-          value: {
-            tenantId: tenant_id,
-            canvasId: canvas_id,
-            width: width as number,
-            height: height as number,
-            revision: revision as number,
-            objects: parsed,
-          },
-        };
-      }
-    }
+    const { tenant_id } = result.value as Record<string, unknown>;
+    const canvas =
+      typeof tenant_id === "string"
+        ? toCanvas(result.value, tenant_id)
+        : undefined;
+    if (canvas) return { ok: true, value: canvas };
   }
   return { ok: false, error: "unavailable" };
+}
+
+// Reads a canvas the account may view through its membership (US-005).
+export async function getTenantCanvas(
+  tenantId: string,
+  canvasId: string,
+): Promise<Result<Canvas>> {
+  const result = await call(
+    "GET",
+    `/api/tenants/${encodeURIComponent(tenantId)}/canvases/${encodeURIComponent(canvasId)}`,
+  );
+  if (!result.ok) return result;
+  const canvas = toCanvas(result.value, tenantId);
+  return canvas?.canvasId === canvasId
+    ? { ok: true, value: canvas }
+    : { ok: false, error: "unavailable" };
 }
 
 export async function setDimensions(
@@ -451,6 +493,65 @@ export async function revokeInvitation(
       (status === "revoked" || status === "accepted")
     ) {
       return { ok: true, value: { invitationId: invitation_id, status } };
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+// Tenant and canvas IDs are 128-bit hex values; anything else is rejected
+// before it can reach a URL path.
+const resourceIdPattern = /^[0-9a-f]{32}$/;
+
+function isResourceId(value: unknown): value is string {
+  return typeof value === "string" && resourceIdPattern.test(value);
+}
+
+// The token travels only in the JSON body, never in the URL.
+export async function acceptInvitation(
+  csrfToken: string,
+  operationId: string,
+  token: string,
+): Promise<Result<Acceptance>> {
+  const result = await call(
+    "POST",
+    "/api/invitations/accept",
+    { operation_id: operationId, token },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { tenant_id, canvas_id } = result.value as Record<string, unknown>;
+    if (isResourceId(tenant_id) && isResourceId(canvas_id)) {
+      return { ok: true, value: { tenantId: tenant_id, canvasId: canvas_id } };
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+function toMembership(value: unknown): Membership | undefined {
+  if (typeof value === "object" && value !== null) {
+    const { tenant_id, canvas_id, role } = value as Record<string, unknown>;
+    if (
+      isResourceId(tenant_id) &&
+      isResourceId(canvas_id) &&
+      role === "moderator"
+    ) {
+      return { tenantId: tenant_id, canvasId: canvas_id, role };
+    }
+  }
+  return undefined;
+}
+
+export async function listMemberships(): Promise<Result<Membership[]>> {
+  const result = await call("GET", "/api/memberships");
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { memberships } = result.value as Record<string, unknown>;
+    if (Array.isArray(memberships)) {
+      const parsed = memberships.map(toMembership);
+      if (parsed.every((membership) => membership !== undefined)) {
+        return { ok: true, value: parsed };
+      }
     }
   }
   return { ok: false, error: "unavailable" };
