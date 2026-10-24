@@ -702,10 +702,11 @@ func (q *Queries) SetAssetState(ctx context.Context, arg SetAssetStateParams) er
 	return err
 }
 
-const setMediaUsage = `-- name: SetMediaUsage :exec
+const setMediaUsage = `-- name: SetMediaUsage :one
 UPDATE media_usage
-SET used_bytes = $3, reserved_bytes = $4
+SET used_bytes = $3, reserved_bytes = $4, version = version + 1
 WHERE tenant_id = $1 AND canvas_id = $2
+RETURNING version
 `
 
 type SetMediaUsageParams struct {
@@ -715,12 +716,15 @@ type SetMediaUsageParams struct {
 	ReservedBytes int64
 }
 
-func (q *Queries) SetMediaUsage(ctx context.Context, arg SetMediaUsageParams) error {
-	_, err := q.db.Exec(ctx, setMediaUsage,
+// Every change of the usage bumps its version.
+func (q *Queries) SetMediaUsage(ctx context.Context, arg SetMediaUsageParams) (int64, error) {
+	row := q.db.QueryRow(ctx, setMediaUsage,
 		arg.TenantID,
 		arg.CanvasID,
 		arg.UsedBytes,
 		arg.ReservedBytes,
 	)
-	return err
+	var version int64
+	err := row.Scan(&version)
+	return version, err
 }

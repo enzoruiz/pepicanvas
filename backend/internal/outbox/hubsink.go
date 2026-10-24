@@ -21,7 +21,8 @@ type Actor interface {
 	Submit(ctx context.Context, command realtime.Command) (realtime.Result, error)
 }
 
-// HubSink delivers outbox records to the realtime actor. Each record is
+// HubSink delivers outbox records to the realtime actor. A media usage record
+// becomes a usage command, which changes no canvas object. Each record is
 // submitted under its own tenant and canvas with the operation ID
 // outbox-<record ID>. It is stable across redeliveries, so the actor
 // recognizes a redelivery within its retention and answers it without a
@@ -81,6 +82,20 @@ func (s *HubSink) RequireResync() {
 
 func hubCommand(record Record) (realtime.Command, error) {
 	event := record.Event
+	if record.Usage != nil {
+		payload, err := EncodeMediaUsage(*record.Usage)
+		if err != nil {
+			return realtime.Command{}, err
+		}
+		return realtime.Command{
+			Key:           realtime.Key{TenantID: event.Key.TenantID, CanvasID: event.Key.CanvasID},
+			OperationID:   fmt.Sprintf("outbox-%d", record.ID),
+			ObjectID:      MediaUsageObjectID,
+			Kind:          realtime.KindUsage,
+			Payload:       payload,
+			CorrelationID: event.CorrelationID,
+		}, nil
+	}
 	kind, mutation, err := EncodeMutation(event.Mutation)
 	if err != nil {
 		return realtime.Command{}, err
