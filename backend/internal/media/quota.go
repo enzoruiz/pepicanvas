@@ -32,6 +32,9 @@ var (
 	// ErrOperationConflict reports an operation ID reused for a different
 	// command. A new intent requires a new operation ID.
 	ErrOperationConflict = errors.New("media: operation id reused with a different command")
+	// ErrInactive reports a command for a canvas whose tenant's subscription
+	// is not active. Nothing is written.
+	ErrInactive = errors.New("media: the tenant's subscription is not active")
 )
 
 // State is the lifecycle state of a stored asset. Only StateReady is
