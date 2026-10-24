@@ -38,7 +38,7 @@ func (r *Replica) Receive(event Event) error {
 	if event.Key != r.key {
 		return ErrForeignEvent
 	}
-	if event.Sequence == 0 || event.ObjectID == "" || (event.Kind != KindSet && event.Kind != KindDelete) {
+	if event.Sequence == 0 || event.ObjectID == "" || (event.Kind != KindSet && event.Kind != KindDelete && event.Kind != KindUsage) {
 		return ErrInvalidEvent
 	}
 	applied := r.state.Sequence()
