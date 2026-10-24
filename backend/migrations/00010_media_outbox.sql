@@ -21,8 +21,9 @@ CREATE UNIQUE INDEX canvas_outbox_media_usage_version
     WHERE kind = 'media_usage';
 
 -- +goose Down
--- Rolling back would lose the undelivered usage records and the usage
--- versions consumers compare against, so it is refused while any exist.
+-- Rolling back would lose the usage records, so it is refused while any
+-- exist. The usage versions may go: consumers hold them only in memory, and a
+-- rollback restarts the server, so every client resynchronizes.
 -- +goose StatementBegin
 DO $$
 DECLARE
@@ -31,10 +32,6 @@ BEGIN
     SELECT count(*) INTO stored FROM canvas_outbox WHERE kind = 'media_usage';
     IF stored > 0 THEN
         RAISE EXCEPTION '00010_media_outbox down refused: % media usage record(s) would be lost', stored;
-    END IF;
-    SELECT count(*) INTO stored FROM media_usage WHERE version > 0;
-    IF stored > 0 THEN
-        RAISE EXCEPTION '00010_media_outbox down refused: % canvas usage version(s) would be lost', stored;
     END IF;
 END
 $$;
