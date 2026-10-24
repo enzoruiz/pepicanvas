@@ -8,6 +8,8 @@ export interface Call {
   path: string;
   headers: Record<string, string>;
   body: Record<string, unknown> | undefined;
+  // A raw upload body, sent as is.
+  raw: Blob | undefined;
 }
 
 export type Reply = { status: number; body?: unknown } | "network-error";
@@ -30,6 +32,7 @@ export function stubFetch(): { calls: Call[]; replies: Reply[] } {
           typeof init.body === "string"
             ? (JSON.parse(init.body) as Record<string, unknown>)
             : undefined,
+        raw: init.body instanceof Blob ? init.body : undefined,
       });
       const reply = replies.shift();
       if (reply === undefined) throw new Error(`unexpected ${path}`);
