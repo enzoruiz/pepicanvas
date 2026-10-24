@@ -339,6 +339,7 @@ func TestInvitationLogsAreCorrelatedAndRedacted(t *testing.T) {
 		SignInPerIP:           httpapi.Rate{Limit: 100, Window: time.Minute},
 		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
 		InvitationsPerAccount: httpapi.Rate{Limit: 4, Window: time.Minute},
+		UploadsPerAccount:     httpapi.DefaultLimits.UploadsPerAccount,
 	})
 	alice := e.owner("op-http-inv-alice1", "alice@example.com", "tenant-a", access.SubscriptionActive)
 	e.register("op-http-inv-mall01", "mallory@example.com")

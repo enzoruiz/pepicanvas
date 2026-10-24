@@ -1,7 +1,8 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
 // (US-001), the manual streamer activation and own-canvas read (US-002), the
 // operator deactivation (US-003), the owner's moderator invitations (US-004),
-// and the owner-only canvas resize (US-007). Every response is private and
+// the owner-only canvas resize (US-007), and the canvas storage quota with its
+// media uploads and references (US-016). Every response is private and
 // correlated, and every route is guarded by the ingress (TE-014): unsafe
 // methods need the exact Origin, session mutations need the session's CSRF
 // token before the session is read, and the abuse limits answer 429
@@ -23,6 +24,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
@@ -46,14 +48,16 @@ const (
 // Rate is a number of attempts allowed per window.
 type Rate = ratelimit.Rate
 
-// Limits are the abuse limits of the sign-in, registration, and invitation
-// creation routes, answered through the ingress. Addresses come from the TCP
-// peer; invitation creation is keyed by the session's account.
+// Limits are the abuse limits of the sign-in, registration, invitation
+// creation, and media upload routes, answered through the ingress. Addresses
+// come from the TCP peer; invitation creation and uploads are keyed by the
+// session's account.
 type Limits struct {
 	SignInPerAccount      Rate
 	SignInPerIP           Rate
 	RegisterPerIP         Rate
 	InvitationsPerAccount Rate
+	UploadsPerAccount     Rate
 }
 
 // DefaultLimits are the pilot limits.
@@ -62,6 +66,7 @@ var DefaultLimits = Limits{
 	SignInPerIP:           Rate{Limit: 50, Window: 15 * time.Minute},
 	RegisterPerIP:         Rate{Limit: 10, Window: time.Hour},
 	InvitationsPerAccount: Rate{Limit: 20, Window: time.Hour},
+	UploadsPerAccount:     Rate{Limit: 60, Window: time.Hour},
 }
 
 // Accounts is the account and session service.
@@ -107,6 +112,13 @@ type Config struct {
 	Subscriptions Subscriptions
 	Tenants       Tenants
 	Invitations   Invitations
+	// Media holds the canvas quotas and assets. Without it every media route
+	// answers media_unavailable.
+	Media media.Store
+	// Storage and Inspector store and validate uploaded bytes. Without either
+	// the upload route answers media_unavailable before reserving quota.
+	Storage   media.Storage
+	Inspector media.Inspector
 	// Ingress guards every route; it holds the allowed origins.
 	Ingress *ingress.Ingress
 	Logger  *slog.Logger
@@ -122,6 +134,7 @@ type api struct {
 	signInPerIP           *ratelimit.Limiter
 	registerPerIP         *ratelimit.Limiter
 	invitationsPerAccount *ratelimit.Limiter
+	uploadsPerAccount     *ratelimit.Limiter
 }
 
 // New validates the configuration and returns the API handler.
@@ -132,7 +145,7 @@ func New(config Config) (http.Handler, error) {
 	if config.Accounts == nil || config.Memberships == nil || config.Canvases == nil || config.Subscriptions == nil || config.Tenants == nil || config.Invitations == nil {
 		return nil, errors.New("httpapi: accounts, memberships, canvases, subscriptions, tenants, and invitations are required")
 	}
-	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP, config.Limits.InvitationsPerAccount} {
+	for _, rate := range []Rate{config.Limits.SignInPerAccount, config.Limits.SignInPerIP, config.Limits.RegisterPerIP, config.Limits.InvitationsPerAccount, config.Limits.UploadsPerAccount} {
 		if rate.Limit < 1 || rate.Window <= 0 {
 			return nil, errors.New("httpapi: every limit needs a positive count and window")
 		}
@@ -151,6 +164,7 @@ func New(config Config) (http.Handler, error) {
 		registerPerIP:    limiter(config.Limits.RegisterPerIP),
 		// Invitation creation is keyed by account ID, never by email.
 		invitationsPerAccount: limiter(config.Limits.InvitationsPerAccount),
+		uploadsPerAccount:     limiter(config.Limits.UploadsPerAccount),
 	}
 
 	mux := http.NewServeMux()
@@ -161,6 +175,10 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("DELETE /api/session", in.Route(ingress.Session, http.HandlerFunc(a.signOut)))
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}", a.canvas)
 	mux.Handle("PUT /api/tenants/{tenantID}/canvases/{canvasID}/dimensions", in.Route(ingress.Session, http.HandlerFunc(a.setDimensions)))
+	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/media/usage", a.mediaUsage)
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/uploads", in.Route(ingress.Session, http.HandlerFunc(a.uploadMedia)))
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references", in.Route(ingress.Session, http.HandlerFunc(a.attachMedia)))
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/detach", in.Route(ingress.Session, http.HandlerFunc(a.detachMedia)))
 	mux.Handle("POST /api/activations", in.Route(ingress.Session, http.HandlerFunc(a.activate)))
 	mux.Handle("POST /api/deactivations", in.Route(ingress.Session, http.HandlerFunc(a.deactivate)))
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
