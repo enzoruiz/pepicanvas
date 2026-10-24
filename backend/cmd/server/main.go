@@ -4,8 +4,11 @@
 // mutations to the realtime hub (TE-012), the live-connection registry
 // (TE-002), and the relay that applies each confirmed access cut to it
 // (US-003); cuts a stopped process left pending are applied at start, before
-// the server listens. Shutdown stops HTTP, then the publisher and the hub,
-// then the relay, then the registry.
+// the server listens. The canvas storage quota is always served (US-016);
+// uploads need object storage and contained inspection, and with them the
+// asset reconciler runs (TE-013). Without any media variable, uploads answer
+// media_unavailable. Shutdown stops HTTP, then the publisher and the hub,
+// then the reconciler, then the relay, then the registry.
 //
 // Usage:
 //
@@ -23,6 +26,21 @@
 //	PEPICANVAS_ALLOWED_ORIGIN  exact editor origin, scheme://host[:port] (required)
 //	PEPICANVAS_LISTEN_ADDR     listen address (default 127.0.0.1:8080)
 //	PEPICANVAS_STATIC_DIR      built frontend directory (optional)
+//
+// Media storage (optional; setting any of the first six requires the five
+// without a default, or the server refuses to start):
+//
+//	PEPICANVAS_S3_ENDPOINT        S3 API host[:port], without scheme
+//	PEPICANVAS_S3_BUCKET          existing bucket of the media objects
+//	PEPICANVAS_S3_ACCESS_KEY      S3 access key (secret, never logged)
+//	PEPICANVAS_S3_SECRET_KEY      S3 secret key (secret, never logged)
+//	PEPICANVAS_S3_SECURE          use HTTPS, true or false (default true)
+//	PEPICANVAS_MEDIA_CGROUP_ROOT  delegated cgroup v2 subtree that contains
+//	                              every inspection
+//	PEPICANVAS_FFPROBE_PATH       absolute ffprobe path (default /usr/bin/ffprobe)
+//	PEPICANVAS_FFMPEG_PATH        absolute ffmpeg path (default /usr/bin/ffmpeg)
+//	PEPICANVAS_MEDIA_TEMP_DIR     absolute directory that stages inspected
+//	                              uploads (default the system temp directory)
 package main
 
 import (
@@ -44,6 +62,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
@@ -51,6 +70,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
 	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
@@ -59,9 +79,9 @@ import (
 const (
 	defaultListenAddr = "127.0.0.1:8080"
 	startupTimeout    = 15 * time.Second
-	// shutdownTimeout bounds HTTP draining and closing the outbox publisher
-	// and the realtime hub, and then the relay and registry stop; full
-	// process shutdown belongs to TE-016.
+	// shutdownTimeout bounds HTTP draining and closing the outbox publisher,
+	// the realtime hub, and the reconciler, and then the relay and registry
+	// stop; full process shutdown belongs to TE-016.
 	shutdownTimeout = 5 * time.Second
 	// outboxOperationPrefix starts the operation ID of every command
 	// outbox.HubSink submits (outbox-<record ID>).
@@ -139,6 +159,17 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if err != nil {
 		return err
 	}
+	// So does a partial or invalid media configuration.
+	mediaConfig, err := mediaFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+	var inspector media.Inspector
+	if mediaConfig != nil {
+		if inspector, err = mediaConfig.inspector(); err != nil {
+			return err
+		}
+	}
 
 	startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
@@ -178,6 +209,24 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	subscriptions := postgres.NewSubscriptionStore(pool)
 	invitations := postgres.NewInvitationStore(pool)
+	// Every committed usage change wrote an outbox record (CTRL-CONS-01).
+	mediaStore := postgres.NewMediaStore(pool, postgres.WithMediaCommitted(func(media.CanvasKey) { publisher.Notify() }))
+	var (
+		storage    media.ObjectStore
+		reconciler *media.Reconciler
+	)
+	if mediaConfig == nil {
+		logger.Info("media storage disabled")
+	} else {
+		objects, err := s3.Open(startCtx, mediaConfig.storage)
+		if err != nil {
+			return fmt.Errorf("media storage: %w", err)
+		}
+		storage = objects
+		if reconciler, err = media.NewReconciler(media.ReconcilerConfig{Store: mediaStore, Storage: objects}); err != nil {
+			return err
+		}
+	}
 	relay, err := subscription.NewCutRelay(subscription.RelayConfig{
 		Store:     subscriptions,
 		Cutter:    registry,
@@ -197,6 +246,9 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Tenants:       subscriptions,
 		// The store clock keeps PostgreSQL's precision, so replayed answers match.
 		Invitations: invitation.NewService(invitations, invitation.WithClock(invitations.Now)),
+		Media:       mediaStore,
+		Storage:     storage,
+		Inspector:   inspector,
 		Ingress:     in,
 		Logger:      logger,
 		Limits:      httpapi.DefaultLimits,
@@ -227,6 +279,22 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 			logger.Error("registry stopped", slog.Any("error", err))
 		}
 	}()
+	if reconciler != nil {
+		// Passes resume from the states PostgreSQL persisted, so assets an
+		// earlier process left half done converge before uploads arrive.
+		if err := reconciler.Start(); err != nil {
+			return err
+		}
+		// Stops a reconciler a failed start leaves running; Close is
+		// idempotent, so after the shutdown below it returns at once.
+		defer func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancelClose()
+			if err := reconciler.Close(closeCtx); err != nil {
+				logger.Error("media reconciler close failed", slog.String("error", err.Error()))
+			}
+		}()
+	}
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -270,6 +338,12 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	if err := hub.Close(shutdownCtx); err != nil {
 		logger.Error("realtime hub close failed", slog.String("error", err.Error()))
+	}
+	// Interrupted passes resume from their persisted states on the next start.
+	if reconciler != nil {
+		if err := reconciler.Close(shutdownCtx); err != nil {
+			logger.Error("media reconciler close failed", slog.String("error", err.Error()))
+		}
 	}
 	if serveErr != nil {
 		return serveErr
