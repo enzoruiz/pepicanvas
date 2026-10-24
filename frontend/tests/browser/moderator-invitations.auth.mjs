@@ -97,10 +97,12 @@ test("an owner creates and revokes an invitation link that grants no access", as
 
   const op = await signedIn(browser, operator, sent);
   const activationPanel = op.page.getByRole("region", {
-    name: "Activate a streamer",
+    name: "Manage streamers",
   });
   await activationPanel.getByLabel("Streamer email").fill(alice);
-  await activationPanel.getByRole("button", { name: "Activate" }).click();
+  await activationPanel
+    .getByRole("button", { name: "Activate", exact: true })
+    .click();
   await expect(activationPanel.getByRole("status")).toHaveText(
     "Streamer activated.",
   );
