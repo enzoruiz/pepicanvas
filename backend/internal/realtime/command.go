@@ -29,6 +29,9 @@ type Kind string
 const (
 	KindSet    Kind = "set"
 	KindDelete Kind = "delete"
+	// KindUsage notifies a committed change of the canvas media usage. It is
+	// ordered and deduplicated like any command but changes no object.
+	KindUsage Kind = "usage"
 )
 
 // Command is one client intent addressed to a canvas object.
@@ -97,6 +100,10 @@ func (c Command) validate() error {
 	case KindSet:
 		if len(c.Payload) > MaxPayloadBytes {
 			return fmt.Errorf("%w: payload exceeds %d bytes", ErrInvalidCommand, MaxPayloadBytes)
+		}
+	case KindUsage:
+		if len(c.Payload) == 0 || len(c.Payload) > MaxPayloadBytes {
+			return fmt.Errorf("%w: usage payload must have 1 to %d bytes", ErrInvalidCommand, MaxPayloadBytes)
 		}
 	case KindDelete:
 		if len(c.Payload) != 0 {
