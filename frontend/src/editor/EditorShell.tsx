@@ -5,6 +5,7 @@ import type { OwnCanvas, Session } from "../auth/api";
 import { AcceptInvitationPanel } from "./AcceptInvitationPanel";
 import { CanvasPanel } from "./CanvasPanel";
 import { InvitationsPanel } from "./InvitationsPanel";
+import { MediaPanel } from "./MediaPanel";
 import { readInvitationToken } from "./invitationLink";
 import { ModeratedCanvases } from "./ModeratedCanvases";
 import { OperatorPanel } from "./OperatorPanel";
@@ -19,8 +20,8 @@ interface SignedInEditorProps {
 }
 
 // Only an owner with an active subscription loads its own canvas, so the
-// invitations panel waits for it; moderators and inactive or operator-only
-// accounts never see the panel. Moderated canvases are read-only.
+// invitations and storage panels wait for it; moderators and inactive or
+// operator-only accounts never see them. Moderated canvases are read-only.
 function SignedInEditor({
   session,
   invitationToken,
@@ -48,6 +49,13 @@ function SignedInEditor({
         hideWhenNotOwner={moderates}
       />
       {ownCanvas && <InvitationsPanel session={session} />}
+      {ownCanvas && (
+        <MediaPanel
+          session={session}
+          tenantId={ownCanvas.tenantId}
+          canvasId={ownCanvas.canvasId}
+        />
+      )}
       <ModeratedCanvases refreshKey={membershipsVersion} onListed={onListed} />
       {session.operator && <OperatorPanel session={session} />}
     </>
