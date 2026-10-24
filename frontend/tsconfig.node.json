@@ -21,6 +21,7 @@
     "vite.latency.config.ts",
     "playwright.config.ts",
     "playwright.privacy.config.ts",
-    "playwright.auth.config.ts"
+    "playwright.auth.config.ts",
+    "playwright.latency.config.ts"
   ]
 }
