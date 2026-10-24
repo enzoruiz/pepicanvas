@@ -42,6 +42,8 @@ type pgEnv struct {
 	http     *env
 	// memberships, when set, wraps the membership store serve wires.
 	memberships func(access.MembershipStore) access.MembershipStore
+	// configure, when set, completes the configuration serve builds.
+	configure func(*httpapi.Config)
 }
 
 // openPGEnv connects to the current server address, migrates, and builds the
@@ -84,7 +86,7 @@ func (p *pgEnv) serve(canvases *postgres.CanvasStore) {
 	}
 	subscriptions := postgres.NewSubscriptionStore(p.pool)
 	invitations := postgres.NewInvitationStore(p.pool)
-	handler, err := httpapi.New(httpapi.Config{
+	config := httpapi.Config{
 		Accounts:      accounts,
 		Memberships:   memberships,
 		Canvases:      canvases,
@@ -94,7 +96,11 @@ func (p *pgEnv) serve(canvases *postgres.CanvasStore) {
 		Ingress:       in,
 		Logger:        logger,
 		Limits:        httpapi.DefaultLimits,
-	})
+	}
+	if p.configure != nil {
+		p.configure(&config)
+	}
+	handler, err := httpapi.New(config)
 	if err != nil {
 		p.t.Fatal(err)
 	}
