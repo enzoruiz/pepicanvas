@@ -256,10 +256,13 @@ func goModRequires(text string) ([]latency.Component, error) {
 
 // lockPackages returns every non-root packages entry, named by the path after
 // the last node_modules/, sorted by name then version with duplicates once.
+// A "link": true entry has no version of its own and is skipped; the package
+// it links to has its own entry.
 func lockPackages(data []byte) ([]latency.Component, error) {
 	var lock struct {
 		Packages map[string]struct {
 			Version string `json:"version"`
+			Link    bool   `json:"link"`
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(data, &lock); err != nil {
@@ -271,7 +274,7 @@ func lockPackages(data []byte) ([]latency.Component, error) {
 	seen := make(map[latency.Component]bool)
 	var packages []latency.Component
 	for path, entry := range lock.Packages {
-		if path == "" {
+		if path == "" || entry.Link {
 			continue
 		}
 		if entry.Version == "" {

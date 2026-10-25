@@ -92,7 +92,7 @@ export function reduceBoxes(state: BoxState, event: CanvasEvent): BoxState {
       created,
     };
   }
-  const fields = updates[payload.op as string];
+  const fields = updates.get(payload.op);
   if (fields === undefined) return state;
   const change = numbers(payload, fields);
   if (change === undefined) return state;
@@ -126,11 +126,13 @@ export function mediaAction(event: CanvasEvent): "play" | "pause" | undefined {
 
 type Geometry = "x" | "y" | "width" | "height" | "rotation";
 
-const updates: Record<string, readonly Geometry[] | undefined> = {
-  move: ["x", "y"],
-  resize: ["width", "height"],
-  rotate: ["rotation"],
-};
+// A Map has no inherited keys, so an op such as "constructor" or
+// "__proto__" finds nothing instead of an Object.prototype member.
+const updates = new Map<unknown, readonly Geometry[]>([
+  ["move", ["x", "y"]],
+  ["resize", ["width", "height"]],
+  ["rotate", ["rotation"]],
+]);
 
 function numbers<K extends Geometry>(
   payload: Record<string, unknown>,

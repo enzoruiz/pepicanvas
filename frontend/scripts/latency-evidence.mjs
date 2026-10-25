@@ -65,7 +65,8 @@ export function parseGoModRequires(text) {
 
 // parseLockPackages returns every non-root packages entry of package-lock,
 // named by the path after the last node_modules/, sorted by name then
-// version with duplicates once.
+// version with duplicates once. A "link": true entry has no version of its
+// own and is skipped; the package it links to has its own entry.
 export function parseLockPackages(text) {
   const packages = JSON.parse(text).packages ?? {};
   if (Object.keys(packages).length === 0) {
@@ -74,7 +75,7 @@ export function parseLockPackages(text) {
   const seen = new Set();
   const result = [];
   for (const [entryPath, entry] of Object.entries(packages)) {
-    if (entryPath === "") continue;
+    if (entryPath === "" || entry?.link === true) continue;
     if (!entry?.version) {
       throw new Error(`${entryPath} has no version`);
     }

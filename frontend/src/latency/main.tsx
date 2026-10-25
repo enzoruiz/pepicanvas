@@ -18,6 +18,7 @@ import { markRendered } from "./markRendered";
 import { applyMedia, whenLoaded } from "./media";
 import { measurePings, type Ping } from "./pings";
 import { createRenderRegistry, type RenderMark } from "./renderRegistry";
+import { createSequenceGate } from "./sequenceGate";
 import { generateWav } from "./wav";
 
 interface LatencyProbe {
@@ -92,7 +93,10 @@ const streamReady = new Promise<void>((resolve) => {
   events.addEventListener("ready", () => resolve(), { once: true });
 });
 // Events render one at a time in sequence order, as the server sends them.
+// A reconnection replays retained events, so a sequence already taken is
+// dropped; the reconnection itself still counts as a disconnect.
 let rendering = Promise.resolve();
+const takeSequence = createSequenceGate();
 events.addEventListener("canvas", (message) => {
   let event: CanvasEvent;
   try {
@@ -101,6 +105,7 @@ events.addEventListener("canvas", (message) => {
     console.error(error);
     return;
   }
+  if (!takeSequence(event.sequence)) return;
   rendering = rendering.then(() =>
     render(event).catch((error: unknown) =>
       registry.fail(

@@ -200,6 +200,20 @@ describe("reduceBoxes", () => {
       before,
     );
   });
+
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])(
+    "leaves the boxes unchanged for the inherited op %s without throwing",
+    (op) => {
+      const before = reduceBoxes(emptyBoxes, create(1, "a"));
+      const event = set(2, "a", { op, x: 1, y: 1, rotation: 5 });
+
+      expect(reduceBoxes(before, event)).toBe(before);
+      expect(applyBoxEvent(before, event)).toEqual({
+        boxes: before,
+        changed: false,
+      });
+    },
+  );
 });
 
 describe("applyBoxEvent", () => {

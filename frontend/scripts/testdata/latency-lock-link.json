@@ -1,0 +1,25 @@
+{
+  "lock": {
+    "name": "app",
+    "lockfileVersion": 3,
+    "packages": {
+      "": { "name": "app", "version": "0.0.0" },
+      "node_modules/react": { "version": "19.3.0" },
+      "node_modules/local-kit": {
+        "resolved": "packages/local-kit",
+        "link": true
+      },
+      "node_modules/a/node_modules/linked": {
+        "resolved": "packages/linked",
+        "link": true
+      },
+      "packages/local-kit": { "name": "local-kit", "version": "1.2.0" },
+      "node_modules/@scope/pkg": { "version": "2.0.0" }
+    }
+  },
+  "frontendDependencies": [
+    { "name": "@scope/pkg", "version": "2.0.0" },
+    { "name": "packages/local-kit", "version": "1.2.0" },
+    { "name": "react", "version": "19.3.0" }
+  ]
+}
