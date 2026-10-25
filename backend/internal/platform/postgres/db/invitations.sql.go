@@ -27,7 +27,7 @@ func (q *Queries) DeleteExpiredInvitationOperation(ctx context.Context, arg Dele
 }
 
 const getInvitationOperation = `-- name: GetInvitationOperation :one
-SELECT kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, correlation_id, accepted_at
+SELECT kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, correlation_id, accepted_at
 FROM invitation_operations
 WHERE operation_id = $1 AND accepted_at > $2
 `
@@ -46,6 +46,7 @@ type GetInvitationOperationRow struct {
 	CreatedAt      pgtype.Timestamptz
 	ExpiresAt      pgtype.Timestamptz
 	Status         pgtype.Text
+	CanvasID       pgtype.Text
 	CorrelationID  pgtype.Text
 	AcceptedAt     pgtype.Timestamptz
 }
@@ -62,6 +63,7 @@ func (q *Queries) GetInvitationOperation(ctx context.Context, arg GetInvitationO
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.Status,
+		&i.CanvasID,
 		&i.CorrelationID,
 		&i.AcceptedAt,
 	)
@@ -95,11 +97,11 @@ func (q *Queries) InsertInvitation(ctx context.Context, arg InsertInvitationPara
 }
 
 const insertInvitationOperation = `-- name: InsertInvitationOperation :execrows
-INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, correlation_id, accepted_at)
+INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, correlation_id, accepted_at)
 SELECT $1, $2, $3, $4, i.tenant_id, i.invitation_id,
-    $5, $6, $7, $8, $9
+    $5, $6, $7, $8, $9, $10
 FROM invitations i
-WHERE i.invitation_id = $10
+WHERE i.invitation_id = $11
 `
 
 type InsertInvitationOperationParams struct {
@@ -110,6 +112,7 @@ type InsertInvitationOperationParams struct {
 	CreatedAt      pgtype.Timestamptz
 	ExpiresAt      pgtype.Timestamptz
 	Status         pgtype.Text
+	CanvasID       pgtype.Text
 	CorrelationID  pgtype.Text
 	AcceptedAt     pgtype.Timestamptz
 	InvitationID   string
@@ -125,6 +128,7 @@ func (q *Queries) InsertInvitationOperation(ctx context.Context, arg InsertInvit
 		arg.CreatedAt,
 		arg.ExpiresAt,
 		arg.Status,
+		arg.CanvasID,
 		arg.CorrelationID,
 		arg.AcceptedAt,
 		arg.InvitationID,
@@ -149,6 +153,42 @@ func (q *Queries) IsTenantMember(ctx context.Context, arg IsTenantMemberParams) 
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const listModeratedCanvases = `-- name: ListModeratedCanvases :many
+SELECT t.tenant_id, t.canvas_id, t.subscription_status
+FROM memberships m
+JOIN tenants t ON t.tenant_id = m.tenant_id
+WHERE m.account_id = $1 AND m.role = 'moderator' AND t.canvas_id IS NOT NULL
+ORDER BY t.tenant_id
+`
+
+type ListModeratedCanvasesRow struct {
+	TenantID           string
+	CanvasID           pgtype.Text
+	SubscriptionStatus string
+}
+
+// Every moderator membership of the account with its tenant's canvas and
+// status; the caller filters by status.
+func (q *Queries) ListModeratedCanvases(ctx context.Context, accountID string) ([]ListModeratedCanvasesRow, error) {
+	rows, err := q.db.Query(ctx, listModeratedCanvases, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListModeratedCanvasesRow
+	for rows.Next() {
+		var i ListModeratedCanvasesRow
+		if err := rows.Scan(&i.TenantID, &i.CanvasID, &i.SubscriptionStatus); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPendingInvitations = `-- name: ListPendingInvitations :many
@@ -265,7 +305,7 @@ func (q *Queries) LockOwnedTenantShare(ctx context.Context, ownerAccountID pgtyp
 }
 
 const lockTenantShare = `-- name: LockTenantShare :one
-SELECT tenant_id, owner_account_id, subscription_status
+SELECT tenant_id, owner_account_id, canvas_id, subscription_status
 FROM tenants
 WHERE tenant_id = $1
 FOR SHARE
@@ -274,13 +314,19 @@ FOR SHARE
 type LockTenantShareRow struct {
 	TenantID           string
 	OwnerAccountID     pgtype.Text
+	CanvasID           pgtype.Text
 	SubscriptionStatus string
 }
 
 func (q *Queries) LockTenantShare(ctx context.Context, tenantID string) (LockTenantShareRow, error) {
 	row := q.db.QueryRow(ctx, lockTenantShare, tenantID)
 	var i LockTenantShareRow
-	err := row.Scan(&i.TenantID, &i.OwnerAccountID, &i.SubscriptionStatus)
+	err := row.Scan(
+		&i.TenantID,
+		&i.OwnerAccountID,
+		&i.CanvasID,
+		&i.SubscriptionStatus,
+	)
 	return i, err
 }
 

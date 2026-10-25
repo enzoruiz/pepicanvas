@@ -7,13 +7,13 @@ WHERE owner_account_id = $1
 FOR SHARE;
 
 -- name: LockTenantShare :one
-SELECT tenant_id, owner_account_id, subscription_status
+SELECT tenant_id, owner_account_id, canvas_id, subscription_status
 FROM tenants
 WHERE tenant_id = $1
 FOR SHARE;
 
 -- name: GetInvitationOperation :one
-SELECT kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, correlation_id, accepted_at
+SELECT kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, correlation_id, accepted_at
 FROM invitation_operations
 WHERE operation_id = $1 AND accepted_at > sqlc.arg(not_before);
 
@@ -62,8 +62,17 @@ WHERE operation_id IN (
 
 -- name: InsertInvitationOperation :execrows
 -- The tenant is the invitation's, so a record never names another tenant.
-INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, correlation_id, accepted_at)
+INSERT INTO invitation_operations (operation_id, kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, correlation_id, accepted_at)
 SELECT sqlc.arg(operation_id), sqlc.arg(kind), sqlc.arg(owner_account_id), sqlc.arg(fingerprint), i.tenant_id, i.invitation_id,
-    sqlc.narg(created_at), sqlc.narg(expires_at), sqlc.narg(status), sqlc.narg(correlation_id), sqlc.arg(accepted_at)
+    sqlc.narg(created_at), sqlc.narg(expires_at), sqlc.narg(status), sqlc.narg(canvas_id), sqlc.narg(correlation_id), sqlc.arg(accepted_at)
 FROM invitations i
 WHERE i.invitation_id = sqlc.arg(invitation_id);
+
+-- name: ListModeratedCanvases :many
+-- Every moderator membership of the account with its tenant's canvas and
+-- status; the caller filters by status.
+SELECT t.tenant_id, t.canvas_id, t.subscription_status
+FROM memberships m
+JOIN tenants t ON t.tenant_id = m.tenant_id
+WHERE m.account_id = $1 AND m.role = 'moderator' AND t.canvas_id IS NOT NULL
+ORDER BY t.tenant_id;

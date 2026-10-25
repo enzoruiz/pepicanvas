@@ -102,6 +102,27 @@ describe("AuthGate", () => {
     expect(screen.queryByText(/editor for/)).not.toBeInTheDocument();
   });
 
+  it("shows a note next to sign-in and hides it once signed in", async () => {
+    const note = "Sign in to continue.";
+    replies.push(json(401, { error: "unauthorized" }));
+    render(
+      <AuthGate note={note}>{(s) => <p>editor for {s.accountId}</p>}</AuthGate>,
+    );
+
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    click("Create an account");
+    expect(screen.getByText(note)).toBeInTheDocument();
+    click("I already have an account");
+
+    replies.push(json(201, session));
+    fill("alice@example.com", password);
+    click("Sign in");
+    expect(
+      await screen.findByText(`editor for ${session.account_id}`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+  });
+
   it("restores a valid session from the server", async () => {
     replies.push(json(200, session));
     renderGate();

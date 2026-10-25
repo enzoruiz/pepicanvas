@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import {
+  acceptInvitation,
   activate,
   createInvitation,
   deactivate,
   generateInvitationToken,
   getOwnCanvas,
   getSession,
+  getTenantCanvas,
   listInvitations,
+  listMemberships,
   revokeInvitation,
   setDimensions,
 } from "./api";
@@ -155,6 +158,8 @@ describe("getOwnCanvas", () => {
     ["a string rotation", { objects: [{ ...textObject, rotation: "12" }] }],
     ["a fractional z", { objects: [{ ...textObject, z: 0.5 }] }],
     ["a fractional canvas width", { width: 1920.5 }],
+    ["no tenant", { tenant_id: undefined }],
+    ["a numeric tenant", { tenant_id: 1 }],
   ])("rejects a canvas with %s", async (_, change) => {
     replies.push(
       json(200, {
@@ -552,5 +557,209 @@ describe("revokeInvitation", () => {
     expect(
       await revokeInvitation("csrf", "operation-id-0001", invitationId),
     ).toEqual({ ok: false, error: "not_found" });
+  });
+});
+
+describe("acceptInvitation", () => {
+  it("sends the token only in the JSON body with the CSRF token", async () => {
+    replies.push(json(200, { tenant_id: tenantId, canvas_id: canvasId }));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: true,
+      value: { tenantId, canvasId },
+    });
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/invitations/accept",
+        headers: { "X-CSRF-Token": "csrf", "Content-Type": "application/json" },
+        body: { operation_id: "operation-id-0001", token },
+      },
+    ]);
+  });
+
+  it.each([
+    {},
+    { tenant_id: tenantId },
+    { canvas_id: canvasId },
+    { tenant_id: "../x", canvas_id: canvasId },
+    { tenant_id: tenantId, canvas_id: 7 },
+  ])("rejects the malformed answer %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([
+    ["not_found", 404],
+    ["bad_request", 400],
+    ["conflict", 409],
+    ["rate_limited", 429],
+    ["unauthorized", 401],
+    ["forbidden", 403],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code }));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+
+  it.each([
+    ["a network failure", "network-error" as const],
+    ["an internal error", json(500, { error: "internal" })],
+  ])("reports %s as unavailable", async (_, reply) => {
+    replies.push(reply);
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+});
+
+describe("listMemberships", () => {
+  it("reads the moderator memberships", async () => {
+    const otherTenant = "dddddddddddddddddddddddddddddddd";
+    const otherCanvas = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    replies.push(
+      json(200, {
+        memberships: [
+          { tenant_id: tenantId, canvas_id: canvasId, role: "moderator" },
+          { tenant_id: otherTenant, canvas_id: otherCanvas, role: "moderator" },
+        ],
+      }),
+    );
+
+    expect(await listMemberships()).toEqual({
+      ok: true,
+      value: [
+        { tenantId, canvasId, role: "moderator" },
+        { tenantId: otherTenant, canvasId: otherCanvas, role: "moderator" },
+      ],
+    });
+    expect(calls).toEqual([
+      { method: "GET", path: "/api/memberships", headers: {}, body: undefined },
+    ]);
+  });
+
+  it("reads an empty list", async () => {
+    replies.push(json(200, { memberships: [] }));
+
+    expect(await listMemberships()).toEqual({ ok: true, value: [] });
+  });
+
+  it.each([
+    ["no list", {}],
+    ["a list that is not an array", { memberships: {} }],
+    ["a null entry", { memberships: [null] }],
+    [
+      "an owner role",
+      {
+        memberships: [
+          { tenant_id: tenantId, canvas_id: canvasId, role: "owner" },
+        ],
+      },
+    ],
+    [
+      "a malformed tenant",
+      {
+        memberships: [
+          { tenant_id: "a/b", canvas_id: canvasId, role: "moderator" },
+        ],
+      },
+    ],
+    [
+      "a missing canvas",
+      { memberships: [{ tenant_id: tenantId, role: "moderator" }] },
+    ],
+  ])("rejects an answer with %s", async (_, body) => {
+    replies.push(json(200, body));
+
+    expect(await listMemberships()).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it("reports unauthorized", async () => {
+    replies.push(json(401, { error: "unauthorized" }));
+
+    expect(await listMemberships()).toEqual({
+      ok: false,
+      error: "unauthorized",
+    });
+  });
+});
+
+describe("getTenantCanvas", () => {
+  const body = {
+    canvas_id: canvasId,
+    width: 1280,
+    height: 720,
+    revision: 4,
+    objects: [textObject],
+  };
+
+  it("reads a canvas through the tenant route", async () => {
+    replies.push(json(200, body));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: true,
+      value: {
+        tenantId,
+        canvasId,
+        width: 1280,
+        height: 720,
+        revision: 4,
+        objects: [
+          {
+            id: "obj-1",
+            kind: "text",
+            content: "Hello",
+            x: -10,
+            y: 20,
+            width: 300,
+            height: 40,
+            rotation: 12.5,
+            z: 3,
+          },
+        ],
+      },
+    });
+    expect(calls).toEqual([
+      {
+        method: "GET",
+        path: `/api/tenants/${tenantId}/canvases/${canvasId}`,
+        headers: {},
+        body: undefined,
+      },
+    ]);
+  });
+
+  it.each([
+    ["another canvas", { canvas_id: "ffffffffffffffffffffffffffffffff" }],
+    ["no revision", { revision: undefined }],
+    ["a malformed object", { objects: [{ ...textObject, z: 0.5 }] }],
+  ])("rejects an answer for %s", async (_, change) => {
+    replies.push(json(200, { ...body, ...change }));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it("reports forbidden for a canvas the account may not view", async () => {
+    replies.push(json(403, { error: "forbidden" }));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: "forbidden",
+    });
   });
 });
