@@ -372,9 +372,8 @@ func TestMediaReconciliationMigrationBackfillsStateChange(t *testing.T) {
 
 	// The test exercises 00007 alone, so later migrations never change what
 	// it observes. 00011 refuses to roll back while the reservation's usage
-	// record and version exist, so they are cleared first.
+	// record exists, so it is cleared first.
 	exec(t, pool, "DELETE FROM canvas_outbox WHERE kind = 'media_usage'")
-	exec(t, pool, "UPDATE media_usage SET version = 0")
 	if _, err := provider.DownTo(ctx, 6); err != nil {
 		t.Fatalf("DownTo(6): %v", err)
 	}

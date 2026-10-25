@@ -69,7 +69,7 @@ func TestMediaOutboxSchemaKeepsUsageRecordsApartFromRevisions(t *testing.T) {
 	}
 }
 
-func TestMediaOutboxRollbackRefusesToLoseUsageRecordsAndVersions(t *testing.T) {
+func TestMediaOutboxRollbackRefusesToLoseUsageRecords(t *testing.T) {
 	ctx := context.Background()
 	canvases, pool := openStore(t, pgtest.Start(t))
 	provider := migrationProvider(t, pool)
@@ -86,21 +86,11 @@ func TestMediaOutboxRollbackRefusesToLoseUsageRecordsAndVersions(t *testing.T) {
 		t.Fatalf("after the refused rollback %+v, want %+v", got, intact)
 	}
 
-	// Without records the versions still matter: a consumer holding version
-	// 1 would drop the usages of a restarted counter as stale.
+	// Without records the rollback proceeds and drops the versions, which
+	// consumers hold only in memory.
 	exec(t, pool, "DELETE FROM canvas_outbox")
-	_, err = provider.DownTo(ctx, 10)
-	if err == nil || !strings.Contains(err.Error(), "00011_media_outbox down refused: 1 canvas usage version(s)") {
-		t.Fatalf("rollback error = %v, want the refusal for versions", err)
-	}
-	intact.mediaRecords = 0
-	if got := readMediaOutboxSchema(t, pool); got != intact {
-		t.Fatalf("after the refused rollback %+v, want %+v", got, intact)
-	}
-
-	exec(t, pool, "UPDATE media_usage SET version = 0")
 	if _, err := provider.DownTo(ctx, 10); err != nil {
-		t.Fatalf("rollback without usage records or versions: %v", err)
+		t.Fatalf("rollback without usage records: %v", err)
 	}
 	if got, want := readMediaOutboxSchema(t, pool), (mediaOutboxSchema{version: 10}); got != want {
 		t.Fatalf("after the rollback %+v, want %+v", got, want)
