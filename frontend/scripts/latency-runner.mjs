@@ -1,5 +1,3 @@
-/* global console, process */
-
 // Runs the TE-010 remote render latency transmission on every browser of the
 // support matrix against the latencyprobe harness, then validates the
 // evidence with backend/cmd/latencycheck. Every Go invocation uses the Go

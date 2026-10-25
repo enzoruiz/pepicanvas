@@ -1,5 +1,3 @@
-/* global process, setTimeout, window */
-
 // TE-010 remote render latency: one transmission per browser of the matrix.
 // Node submits each command to the harness server, the probe page renders
 // the event it receives over SSE, and the page clock is mapped onto the
