@@ -1,5 +1,3 @@
-/* global Buffer, fetch, process */
-
 // US-016 end to end: an activated owner sees the storage usage of the own
 // canvas in the editor, over the real server and PostgreSQL. The e2e server
 // runs without object storage, so an upload is answered media_unavailable

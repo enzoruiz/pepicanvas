@@ -1,5 +1,3 @@
-/* global fetch, URL, window, performance */
-
 import { mkdir, writeFile } from "node:fs/promises";
 
 import { expect, test } from "@playwright/test";

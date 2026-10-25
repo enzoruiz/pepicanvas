@@ -137,6 +137,7 @@ Ambos comparten un **renderizador de canvas basado en DOM** (elementos `img`, `v
 - El frontend es asíncrono por naturaleza (WebSocket, reconexión, resincronización). `typescript-eslint` detecta promesas no esperadas y funciones `async` mal usadas (`no-floating-promises`, `no-misused-promises`) usando el compilador de TypeScript. Biome 2 tiene inferencia de tipos propia, pero cubre solo una parte de esos casos.
 - `eslint-plugin-boundaries` aplica las reglas de dependencia entre capas. Por ejemplo, impide que el renderizador importe código del editor o que una feature importe otra.
 - `eslint-plugin-react-hooks` es el plugin oficial del equipo de React.
+- Los globals de cada entorno se declaran en `eslint.config.js` con el paquete `globals`: los scripts de `scripts/` reciben los de Node, y los escenarios de Playwright en `tests/`, los de Node y los del navegador, porque el código de `page.evaluate` corre en la página. Ningún archivo declara globals con comentarios `/* global */`. El workflow `frontend.yml` corre lint, `prettier --check`, `tsc -b` y Vitest en cada cambio de `frontend/`.
 - Costo aceptado: el lint con información de tipos es más lento y la configuración es más extensa que con Biome.
 
 No se usa una biblioteca de estado de servidor (TanStack Query), porque casi todo el estado llega por WebSocket. Se reevaluará si la superficie REST crece.

@@ -1,5 +1,3 @@
-/* global crypto, fetch, process */
-
 // US-007 end to end: the owner resizes the canvas from the editor form over
 // the real server and PostgreSQL. The private OBS URL is US-021, so the
 // overlay side of "OBS and editor show the same confirmed size" is not
