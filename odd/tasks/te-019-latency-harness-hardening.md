@@ -24,13 +24,16 @@ Four non-blocking findings of the TE-010 native review; today each fails closed.
 
 ## Tasks
 
-- T1 — S3, S6 — inline — lockfile `link` entries in Go and Node with one shared fixture — commit: pending
-- T2 — S5, S6 — inline — `reduceBoxes` own-key operations — commit: pending
-- T3 — S4, S6 — inline + verify (Risk item 2: guard) — Host guard default port — commit: pending
-- T4 — S1, S2, S6, S8, S9 — inline — SSE ids, `Last-Event-ID` replay, page sequence gate — commit: pending
-- T5 — S7, S9 — inline — real `npm run latency:probe` run and `latencycheck` — commit: n/a
+- T1 — S3, S6 — inline — lockfile `link` entries in Go and Node with one shared fixture — commit: 4459102 (done)
+- T2 — S5, S6 — inline — `reduceBoxes` own-key operations — commit: b7251f3 (done)
+- T3 — S4, S6 — inline + verify (Risk item 2: guard) — Host guard default port — commit: 4cd8283 (done, verified)
+- T4 — S1, S2, S6, S8, S9 — inline + verify (Risk item 4: publish/subscribe ordering) — SSE ids, `Last-Event-ID` replay, page sequence gate — commit: da4c810 (done, verified)
+- T5 — S7, S9 — inline — real `npm run latency:probe` run and `latencycheck` — commit: n/a (done)
 
 ## Log
 
 - L1 (user, 2026-10-24): "empieza el desarrollo del issue 80 en su respectivo worktree"
 - L2: US-017 (#27) is still open at start, so point 1 (SSE replay) applies.
+- L3 (evidence): T1 RED (Go `node_modules/local-kit has no version`, Node fixture test failed) then GREEN; T2 RED 4 inherited ops failed then GREEN (Vitest src/latency 49/49); T3 RED only the no-`:80` cases got 403, then GREEN; T4 RED (no `id:`, no replay, 200 instead of 204/400) then GREEN. `go test -race` latencyprobe, latencycheck, internal/latency ok. The page gate `sequenceGate.ts` was written before its test (no observed RED). `scripts/latency-evidence` tests use `node --test` (the existing runner), not Vitest. `docs/stack.md` updated in da4c810. Slice: 569 authored lines in 4 commits, mostly tests; one PR (issue size S).
+- L4 (evidence): Independent gentle-ai-verify (Risk items 2 and 4) on 4cd8283 and da4c810: S1, S2, S4, S6, S8, S9 PASS, no blockers; RED confirmed on the parent commits; guard matrix of 34 Hosts x 21 Origins found no foreign value accepted; 16 concurrent resumes with 60 commands had no gap or duplicate; 204 path leaves 0 subscribers. Warnings, pre-existing or fail-safe: a request with two Origin headers is judged on the first (unchanged behavior); a reconnect before any canvas event replays nothing; a cursor ahead of the stream replays nothing and the gate drops later events, so the wait times out.
+- L5 (evidence, S7): real `npm run latency:probe`, exit 0, latencycheck per transmission: chrome-current MEASURED 120/120 RTT p95 2.600 ms latency p95 26.038 ms; chrome-previous MEASURED 120/120 2.200 / 26.494; edge-current MEASURED 120/120 2.800 / 25.884; edge-previous MEASURED 120/120 2.800 / 26.019; every kind 20; all invalid counters 0.
