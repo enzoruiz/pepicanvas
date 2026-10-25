@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,9 @@ type options struct {
 	clock  func() time.Duration
 	static string
 	buffer int
+	// logSize bounds the events the hub retains for replay; zero keeps the
+	// hub default.
+	logSize int
 	// host is the listening address; requests must name it.
 	host string
 }
@@ -135,7 +139,7 @@ func newProbe(opts options) (*probe, error) {
 	if opts.buffer <= 0 {
 		opts.buffer = defaultBuffer
 	}
-	hub, err := realtime.NewHub(realtime.Config{Authorize: allowAll})
+	hub, err := realtime.NewHub(realtime.Config{Authorize: allowAll, LogSize: opts.logSize})
 	if err != nil {
 		return nil, err
 	}
@@ -320,21 +324,31 @@ func (p *probe) publish(sequence uint64) {
 		if event.Sequence <= p.published {
 			continue
 		}
-		data, err := json.Marshal(canvasFrame{
-			Sequence:      event.Sequence,
-			OperationID:   event.OperationID,
-			ObjectID:      event.ObjectID,
-			Kind:          string(event.Kind),
-			Payload:       json.RawMessage(event.Payload),
-			CorrelationID: event.CorrelationID,
-		})
-		if err != nil {
+		if frame, err := encodeFrame(event); err != nil {
 			log.Printf("latencyprobe: encode event %d: %v", event.Sequence, err)
 		} else {
-			p.broadcast(append(append([]byte("event: canvas\ndata: "), data...), "\n\n"...))
+			p.broadcast(frame)
 		}
 		p.published = event.Sequence
 	}
+}
+
+// encodeFrame renders event as an SSE canvas frame whose id is its sequence,
+// so a reconnecting EventSource sends it back as Last-Event-ID.
+func encodeFrame(event realtime.Event) ([]byte, error) {
+	data, err := json.Marshal(canvasFrame{
+		Sequence:      event.Sequence,
+		OperationID:   event.OperationID,
+		ObjectID:      event.ObjectID,
+		Kind:          string(event.Kind),
+		Payload:       json.RawMessage(event.Payload),
+		CorrelationID: event.CorrelationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	frame := fmt.Appendf(nil, "id: %d\nevent: canvas\ndata: ", event.Sequence)
+	return append(append(frame, data...), "\n\n"...), nil
 }
 
 // broadcast queues frame for every subscriber and disconnects any whose
@@ -361,20 +375,35 @@ func (p *probe) events(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r, http.MethodGet) {
 		return
 	}
+	var after uint64
+	resuming := false
+	if cursor := r.Header.Get("Last-Event-ID"); cursor != "" {
+		parsed, err := strconv.ParseUint(cursor, 10, 64)
+		if err != nil {
+			http.Error(w, "malformed Last-Event-ID", http.StatusBadRequest)
+			return
+		}
+		after, resuming = parsed, true
+	}
 	controller := http.NewResponseController(w)
 	sub := &subscriber{
 		frames: make(chan []byte, p.buffer),
 		gone:   make(chan struct{}),
 		abort:  func() { _ = controller.SetWriteDeadline(time.Now()) },
 	}
-	p.mu.Lock()
-	if p.streamsClosed {
-		p.mu.Unlock()
-		http.Error(w, "streams closed", http.StatusServiceUnavailable)
+	replay, status := p.subscribe(sub, resuming, after)
+	switch status {
+	case http.StatusOK:
+	case http.StatusNoContent:
+		w.WriteHeader(status)
+		return
+	case http.StatusServiceUnavailable:
+		http.Error(w, "streams closed", status)
+		return
+	default:
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
-	p.subscribers[sub] = struct{}{}
-	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
 		delete(p.subscribers, sub)
@@ -388,6 +417,11 @@ func (p *probe) events(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.WriteString(w, "event: ready\ndata: {}\n\n"); err != nil {
 		return
+	}
+	for _, frame := range replay {
+		if _, err := w.Write(frame); err != nil {
+			return
+		}
 	}
 	if controller.Flush() != nil {
 		return
@@ -407,6 +441,46 @@ func (p *probe) events(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// subscribe registers sub and, for a reconnecting stream, returns the
+// retained events after the cursor that were already broadcast. Holding
+// publishMu means no broadcast runs between that snapshot and the
+// registration, so each later event reaches sub once, live. A cursor the hub
+// no longer retains answers 204: the stream ends without replay, which stops
+// EventSource from retrying, and the render wait still times out.
+func (p *probe) subscribe(sub *subscriber, resuming bool, after uint64) ([][]byte, int) {
+	p.publishMu.Lock()
+	defer p.publishMu.Unlock()
+	var replay [][]byte
+	if resuming {
+		events, err := p.hub.Events(context.Background(), canvasKey, after)
+		switch {
+		case errors.Is(err, realtime.ErrResyncRequired):
+			return nil, http.StatusNoContent
+		case err != nil:
+			log.Printf("latencyprobe: replay after sequence %d: %v", after, err)
+			return nil, http.StatusInternalServerError
+		}
+		for _, event := range events {
+			if event.Sequence > p.published {
+				break
+			}
+			frame, err := encodeFrame(event)
+			if err != nil {
+				log.Printf("latencyprobe: encode event %d: %v", event.Sequence, err)
+				return nil, http.StatusInternalServerError
+			}
+			replay = append(replay, frame)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.streamsClosed {
+		return nil, http.StatusServiceUnavailable
+	}
+	p.subscribers[sub] = struct{}{}
+	return replay, http.StatusOK
 }
 
 func allowMethod(w http.ResponseWriter, r *http.Request, method string) bool {

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,7 @@ func decodeStrict(t *testing.T, r io.Reader, v any) {
 }
 
 type frame struct {
+	id    string
 	event string
 	data  string
 }
@@ -153,8 +155,18 @@ type stream struct {
 // subscribe opens /probe/events and waits for the ready frame.
 func (h *harness) subscribe(t *testing.T) *stream {
 	t.Helper()
+	return h.resume(t, "")
+}
+
+// resume opens /probe/events as a reconnecting EventSource does, sending
+// lastEventID unless it is empty, and waits for the ready frame.
+func (h *harness) resume(t *testing.T, lastEventID string) *stream {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.server.URL+"/probe/events", nil)
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cancel()
@@ -198,6 +210,8 @@ func readFrames(r io.Reader, out chan<- frame) {
 		case line == "":
 			out <- current
 			current = frame{}
+		case strings.HasPrefix(line, "id: "):
+			current.id = strings.TrimPrefix(line, "id: ")
 		case strings.HasPrefix(line, "event: "):
 			current.event = strings.TrimPrefix(line, "event: ")
 		case strings.HasPrefix(line, "data: "):
@@ -228,6 +242,9 @@ func (s *stream) nextCanvas(t *testing.T) canvasEvent {
 	}
 	var event canvasEvent
 	decodeStrict(t, strings.NewReader(f.data), &event)
+	if want := strconv.FormatUint(event.Sequence, 10); f.id != want {
+		t.Fatalf("frame id = %q, want the sequence %s", f.id, want)
+	}
 	return event
 }
 
@@ -480,6 +497,130 @@ func TestRetriedOperationIsNotBroadcastTwice(t *testing.T) {
 	}
 	if event := s.nextCanvas(t); event.Sequence != first.Sequence {
 		t.Errorf("event sequence = %d", event.Sequence)
+	}
+	s.quiet(t)
+}
+
+// acceptBoxes accepts n creates of distinct boxes and returns their sequences.
+func (h *harness) acceptBoxes(t *testing.T, from, n int) []uint64 {
+	t.Helper()
+	var sequences []uint64
+	for i := from; i < from+n; i++ {
+		body := fmt.Sprintf(`{"operationId":"op-%d","objectId":"box-%d","kind":"set","payload":{"op":"create"}}`, i, i)
+		sequences = append(sequences, h.accept(t, body).Sequence)
+	}
+	return sequences
+}
+
+func (s *stream) canvasSequences(t *testing.T, n int) []uint64 {
+	t.Helper()
+	var got []uint64
+	for range n {
+		got = append(got, s.nextCanvas(t).Sequence)
+	}
+	return got
+}
+
+func TestReconnectReplaysRetainedLaterEventsBeforeLiveOnes(t *testing.T) {
+	h := startHarness(t, options{})
+	seqs := h.acceptBoxes(t, 1, 3)
+
+	s := h.resume(t, strconv.FormatUint(seqs[0], 10))
+	if got := s.canvasSequences(t, 2); !reflect.DeepEqual(got, seqs[1:]) {
+		t.Fatalf("replayed = %v, want %v", got, seqs[1:])
+	}
+	live := h.acceptBoxes(t, 4, 1)
+	if got := s.canvasSequences(t, 1); !reflect.DeepEqual(got, live) {
+		t.Fatalf("live = %v, want %v", got, live)
+	}
+	s.quiet(t)
+}
+
+func TestReconnectAtTheLastSequenceReplaysNothing(t *testing.T) {
+	h := startHarness(t, options{})
+	seqs := h.acceptBoxes(t, 1, 2)
+	s := h.resume(t, strconv.FormatUint(seqs[1], 10))
+	s.quiet(t)
+	live := h.acceptBoxes(t, 3, 1)
+	if got := s.canvasSequences(t, 1); !reflect.DeepEqual(got, live) {
+		t.Fatalf("live = %v, want %v", got, live)
+	}
+	s.quiet(t)
+}
+
+func TestReconnectAtTheRetentionEdgeReplaysTheWholeLog(t *testing.T) {
+	h := startHarness(t, options{logSize: 2})
+	seqs := h.acceptBoxes(t, 1, 4)
+	s := h.resume(t, strconv.FormatUint(seqs[1], 10))
+	if got := s.canvasSequences(t, 2); !reflect.DeepEqual(got, seqs[2:]) {
+		t.Fatalf("replayed = %v, want %v", got, seqs[2:])
+	}
+	s.quiet(t)
+}
+
+// A cursor the hub no longer retains answers 204, which ends an EventSource
+// without a retry, replays nothing and registers no subscriber.
+func TestReconnectOutsideRetentionEndsWithoutReplay(t *testing.T) {
+	h := startHarness(t, options{logSize: 2})
+	seqs := h.acceptBoxes(t, 1, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.server.URL+"/probe/events", nil)
+	req.Header.Set("Last-Event-ID", strconv.FormatUint(seqs[0], 10))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("status = %d body %q, want 204 and no body", resp.StatusCode, body)
+	}
+	h.probe.mu.Lock()
+	subscribers := len(h.probe.subscribers)
+	h.probe.mu.Unlock()
+	if subscribers != 0 {
+		t.Fatalf("subscribers = %d, want 0", subscribers)
+	}
+}
+
+func TestMalformedLastEventIDIsRejected(t *testing.T) {
+	h := startHarness(t, options{})
+	for _, id := range []string{"abc", "-1", "1.5", "18446744073709551616"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.server.URL+"/probe/events", nil)
+		req.Header.Set("Last-Event-ID", id)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		cancel()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Last-Event-ID %q status = %d, want 400", id, resp.StatusCode)
+		}
+	}
+}
+
+// Commands keep arriving while the stream reconnects; every sequence after
+// the cursor arrives exactly once and in order, replayed or live.
+func TestReconnectDuringConcurrentCommandsHasNoGapOrDuplicate(t *testing.T) {
+	h := startHarness(t, options{})
+	seqs := h.acceptBoxes(t, 1, 5)
+	const more = 40
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.acceptBoxes(t, 6, more)
+	}()
+	s := h.resume(t, strconv.FormatUint(seqs[2], 10))
+	<-done
+	got := s.canvasSequences(t, 2+more)
+	for i, sequence := range got {
+		if want := seqs[2] + uint64(i) + 1; sequence != want {
+			t.Fatalf("sequence %d = %d, want %d (got %v)", i, sequence, want, got)
+		}
 	}
 	s.quiet(t)
 }
