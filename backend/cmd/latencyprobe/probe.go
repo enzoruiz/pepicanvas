@@ -39,11 +39,16 @@ type options struct {
 	clock  func() time.Duration
 	static string
 	buffer int
+	// host is the listening address; requests must name it.
+	host string
 }
 
 // probe is the TE-010 harness: ping, commands on a real realtime.Hub, an SSE
 // stream of accepted events, and static files.
 type probe struct {
+	// host is the only Host a request may name, and http://host the only
+	// Origin it may send.
+	host   string
 	clock  func() time.Duration
 	hub    *realtime.Hub
 	mux    *http.ServeMux
@@ -95,13 +100,24 @@ type canvasFrame struct {
 	CorrelationID string          `json:"correlationId"`
 }
 
-func newProbe(opts options) (*probe, error) {
-	info, err := os.Stat(opts.static)
+// checkStatic reports whether dir can be served at /.
+func checkStatic(dir string) error {
+	info, err := os.Stat(dir)
 	if err != nil {
-		return nil, fmt.Errorf("static directory: %w", err)
+		return fmt.Errorf("static directory: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("static directory: %s is not a directory", opts.static)
+		return fmt.Errorf("static directory: %s is not a directory", dir)
+	}
+	return nil
+}
+
+func newProbe(opts options) (*probe, error) {
+	if err := checkStatic(opts.static); err != nil {
+		return nil, err
+	}
+	if opts.host == "" {
+		return nil, errors.New("host is required")
 	}
 	if opts.clock == nil {
 		start := time.Now()
@@ -115,6 +131,7 @@ func newProbe(opts options) (*probe, error) {
 		return nil, err
 	}
 	p := &probe{
+		host:        opts.host,
 		clock:       opts.clock,
 		hub:         hub,
 		mux:         http.NewServeMux(),
@@ -129,7 +146,17 @@ func newProbe(opts options) (*probe, error) {
 	return p, nil
 }
 
-func (p *probe) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.mux.ServeHTTP(w, r) }
+// ServeHTTP refuses a request that names another host or comes from another
+// origin before any route runs. The harness accepts every command, so a page
+// on another origin, or one reached through a rebound hostname, could
+// otherwise inject commands into a measurement or read its stream.
+func (p *probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); r.Host != p.host || (origin != "" && origin != "http://"+p.host) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	p.mux.ServeHTTP(w, r)
+}
 
 // closeStreams disconnects every subscriber and refuses new ones, so an HTTP
 // Shutdown is not held open by streams that never go idle.

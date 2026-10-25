@@ -40,6 +40,9 @@ func startOn(t *testing.T, server *httptest.Server, opts options) *harness {
 	if opts.static == "" {
 		opts.static = t.TempDir()
 	}
+	if opts.host == "" {
+		opts.host = server.Listener.Addr().String()
+	}
 	p, err := newProbe(opts)
 	if err != nil {
 		t.Fatalf("newProbe: %v", err)
@@ -497,7 +500,7 @@ func TestSlowSubscriberIsDisconnectedWhileFastOneKeepsReceiving(t *testing.T) {
 	}
 	defer slow.Close()
 	_ = slow.(*net.TCPConn).SetReadBuffer(4096)
-	fmt.Fprintf(slow, "GET /probe/events HTTP/1.1\r\nHost: probe\r\n\r\n")
+	fmt.Fprintf(slow, "GET /probe/events HTTP/1.1\r\nHost: %s\r\n\r\n", h.server.Listener.Addr())
 	slowReader := bufio.NewReader(slow)
 	// Read the response head and the ready frame, then stop reading.
 	for {
@@ -585,6 +588,78 @@ func TestStaticFilesAreServedAndProbeRoutesWin(t *testing.T) {
 	}
 	if got := h.ping(t); got < 0 {
 		t.Errorf("ping = %d", got)
+	}
+}
+
+// A page on another origin, or one reached through a rebound hostname, must
+// not inject commands into a measurement or read its stream.
+func TestForeignHostOrOriginIsRefusedBeforeAnyRoute(t *testing.T) {
+	h := startHarness(t, options{})
+	self := h.server.Listener.Addr().String()
+	_, port, _ := net.SplitHostPort(self)
+	s := h.subscribe(t)
+	command := `{"operationId":"op-foreign","objectId":"box-1","kind":"delete"}`
+
+	tests := []struct {
+		name, method, path, host, origin string
+	}{
+		{"rebound hostname", http.MethodGet, "/probe/ping", "evil.example:" + port, ""},
+		{"localhost name", http.MethodGet, "/", "localhost:" + port, ""},
+		{"other loopback port", http.MethodGet, "/probe/ping", "127.0.0.1:1", ""},
+		{"hostile origin command", http.MethodPost, "/probe/commands", "", "http://evil.example"},
+		{"opaque origin command", http.MethodPost, "/probe/commands", "", "null"},
+		{"https self origin", http.MethodPost, "/probe/commands", "", "https://" + self},
+		{"hostile origin stream", http.MethodGet, "/probe/events", "", "http://evil.example"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var body io.Reader
+			if tc.method == http.MethodPost {
+				body = strings.NewReader(command)
+			}
+			req, err := http.NewRequest(tc.method, h.server.URL+tc.path, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.host != "" {
+				req.Host = tc.host
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", resp.StatusCode)
+			}
+		})
+	}
+	s.quiet(t)
+
+	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/probe/commands", strings.NewReader(command))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://"+self)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("same-origin command status = %d, want 200", resp.StatusCode)
+	}
+	if event := s.nextCanvas(t); event.OperationID != "op-foreign" {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestNewProbeRequiresItsHost(t *testing.T) {
+	if _, err := newProbe(options{static: t.TempDir()}); err == nil {
+		t.Fatal("newProbe without host succeeded")
 	}
 }
 

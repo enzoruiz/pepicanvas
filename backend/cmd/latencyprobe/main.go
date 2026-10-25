@@ -11,6 +11,9 @@
 //	                      accepted command in sequence order
 //	GET  /                static files from <dir>; /probe/* routes take precedence
 //
+// Every request must name the listening address as its Host, and any Origin
+// must be http://<that address>; anything else is 403 before routing.
+//
 // Server times are nanoseconds on the monotonic clock since process start.
 // It prints its base URL on stdout once listening. On SIGINT or SIGTERM it
 // disconnects the streams, shuts the HTTP server down and then closes the
@@ -61,8 +64,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "latencyprobe: -listen must be a loopback IP address and port (127.0.0.0/8 or ::1): %v\n", err)
 		return 2
 	}
-	p, err := newProbe(options{static: *static})
-	if err != nil {
+	if err := checkStatic(*static); err != nil {
 		fmt.Fprintf(stderr, "latencyprobe: -static: %v\n", err)
 		return 2
 	}
@@ -70,7 +72,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		fmt.Fprintf(stderr, "latencyprobe: listen: %v\n", err)
-		closeHub(p, stderr)
+		return 1
+	}
+	// The probe accepts only the address it actually listens on, which
+	// differs from -listen when the port is 0.
+	p, err := newProbe(options{static: *static, host: listener.Addr().String()})
+	if err != nil {
+		listener.Close()
+		fmt.Fprintf(stderr, "latencyprobe: %v\n", err)
 		return 1
 	}
 	server := &http.Server{Handler: p, ReadHeaderTimeout: 5 * time.Second}
@@ -97,14 +106,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		code = 1
 	}
 	return code
-}
-
-func closeHub(p *probe, stderr io.Writer) {
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := p.Close(ctx); err != nil {
-		fmt.Fprintf(stderr, "latencyprobe: close hub: %v\n", err)
-	}
 }
 
 // validateListen accepts only a literal loopback IP and a numeric port, so
