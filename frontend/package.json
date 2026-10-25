@@ -25,6 +25,9 @@
     "privacy:evidence:test": "node --test scripts/privacy-evidence.node-test.mjs",
     "auth:e2e": "node scripts/auth-e2e-runner.mjs --download",
     "auth:e2e:offline": "node scripts/auth-e2e-runner.mjs --offline",
+    "latency:probe": "node scripts/latency-runner.mjs --download",
+    "latency:probe:offline": "node scripts/latency-runner.mjs --offline",
+    "latency:evidence:test": "node --test scripts/latency-evidence.node-test.mjs",
     "playwright:list": "playwright test --list --pass-with-no-tests"
   },
   "dependencies": {

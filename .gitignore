@@ -4,6 +4,7 @@ frontend/coverage/
 frontend/.cache/client-browsers/
 frontend/.cache/privacy-fixture/
 frontend/.cache/auth-e2e/
+frontend/.cache/latency/
 frontend/playwright-report/
 frontend/test-results/
 scripts/client-support/.cache/
