@@ -661,6 +661,88 @@ func TestForeignHostOrOriginIsRefusedBeforeAnyRoute(t *testing.T) {
 	}
 }
 
+// serveDirect runs one request through the probe's guard and routes without a
+// listener, so a probe may claim port 80 in a test.
+func serveDirect(p *probe, method, host, origin, body string) int {
+	req := httptest.NewRequest(method, "/probe/commands", strings.NewReader(body))
+	if method == http.MethodGet {
+		req = httptest.NewRequest(method, "/probe/ping", nil)
+	}
+	req.Host = host
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestDefaultPortIsOptionalOnlyWhenListeningOnPort80(t *testing.T) {
+	tests := []struct {
+		listen   string
+		accepted []string
+		refused  []string
+	}{
+		{"127.0.0.1:80", []string{"127.0.0.1", "127.0.0.1:80"},
+			[]string{"127.0.0.1:8080", "127.0.0.1:", "localhost", "localhost:80", "evil.example", "evil.example:80", "127.0.0.2"}},
+		{"[::1]:80", []string{"[::1]", "[::1]:80"}, []string{"::1", "[::2]", "127.0.0.1"}},
+		{"127.0.0.1:8080", []string{"127.0.0.1:8080"}, []string{"127.0.0.1", "127.0.0.1:80"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.listen, func(t *testing.T) {
+			p, err := newProbe(options{static: t.TempDir(), host: tc.listen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+			for _, host := range tc.accepted {
+				if code := serveDirect(p, http.MethodGet, host, "", ""); code != http.StatusOK {
+					t.Errorf("Host %q status = %d, want 200", host, code)
+				}
+			}
+			for _, host := range tc.refused {
+				if code := serveDirect(p, http.MethodGet, host, "", ""); code != http.StatusForbidden {
+					t.Errorf("Host %q status = %d, want 403", host, code)
+				}
+			}
+		})
+	}
+}
+
+func TestOriginOnPort80AcceptsOnlyTheListeningOrigin(t *testing.T) {
+	p, err := newProbe(options{static: t.TempDir(), host: "127.0.0.1:80"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close(context.Background()) })
+	for _, origin := range []string{"http://evil.example", "http://evil.example:80", "http://localhost", "https://127.0.0.1", "http://127.0.0.1:8080", "null"} {
+		for _, host := range []string{"127.0.0.1", "127.0.0.1:80"} {
+			body := `{"operationId":"op-hostile","objectId":"box-1","kind":"delete"}`
+			if code := serveDirect(p, http.MethodPost, host, origin, body); code != http.StatusForbidden {
+				t.Errorf("Host %q Origin %q status = %d, want 403", host, origin, code)
+			}
+		}
+	}
+	if events, err := p.hub.Events(context.Background(), canvasKey, 0); err != nil || len(events) != 0 {
+		t.Fatalf("events after refused commands = %+v, %v; want none", events, err)
+	}
+
+	for i, tc := range []struct{ host, origin string }{
+		{"127.0.0.1", ""},
+		{"127.0.0.1", "http://127.0.0.1"},
+		{"127.0.0.1:80", "http://127.0.0.1:80"},
+		{"127.0.0.1:80", "http://127.0.0.1"},
+	} {
+		body := fmt.Sprintf(`{"operationId":"op-%d","objectId":"box-%d","kind":"delete"}`, i, i)
+		if code := serveDirect(p, http.MethodPost, tc.host, tc.origin, body); code != http.StatusOK {
+			t.Errorf("Host %q Origin %q status = %d, want 200", tc.host, tc.origin, code)
+		}
+	}
+	if events, err := p.hub.Events(context.Background(), canvasKey, 0); err != nil || len(events) != 4 {
+		t.Fatalf("events after accepted commands = %d, %v; want 4", len(events), err)
+	}
+}
+
 func TestNewProbeRequiresItsHost(t *testing.T) {
 	if _, err := newProbe(options{static: t.TempDir()}); err == nil {
 		t.Fatal("newProbe without host succeeded")

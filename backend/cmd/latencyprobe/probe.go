@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,9 +49,9 @@ type options struct {
 // probe is the TE-010 harness: ping, commands on a real realtime.Hub, an SSE
 // stream of accepted events, and static files.
 type probe struct {
-	// host is the only Host a request may name, and http://host the only
-	// Origin it may send.
-	host   string
+	// hosts are the only Host values a request may name, and http://<host>
+	// for one of them the only Origin it may send.
+	hosts  []string
 	clock  func() time.Duration
 	hub    *realtime.Hub
 	mux    *http.ServeMux
@@ -137,7 +140,7 @@ func newProbe(opts options) (*probe, error) {
 		return nil, err
 	}
 	p := &probe{
-		host:        opts.host,
+		hosts:       hostForms(opts.host),
 		clock:       opts.clock,
 		hub:         hub,
 		mux:         http.NewServeMux(),
@@ -153,12 +156,29 @@ func newProbe(opts options) (*probe, error) {
 	return p, nil
 }
 
+// hostForms returns the Host values that name the listening address: the
+// address itself and, on port 80 only, the address without the default port,
+// which clients and browser origins omit.
+func hostForms(listen string) []string {
+	name, port, err := net.SplitHostPort(listen)
+	if err != nil || port != "80" {
+		return []string{listen}
+	}
+	if strings.Contains(name, ":") {
+		name = "[" + name + "]"
+	}
+	return []string{listen, name}
+}
+
 // ServeHTTP refuses a request that names another host or comes from another
 // origin before any route runs. The harness accepts every command, so a page
 // on another origin, or one reached through a rebound hostname, could
 // otherwise inject commands into a measurement or read its stream.
 func (p *probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); r.Host != p.host || (origin != "" && origin != "http://"+p.host) {
+	origin := r.Header.Get("Origin")
+	if !slices.Contains(p.hosts, r.Host) || (origin != "" && !slices.ContainsFunc(p.hosts, func(host string) bool {
+		return origin == "http://"+host
+	})) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
