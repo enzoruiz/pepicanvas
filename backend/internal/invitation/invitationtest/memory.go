@@ -6,6 +6,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,11 +83,17 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// AddTenant seeds a tenant and its owner membership.
+// CanvasID is the canvas AddTenant gives a tenant.
+func CanvasID(tenantID string) string {
+	return "canvas-" + tenantID
+}
+
+// AddTenant seeds a tenant with the canvas CanvasID(tenantID) and its owner
+// membership.
 func (m *MemoryStore) AddTenant(tenantID string, owner access.AccountID, status access.SubscriptionStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.tenants[tenantID] = invitation.Tenant{ID: tenantID, Owner: owner, Status: status}
+	m.state.tenants[tenantID] = invitation.Tenant{ID: tenantID, Owner: owner, CanvasID: CanvasID(tenantID), Status: status}
 	m.state.memberships[[2]string{tenantID, string(owner)}] = access.RoleOwner
 }
 
@@ -249,6 +256,10 @@ func (t *memoryTx) Operation(_ context.Context, operationID string, notBefore ti
 	if err := t.store.step("Operation"); err != nil {
 		return invitation.Record{}, false, err
 	}
+	// A read sees what other transactions committed, as in READ COMMITTED.
+	if committed, ok := t.store.state.records[operationID]; ok {
+		t.state.records[operationID] = committed
+	}
 	record, ok := t.state.records[operationID]
 	if !ok || !record.AcceptedAt.After(notBefore) {
 		return invitation.Record{}, false, nil
@@ -354,7 +365,15 @@ func (t *memoryTx) AddModerator(_ context.Context, tenantID string, account acce
 	if err := t.store.step("AddModerator"); err != nil {
 		return err
 	}
-	t.state.memberships[[2]string{tenantID, string(account)}] = access.RoleModerator
+	// The primary key also sees rows other transactions committed meanwhile.
+	key := [2]string{tenantID, string(account)}
+	if _, ok := t.store.state.memberships[key]; ok {
+		return invitation.ErrMemberTaken
+	}
+	if _, ok := t.state.memberships[key]; ok {
+		return invitation.ErrMemberTaken
+	}
+	t.state.memberships[key] = access.RoleModerator
 	return nil
 }
 
@@ -389,4 +408,25 @@ func (t *memoryTx) RecordOperation(_ context.Context, record invitation.Record, 
 	}
 	t.state.records[record.OperationID] = record
 	return nil
+}
+
+func (t *memoryTx) ModeratedCanvases(_ context.Context, account access.AccountID) ([]invitation.ModeratedCanvas, error) {
+	if err := t.store.step("ModeratedCanvases"); err != nil {
+		return nil, err
+	}
+	var moderated []invitation.ModeratedCanvas
+	for key, role := range t.state.memberships {
+		tenant, ok := t.state.tenants[key[0]]
+		if key[1] != string(account) || role != access.RoleModerator || !ok {
+			continue
+		}
+		moderated = append(moderated, invitation.ModeratedCanvas{
+			Membership: access.Membership{TenantID: tenant.ID, Role: role, Subscription: tenant.Status},
+			CanvasID:   tenant.CanvasID,
+		})
+	}
+	slices.SortFunc(moderated, func(a, b invitation.ModeratedCanvas) int {
+		return strings.Compare(a.Membership.TenantID, b.Membership.TenantID)
+	})
+	return moderated, nil
 }

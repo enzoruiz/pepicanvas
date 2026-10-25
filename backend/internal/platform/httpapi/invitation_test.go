@@ -43,7 +43,14 @@ func (e *env) owner(op, email, tenantID string, status access.SubscriptionStatus
 	e.t.Helper()
 	id := e.register(op, email)
 	e.invs.AddTenant(tenantID, id, status)
+	e.invited.Store(tenantID, status)
 	return e.signIn(email)
+}
+
+// setStatus changes the subscription status of an invitation store tenant.
+func (e *env) setStatus(tenantID string, status access.SubscriptionStatus) {
+	e.invs.SetStatus(tenantID, status)
+	e.invited.Store(tenantID, status)
 }
 
 func auth(s signedIn) []option { return []option{withSession(s.token), withCSRF(s.csrf)} }
@@ -335,10 +342,12 @@ func TestInvitationCreationIsLimitedPerAccount(t *testing.T) {
 // request correlation.
 func TestInvitationLogsAreCorrelatedAndRedacted(t *testing.T) {
 	e := newEnv(t, httpapi.Limits{
-		SignInPerAccount:      httpapi.Rate{Limit: 100, Window: time.Minute},
-		SignInPerIP:           httpapi.Rate{Limit: 100, Window: time.Minute},
-		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
-		InvitationsPerAccount: httpapi.Rate{Limit: 4, Window: time.Minute},
+		SignInPerAccount:            httpapi.Rate{Limit: 100, Window: time.Minute},
+		SignInPerIP:                 httpapi.Rate{Limit: 100, Window: time.Minute},
+		RegisterPerIP:               httpapi.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount:       httpapi.Rate{Limit: 4, Window: time.Minute},
+		InvitationAcceptsPerAccount: httpapi.DefaultLimits.InvitationAcceptsPerAccount,
+		UploadsPerAccount:           httpapi.DefaultLimits.UploadsPerAccount,
 	})
 	alice := e.owner("op-http-inv-alice1", "alice@example.com", "tenant-a", access.SubscriptionActive)
 	e.register("op-http-inv-mall01", "mallory@example.com")

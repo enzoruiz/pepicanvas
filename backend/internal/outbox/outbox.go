@@ -1,8 +1,9 @@
-// Package outbox delivers committed canvas mutations to the realtime actor.
-// Each mutation and its outbox record commit in one PostgreSQL transaction;
-// a retrying publisher later delivers every pending record at least once, in
-// revision order per canvas, and keeps undelivered records pending across
-// restarts. No broker is involved.
+// Package outbox delivers committed canvas mutations and media usage changes
+// to the realtime actor. Each change and its outbox record commit in one
+// PostgreSQL transaction; a retrying publisher later delivers every pending
+// record at least once, in commit order per canvas (revision order for
+// mutations), and keeps undelivered records pending across restarts. No
+// broker is involved.
 package outbox
 
 import (
@@ -20,9 +21,10 @@ import (
 // that cannot be decoded into a valid mutation.
 var ErrMalformed = errors.New("outbox: malformed mutation")
 
-// Record is one outbox entry: a committed canvas event and its delivery
-// bookkeeping. Records of one canvas are numbered by revision, and a higher
-// ID was committed later.
+// Record is one outbox entry: a committed canvas event or media usage and its
+// delivery bookkeeping. Mutation records of one canvas are numbered by
+// revision, and within the mutations or the usages of one canvas a higher ID
+// was committed later.
 type Record struct {
 	ID    int64
 	Event resync.Event
@@ -38,6 +40,9 @@ type Record struct {
 	// be decoded. Event then holds no mutation and as much of its key and
 	// result as the record has. Such a record is never delivered.
 	Malformed error
+	// Usage is set for a media usage record. Event then holds only its key
+	// and correlation ID: the record has no mutation and no revision.
+	Usage *MediaUsage
 }
 
 // Mutation kinds as stored in the outbox.

@@ -48,6 +48,9 @@ interface CanvasPanelProps {
   newOperationId?: () => string;
   // Called once the own canvas loaded, which means an active owner.
   onLoaded?: (canvas: OwnCanvas) => void;
+  // A moderator who owns no canvas sees its moderated canvases instead of
+  // the owner's not-active notice.
+  hideWhenNotOwner?: boolean;
 }
 
 // A whole number within the limits, or undefined for anything else
@@ -66,6 +69,7 @@ export function CanvasPanel({
   session,
   newOperationId = () => crypto.randomUUID(),
   onLoaded,
+  hideWhenNotOwner = false,
 }: CanvasPanelProps) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [width, setWidth] = useState("");
@@ -160,6 +164,8 @@ export function CanvasPanel({
       setBusy(false);
     }
   }
+
+  if (hideWhenNotOwner && state.kind === "inactive") return null;
 
   return (
     <section aria-labelledby="canvas-heading">

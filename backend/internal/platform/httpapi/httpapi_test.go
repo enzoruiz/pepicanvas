@@ -44,7 +44,10 @@ type canvases struct {
 	// applied holds the canvases changed by Apply; Load reads it first.
 	applied    map[canvas.Key]canvas.Canvas
 	operations map[string]appliedOperation
-	effects    int
+	// invited are the tenants of the invitation store (tenantID -> status);
+	// each has the empty canvas invitationtest.CanvasID(tenantID).
+	invited *sync.Map
+	effects int
 	// calls counts every Apply, including rejected ones.
 	calls int
 	// failNext, when set, fails the next Apply without an effect.
@@ -142,16 +145,22 @@ func (c *canvases) loadLocked(key canvas.Key) (canvas.Canvas, error) {
 	if dimensions, ok := c.activated.Canvases()[key]; ok {
 		return canvas.Canvas{Key: key, Dimensions: dimensions}, nil
 	}
+	if _, ok := c.invited.Load(key.TenantID); ok && key.CanvasID == invitationtest.CanvasID(key.TenantID) {
+		return canvas.Canvas{Key: key, Dimensions: canvas.DefaultDimensions}, nil
+	}
 	return canvas.Canvas{}, canvas.ErrNotFound
 }
 
 // memberships reads the owner memberships activations created and the
 // moderators added to activated tenants, with the tenant's current
 // subscription, as the PostgreSQL memberships and tenants tables do, then the
-// seeded ones.
+// memberships of the invitation store's tenants (owners and accepted
+// invitations), then the seeded ones.
 type memberships struct {
 	activated  *subscriptiontest.MemoryStore
 	moderators *sync.Map // [2]string{tenantID, accountID} -> true
+	invitedBy  *invitationtest.MemoryStore
+	invited    *sync.Map // tenantID -> access.SubscriptionStatus
 	seeded     access.MembershipStore
 }
 
@@ -165,6 +174,11 @@ func (m memberships) MembershipOf(ctx context.Context, account access.AccountID,
 			if tenant.ID == tenantID {
 				return access.Membership{TenantID: tenantID, Role: role, Subscription: tenant.Status}, true, nil
 			}
+		}
+	}
+	if status, ok := m.invited.Load(tenantID); ok {
+		if role, ok := m.invitedBy.Membership(tenantID, account); ok {
+			return access.Membership{TenantID: tenantID, Role: role, Subscription: status.(access.SubscriptionStatus)}, true, nil
 		}
 	}
 	return m.seeded.MembershipOf(ctx, account, tenantID)
@@ -200,10 +214,13 @@ type env struct {
 	// moderators are the moderator memberships of activated tenants.
 	moderators *sync.Map
 	invs       *invitationtest.MemoryStore
-	logs       *syncBuffer
-	config     httpapi.Config
-	handler    http.Handler
-	bodies     []string
+	// invited mirrors the status of the invitation store's tenants for the
+	// canvas and membership fakes.
+	invited *sync.Map
+	logs    *syncBuffer
+	config  httpapi.Config
+	handler http.Handler
+	bodies  []string
 }
 
 func newEnv(t *testing.T, limits httpapi.Limits) *env {
@@ -227,8 +244,9 @@ func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limit
 		logs:   &syncBuffer{},
 
 		moderators: &sync.Map{},
+		invited:    &sync.Map{},
 	}
-	e.canvases = &canvases{byID: map[canvas.Key]canvas.Canvas{}, activated: e.subs}
+	e.canvases = &canvases{byID: map[canvas.Key]canvas.Canvas{}, activated: e.subs, invited: e.invited}
 	svc, err := access.NewService(e.store, e.store, e.hasher, access.WithClock(e.clock.Now))
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +258,7 @@ func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limit
 	}
 	e.config = httpapi.Config{
 		Accounts:      faultyAccounts{Accounts: svc, faults: e.faults, calls: e.calls},
-		Memberships:   memberships{activated: e.subs, moderators: e.moderators, seeded: e.store},
+		Memberships:   memberships{activated: e.subs, moderators: e.moderators, invitedBy: e.invs, invited: e.invited, seeded: e.store},
 		Canvases:      e.canvases,
 		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults, calls: e.calls},
 		Tenants:       faultyTenants{Tenants: e.subs, faults: e.faults},
@@ -674,10 +692,12 @@ func TestCanvasRequestsRequireAMembership(t *testing.T) {
 
 func TestSignInRateLimitPerAccountAndIP(t *testing.T) {
 	limits := httpapi.Limits{
-		SignInPerAccount:      httpapi.Rate{Limit: 3, Window: time.Minute},
-		SignInPerIP:           httpapi.Rate{Limit: 5, Window: time.Minute},
-		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
-		InvitationsPerAccount: httpapi.DefaultLimits.InvitationsPerAccount,
+		SignInPerAccount:            httpapi.Rate{Limit: 3, Window: time.Minute},
+		SignInPerIP:                 httpapi.Rate{Limit: 5, Window: time.Minute},
+		RegisterPerIP:               httpapi.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount:       httpapi.DefaultLimits.InvitationsPerAccount,
+		InvitationAcceptsPerAccount: httpapi.DefaultLimits.InvitationAcceptsPerAccount,
+		UploadsPerAccount:           httpapi.DefaultLimits.UploadsPerAccount,
 	}
 	e := newEnv(t, limits)
 	e.register("op-http-rate-00001", "alice@example.com")
@@ -737,10 +757,12 @@ func TestRegistrationRateLimitPerIP(t *testing.T) {
 
 func TestDefaultLimits(t *testing.T) {
 	want := httpapi.Limits{
-		SignInPerAccount:      httpapi.Rate{Limit: 10, Window: 15 * time.Minute},
-		SignInPerIP:           httpapi.Rate{Limit: 50, Window: 15 * time.Minute},
-		RegisterPerIP:         httpapi.Rate{Limit: 10, Window: time.Hour},
-		InvitationsPerAccount: httpapi.Rate{Limit: 20, Window: time.Hour},
+		SignInPerAccount:            httpapi.Rate{Limit: 10, Window: 15 * time.Minute},
+		SignInPerIP:                 httpapi.Rate{Limit: 50, Window: 15 * time.Minute},
+		RegisterPerIP:               httpapi.Rate{Limit: 10, Window: time.Hour},
+		InvitationsPerAccount:       httpapi.Rate{Limit: 20, Window: time.Hour},
+		InvitationAcceptsPerAccount: httpapi.Rate{Limit: 20, Window: time.Hour},
+		UploadsPerAccount:           httpapi.Rate{Limit: 60, Window: time.Hour},
 	}
 	if httpapi.DefaultLimits != want {
 		t.Fatalf("DefaultLimits = %+v", httpapi.DefaultLimits)
@@ -771,10 +793,12 @@ func TestConfigurationRequiresAnIngress(t *testing.T) {
 
 func TestSecretsNeverReachLogsOrErrorBodies(t *testing.T) {
 	e := newEnv(t, httpapi.Limits{
-		SignInPerAccount:      httpapi.Rate{Limit: 2, Window: time.Minute},
-		SignInPerIP:           httpapi.Rate{Limit: 100, Window: time.Minute},
-		RegisterPerIP:         httpapi.Rate{Limit: 100, Window: time.Minute},
-		InvitationsPerAccount: httpapi.DefaultLimits.InvitationsPerAccount,
+		SignInPerAccount:            httpapi.Rate{Limit: 2, Window: time.Minute},
+		SignInPerIP:                 httpapi.Rate{Limit: 100, Window: time.Minute},
+		RegisterPerIP:               httpapi.Rate{Limit: 100, Window: time.Minute},
+		InvitationsPerAccount:       httpapi.DefaultLimits.InvitationsPerAccount,
+		InvitationAcceptsPerAccount: httpapi.DefaultLimits.InvitationAcceptsPerAccount,
+		UploadsPerAccount:           httpapi.DefaultLimits.UploadsPerAccount,
 	})
 	e.register("op-http-secrets-01", "alice@example.com")
 	alice := e.signIn("alice@example.com")

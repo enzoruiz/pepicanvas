@@ -1,5 +1,3 @@
-/* global crypto, fetch, process */
-
 // US-007 end to end: the owner resizes the canvas from the editor form over
 // the real server and PostgreSQL. The private OBS URL is US-021, so the
 // overlay side of "OBS and editor show the same confirmed size" is not
@@ -68,9 +66,9 @@ async function signedIn(browser, email) {
 }
 
 async function activate(page, email) {
-  const panel = page.getByRole("region", { name: "Activate a streamer" });
+  const panel = page.getByRole("region", { name: "Manage streamers" });
   await panel.getByLabel("Streamer email").fill(email);
-  await panel.getByRole("button", { name: "Activate" }).click();
+  await panel.getByRole("button", { name: "Activate", exact: true }).click();
   await expect(panel.getByRole("status")).toHaveText("Streamer activated.");
 }
 

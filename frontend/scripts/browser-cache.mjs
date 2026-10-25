@@ -1,5 +1,3 @@
-/* global console, process */
-
 import { spawnSync } from "node:child_process";
 import { access, mkdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";

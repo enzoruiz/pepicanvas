@@ -18,7 +18,8 @@ import (
 
 // InvitationStore implements invitation.Store. Owner actions share-lock the
 // owner's tenant; revocations and acceptances lock the invitation row, so the
-// later of the two sees the earlier commit.
+// later of the two sees the earlier commit. The memberships primary key
+// orders one account's acceptances of two invitations of a tenant.
 type InvitationStore struct {
 	pool *pgxpool.Pool
 	// fault, when set by tests, runs after each Tx step, named after its
@@ -85,9 +86,10 @@ func (t *invitationTx) LockTenant(ctx context.Context, tenantID string) (invitat
 		return invitation.Tenant{}, false, err
 	}
 	tenant := invitation.Tenant{
-		ID:     row.TenantID,
-		Owner:  access.AccountID(row.OwnerAccountID.String),
-		Status: access.SubscriptionStatus(row.SubscriptionStatus),
+		ID:       row.TenantID,
+		Owner:    access.AccountID(row.OwnerAccountID.String),
+		CanvasID: row.CanvasID.String,
+		Status:   access.SubscriptionStatus(row.SubscriptionStatus),
 	}
 	return tenant, true, t.store.step(ctx, "LockTenant")
 }
@@ -118,6 +120,8 @@ func (t *invitationTx) Operation(ctx context.Context, operationID string, notBef
 		}
 	case invitation.OperationRevoke:
 		record.Revocation = invitation.Revocation{InvitationID: row.InvitationID, Status: access.InvitationStatus(row.Status.String)}
+	case invitation.OperationAccept:
+		record.Acceptance = invitation.Acceptance{TenantID: row.TenantID, CanvasID: row.CanvasID.String, InvitationID: row.InvitationID}
 	}
 	return record, true, t.store.step(ctx, "Operation")
 }
@@ -195,9 +199,14 @@ func (t *invitationTx) IsMember(ctx context.Context, tenantID string, account ac
 }
 
 func (t *invitationTx) AddModerator(ctx context.Context, tenantID string, account access.AccountID) error {
-	if err := t.q.InsertMembership(ctx, db.InsertMembershipParams{
+	err := t.q.InsertMembership(ctx, db.InsertMembershipParams{
 		TenantID: tenantID, AccountID: string(account), Role: string(access.RoleModerator),
-	}); err != nil {
+	})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == "memberships_pkey" {
+		return invitation.ErrMemberTaken
+	}
+	if err != nil {
 		return err
 	}
 	return t.store.step(ctx, "AddModerator")
@@ -243,6 +252,10 @@ func (t *invitationTx) RecordOperation(ctx context.Context, record invitation.Re
 	case invitation.OperationRevoke:
 		params.InvitationID = record.Revocation.InvitationID
 		params.Status = pgtype.Text{String: string(record.Revocation.Status), Valid: true}
+	case invitation.OperationAccept:
+		params.InvitationID = record.Acceptance.InvitationID
+		params.Status = pgtype.Text{String: string(access.InvitationAccepted), Valid: true}
+		params.CanvasID = pgtype.Text{String: record.Acceptance.CanvasID, Valid: true}
 	default:
 		return fmt.Errorf("record invitation operation: unknown kind %q", record.Kind)
 	}
@@ -281,4 +294,23 @@ func utc(t pgtype.Timestamptz) time.Time {
 		return time.Time{}
 	}
 	return t.Time.UTC()
+}
+
+func (t *invitationTx) ModeratedCanvases(ctx context.Context, account access.AccountID) ([]invitation.ModeratedCanvas, error) {
+	rows, err := t.q.ListModeratedCanvases(ctx, string(account))
+	if err != nil {
+		return nil, err
+	}
+	moderated := make([]invitation.ModeratedCanvas, 0, len(rows))
+	for _, row := range rows {
+		moderated = append(moderated, invitation.ModeratedCanvas{
+			Membership: access.Membership{
+				TenantID:     row.TenantID,
+				Role:         access.RoleModerator,
+				Subscription: access.SubscriptionStatus(row.SubscriptionStatus),
+			},
+			CanvasID: row.CanvasID.String,
+		})
+	}
+	return moderated, t.store.step(ctx, "ModeratedCanvases")
 }

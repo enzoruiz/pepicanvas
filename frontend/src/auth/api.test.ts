@@ -2,15 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import {
+  acceptInvitation,
   activate,
   createInvitation,
   deactivate,
   generateInvitationToken,
+  getMediaUsage,
   getOwnCanvas,
   getSession,
+  getTenantCanvas,
   listInvitations,
+  listMemberships,
   revokeInvitation,
   setDimensions,
+  uploadMedia,
 } from "./api";
 
 let calls: Call[];
@@ -155,6 +160,8 @@ describe("getOwnCanvas", () => {
     ["a string rotation", { objects: [{ ...textObject, rotation: "12" }] }],
     ["a fractional z", { objects: [{ ...textObject, z: 0.5 }] }],
     ["a fractional canvas width", { width: 1920.5 }],
+    ["no tenant", { tenant_id: undefined }],
+    ["a numeric tenant", { tenant_id: 1 }],
   ])("rejects a canvas with %s", async (_, change) => {
     replies.push(
       json(200, {
@@ -552,5 +559,421 @@ describe("revokeInvitation", () => {
     expect(
       await revokeInvitation("csrf", "operation-id-0001", invitationId),
     ).toEqual({ ok: false, error: "not_found" });
+  });
+});
+
+describe("acceptInvitation", () => {
+  it("sends the token only in the JSON body with the CSRF token", async () => {
+    replies.push(json(200, { tenant_id: tenantId, canvas_id: canvasId }));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: true,
+      value: { tenantId, canvasId },
+    });
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/invitations/accept",
+        headers: { "X-CSRF-Token": "csrf", "Content-Type": "application/json" },
+        body: { operation_id: "operation-id-0001", token },
+      },
+    ]);
+  });
+
+  it.each([
+    {},
+    { tenant_id: tenantId },
+    { canvas_id: canvasId },
+    { tenant_id: "../x", canvas_id: canvasId },
+    { tenant_id: tenantId, canvas_id: 7 },
+  ])("rejects the malformed answer %o", async (body) => {
+    replies.push(json(200, body));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([
+    ["not_found", 404],
+    ["bad_request", 400],
+    ["conflict", 409],
+    ["rate_limited", 429],
+    ["unauthorized", 401],
+    ["forbidden", 403],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code }));
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+
+  it.each([
+    ["a network failure", "network-error" as const],
+    ["an internal error", json(500, { error: "internal" })],
+  ])("reports %s as unavailable", async (_, reply) => {
+    replies.push(reply);
+
+    expect(await acceptInvitation("csrf", "operation-id-0001", token)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+});
+
+describe("listMemberships", () => {
+  it("reads the moderator memberships", async () => {
+    const otherTenant = "dddddddddddddddddddddddddddddddd";
+    const otherCanvas = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    replies.push(
+      json(200, {
+        memberships: [
+          { tenant_id: tenantId, canvas_id: canvasId, role: "moderator" },
+          { tenant_id: otherTenant, canvas_id: otherCanvas, role: "moderator" },
+        ],
+      }),
+    );
+
+    expect(await listMemberships()).toEqual({
+      ok: true,
+      value: [
+        { tenantId, canvasId, role: "moderator" },
+        { tenantId: otherTenant, canvasId: otherCanvas, role: "moderator" },
+      ],
+    });
+    expect(calls).toEqual([
+      { method: "GET", path: "/api/memberships", headers: {}, body: undefined },
+    ]);
+  });
+
+  it("reads an empty list", async () => {
+    replies.push(json(200, { memberships: [] }));
+
+    expect(await listMemberships()).toEqual({ ok: true, value: [] });
+  });
+
+  it.each([
+    ["no list", {}],
+    ["a list that is not an array", { memberships: {} }],
+    ["a null entry", { memberships: [null] }],
+    [
+      "an owner role",
+      {
+        memberships: [
+          { tenant_id: tenantId, canvas_id: canvasId, role: "owner" },
+        ],
+      },
+    ],
+    [
+      "a malformed tenant",
+      {
+        memberships: [
+          { tenant_id: "a/b", canvas_id: canvasId, role: "moderator" },
+        ],
+      },
+    ],
+    [
+      "a missing canvas",
+      { memberships: [{ tenant_id: tenantId, role: "moderator" }] },
+    ],
+  ])("rejects an answer with %s", async (_, body) => {
+    replies.push(json(200, body));
+
+    expect(await listMemberships()).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it("reports unauthorized", async () => {
+    replies.push(json(401, { error: "unauthorized" }));
+
+    expect(await listMemberships()).toEqual({
+      ok: false,
+      error: "unauthorized",
+    });
+  });
+});
+
+describe("getTenantCanvas", () => {
+  const body = {
+    canvas_id: canvasId,
+    width: 1280,
+    height: 720,
+    revision: 4,
+    objects: [textObject],
+  };
+
+  it("reads a canvas through the tenant route", async () => {
+    replies.push(json(200, body));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: true,
+      value: {
+        tenantId,
+        canvasId,
+        width: 1280,
+        height: 720,
+        revision: 4,
+        objects: [
+          {
+            id: "obj-1",
+            kind: "text",
+            content: "Hello",
+            x: -10,
+            y: 20,
+            width: 300,
+            height: 40,
+            rotation: 12.5,
+            z: 3,
+          },
+        ],
+      },
+    });
+    expect(calls).toEqual([
+      {
+        method: "GET",
+        path: `/api/tenants/${tenantId}/canvases/${canvasId}`,
+        headers: {},
+        body: undefined,
+      },
+    ]);
+  });
+
+  it.each([
+    ["another canvas", { canvas_id: "ffffffffffffffffffffffffffffffff" }],
+    ["no revision", { revision: undefined }],
+    ["a malformed object", { objects: [{ ...textObject, z: 0.5 }] }],
+  ])("rejects an answer for %s", async (_, change) => {
+    replies.push(json(200, { ...body, ...change }));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it("reports forbidden for a canvas the account may not view", async () => {
+    replies.push(json(403, { error: "forbidden" }));
+
+    expect(await getTenantCanvas(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: "forbidden",
+    });
+  });
+});
+
+const usagePath = `/api/tenants/${tenantId}/canvases/${canvasId}/media/usage`;
+
+const usageBody = {
+  quota_bytes: 1_000_000_000,
+  used_bytes: 250,
+  reserved_bytes: 40,
+  available_bytes: 999_999_710,
+};
+
+const usage = {
+  quotaBytes: 1_000_000_000,
+  usedBytes: 250,
+  reservedBytes: 40,
+  availableBytes: 999_999_710,
+};
+
+describe("getMediaUsage", () => {
+  it("reads the aggregate usage of the canvas", async () => {
+    replies.push(json(200, usageBody));
+
+    expect(await getMediaUsage(tenantId, canvasId)).toEqual({
+      ok: true,
+      value: usage,
+    });
+    expect(calls[0]).toMatchObject({ method: "GET", path: usagePath });
+  });
+
+  it("encodes the tenant and canvas IDs in the path", async () => {
+    replies.push(json(200, usageBody));
+
+    await getMediaUsage("a/b", "c?d");
+
+    expect(calls[0].path).toBe("/api/tenants/a%2Fb/canvases/c%3Fd/media/usage");
+  });
+
+  it.each([
+    ["no quota", { quota_bytes: undefined }],
+    ["a fractional used count", { used_bytes: 1.5 }],
+    ["a negative reserved count", { reserved_bytes: -1 }],
+    ["a text available count", { available_bytes: "1" }],
+  ])("rejects an answer with %s", async (_, change) => {
+    replies.push(json(200, { ...usageBody, ...change }));
+
+    expect(await getMediaUsage(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each(["forbidden", "media_unavailable"])("knows %s", async (code) => {
+    replies.push(json(code === "forbidden" ? 403 : 503, { error: code }));
+
+    expect(await getMediaUsage(tenantId, canvasId)).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+});
+
+describe("uploadMedia", () => {
+  const file = new File(["12345"], "cat.png", { type: "image/png" });
+  const uploaded = {
+    asset_id: "dddddddddddddddddddddddddddddddd",
+    kind: "image",
+    usage: usageBody,
+  };
+
+  it("sends the raw file with the CSRF token and the IDs in the query", async () => {
+    replies.push(json(201, uploaded));
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op+1/x",
+        referenceId: "ref&2=y",
+        file,
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        assetId: "dddddddddddddddddddddddddddddddd",
+        kind: "image",
+        usage,
+      },
+    });
+    expect(calls[0]).toEqual({
+      method: "POST",
+      path: `/api/tenants/${tenantId}/canvases/${canvasId}/media/uploads?operation_id=op%2B1%2Fx&reference_id=ref%262%3Dy`,
+      headers: {
+        "X-CSRF-Token": "csrf",
+        "Content-Type": "application/octet-stream",
+      },
+      body: undefined,
+      raw: file,
+    });
+  });
+
+  it("asks for a replacement with replace=true", async () => {
+    replies.push(json(201, uploaded));
+
+    await uploadMedia("csrf", tenantId, canvasId, {
+      operationId: "op-1",
+      referenceId: "ref-1",
+      file,
+      replace: true,
+    });
+
+    expect(calls[0].path).toBe(
+      `/api/tenants/${tenantId}/canvases/${canvasId}/media/uploads?operation_id=op-1&reference_id=ref-1&replace=true`,
+    );
+  });
+
+  it.each([
+    ["quota_exceeded", 413],
+    ["upload_in_progress", 409],
+    ["upload_failed", 502],
+    ["reference_exists", 409],
+    ["length_required", 411],
+    ["media_unavailable", 503],
+    ["forbidden", 403],
+    ["rate_limited", 429],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code, correlation_id: "corr-1" }));
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      }),
+    ).toEqual({ ok: false, error: code });
+  });
+
+  it.each([
+    "invalid_limits",
+    "unsupported_kind",
+    "invalid_metadata",
+    "input_too_large",
+    "dimensions_exceeded",
+    "duration_exceeded",
+    "frame_count_exceeded",
+    "stream_count_exceeded",
+  ])("reports the rejection reason %s", async (reason) => {
+    replies.push(json(422, { error: "media_rejected", reason }));
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      }),
+    ).toEqual({ ok: false, error: "media_rejected", reason });
+  });
+
+  it.each([undefined, "something_new", "<b>x</b>", 7])(
+    "drops the unknown rejection reason %o",
+    async (reason) => {
+      replies.push(json(422, { error: "media_rejected", reason }));
+
+      const result = await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      });
+
+      expect(result).toStrictEqual({ ok: false, error: "media_rejected" });
+    },
+  );
+
+  it("keeps a reason only on a media rejection", async () => {
+    replies.push(
+      json(413, { error: "quota_exceeded", reason: "unsupported_kind" }),
+    );
+
+    const result = await uploadMedia("csrf", tenantId, canvasId, {
+      operationId: "op-1",
+      referenceId: "ref-1",
+      file,
+    });
+
+    expect(result).toStrictEqual({ ok: false, error: "quota_exceeded" });
+  });
+
+  it.each([
+    ["no asset ID", { asset_id: 1 }],
+    ["no kind", { kind: undefined }],
+    ["no usage", { usage: undefined }],
+    ["a malformed usage", { usage: { ...usageBody, used_bytes: "0" } }],
+  ])("rejects an answer with %s", async (_, change) => {
+    replies.push(json(201, { ...uploaded, ...change }));
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      }),
+    ).toEqual({ ok: false, error: "unavailable" });
+  });
+
+  it("reports a network failure as unavailable", async () => {
+    replies.push("network-error");
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      }),
+    ).toEqual({ ok: false, error: "unavailable" });
   });
 });

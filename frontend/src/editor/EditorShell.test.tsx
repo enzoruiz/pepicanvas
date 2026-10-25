@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
@@ -14,6 +20,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  window.sessionStorage.clear();
+  window.history.replaceState(null, "", "/");
 });
 
 function session(operator: boolean) {
@@ -34,6 +42,27 @@ const ownCanvas = json(200, {
   objects: [],
 });
 
+const noMemberships = json(200, { memberships: [] });
+
+const token = `pci_${"t".repeat(43)}`;
+const signInNote =
+  "Sign in or create an account to accept the moderator invitation.";
+const moderated = {
+  tenant_id: "cccccccccccccccccccccccccccccccc",
+  canvas_id: "dddddddddddddddddddddddddddddddd",
+};
+const moderatedCanvas = json(200, {
+  canvas_id: moderated.canvas_id,
+  width: 1280,
+  height: 720,
+  revision: 2,
+  objects: [],
+});
+const oneMembership = json(200, {
+  memberships: [{ ...moderated, role: "moderator" }],
+});
+const forbidden = json(403, { error: "forbidden" });
+
 describe("EditorShell", () => {
   it("renders the editor mount boundary", async () => {
     replies.push(json(401, { error: "unauthorized" }));
@@ -52,7 +81,7 @@ describe("EditorShell", () => {
   });
 
   it("shows a streamer its canvas and no operator panel", async () => {
-    replies.push(session(false), ownCanvas);
+    replies.push(session(false), ownCanvas, noMemberships);
     render(<EditorShell />);
 
     expect(await screen.findByText("1920 × 1080")).toBeInTheDocument();
@@ -68,46 +97,78 @@ describe("EditorShell", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows an active owner the invitations panel", async () => {
-    replies.push(session(false), ownCanvas, json(200, { invitations: [] }));
+  it("shows an active owner the invitations and storage panels", async () => {
+    replies.push(
+      session(false),
+      ownCanvas,
+      noMemberships,
+      json(200, { invitations: [] }),
+      json(200, {
+        quota_bytes: 1_000_000_000,
+        used_bytes: 0,
+        reserved_bytes: 0,
+        available_bytes: 1_000_000_000,
+      }),
+    );
     render(<EditorShell />);
 
     expect(
       await screen.findByRole("region", { name: "Invite moderators" }),
     ).toBeInTheDocument();
-    await waitFor(() => expect(calls).toHaveLength(3));
-    expect(calls[2]).toMatchObject({ method: "GET", path: "/api/invitations" });
+    expect(
+      await screen.findByText("Used 0 of 1,000,000,000 bytes"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Canvas storage" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(calls).toHaveLength(5));
+    expect(calls[3]).toMatchObject({ method: "GET", path: "/api/invitations" });
+    expect(calls[4]).toMatchObject({
+      method: "GET",
+      path: "/api/tenants/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/canvases/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/media/usage",
+    });
   });
 
   it.each([
     ["an inactive account or moderator", false, 403],
     ["an operator-only account", true, 403],
     ["an account whose canvas is unavailable", false, 500],
-  ])("hides the invitations panel from %s", async (_, operator, status) => {
-    replies.push(
-      session(operator),
-      json(status, { error: status === 403 ? "forbidden" : "internal" }),
-    );
-    render(<EditorShell />);
+  ])(
+    "hides the invitations and storage panels from %s",
+    async (_, operator, status) => {
+      replies.push(
+        session(operator),
+        json(status, { error: status === 403 ? "forbidden" : "internal" }),
+        noMemberships,
+      );
+      render(<EditorShell />);
 
-    expect(
-      await screen.findByText(
-        status === 403
-          ? "Your account is not active yet. Ask an operator to activate it."
-          : "Your canvas is unavailable. Reload the page to try again.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", { name: "Invite moderators" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Create invitation link" }),
-    ).not.toBeInTheDocument();
-    expect(calls).toHaveLength(2);
-  });
+      expect(
+        await screen.findByText(
+          status === 403
+            ? "Your account is not active yet. Ask an operator to activate it."
+            : "Your canvas is unavailable. Reload the page to try again.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "Invite moderators" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Create invitation link" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "Canvas storage" }),
+      ).not.toBeInTheDocument();
+      await waitFor(() => expect(calls).toHaveLength(3));
+      expect(calls[2]).toMatchObject({
+        method: "GET",
+        path: "/api/memberships",
+      });
+    },
+  );
 
   it("shows an operator the operator panel", async () => {
-    replies.push(session(true), json(403, { error: "forbidden" }));
+    replies.push(session(true), forbidden, noMemberships);
     render(<EditorShell />);
 
     expect(
@@ -118,5 +179,96 @@ describe("EditorShell", () => {
         "Your account is not active yet. Ask an operator to activate it.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("shows only sign-in and a note for an invitation link without a session", async () => {
+    window.history.replaceState(null, "", `/editor/#${token}`);
+    replies.push(json(401, { error: "unauthorized" }));
+    render(<EditorShell />);
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Sign in" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(signInNote)).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.map((call) => call.path)).toEqual(["/api/session"]);
+    expect(
+      screen.queryByRole("button", { name: "Accept invitation" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Your canvas" }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector("[data-canvas-surface]")).toBeNull();
+    expect(document.body.textContent).not.toContain("pci_");
+    // Signing in does not navigate, so the fragment is still there.
+    expect(window.location.hash).toBe(`#${token}`);
+  });
+
+  it("shows no invitation note without a link", async () => {
+    replies.push(json(401, { error: "unauthorized" }));
+    render(<EditorShell />);
+
+    await screen.findByRole("heading", { level: 2, name: "Sign in" });
+    expect(screen.queryByText(signInNote)).not.toBeInTheDocument();
+  });
+
+  it("accepts an invitation after an explicit click and shows the moderated canvas", async () => {
+    window.history.replaceState(null, "", `/editor/#${token}`);
+    replies.push(session(false), forbidden, noMemberships);
+    render(<EditorShell />);
+
+    expect(
+      await screen.findByText(
+        "You were invited to moderate a streamer's canvas.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.map((call) => call.path)).not.toContain(
+      "/api/invitations/accept",
+    );
+
+    replies.push(json(200, moderated), oneMembership, moderatedCanvas);
+    fireEvent.click(screen.getByRole("button", { name: "Accept invitation" }));
+
+    expect(
+      await screen.findByText("You are now a moderator of this canvas."),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("1280 × 720")).toBeInTheDocument();
+    expect(calls.slice(3).map((call) => [call.method, call.path])).toEqual([
+      ["POST", "/api/invitations/accept"],
+      ["GET", "/api/memberships"],
+      [
+        "GET",
+        `/api/tenants/${moderated.tenant_id}/canvases/${moderated.canvas_id}`,
+      ],
+    ]);
+    expect(window.location.hash).toBe("");
+    expect(
+      screen.queryByRole("button", { name: "Accept invitation" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Invite moderators" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Width")).not.toBeInTheDocument();
+  });
+
+  it("shows a moderator its moderated canvas after a reload without a link", async () => {
+    replies.push(session(false), forbidden, oneMembership, moderatedCanvas);
+    render(<EditorShell />);
+
+    expect(
+      await screen.findByRole("region", { name: "Canvases you moderate" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("1280 × 720")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Accept invitation" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Width")).not.toBeInTheDocument();
+    // A moderator who owns nothing is not told its account is inactive.
+    expect(
+      screen.queryByRole("region", { name: "Your canvas" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/not active yet/)).not.toBeInTheDocument();
   });
 });

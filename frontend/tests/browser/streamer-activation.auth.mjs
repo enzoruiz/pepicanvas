@@ -1,5 +1,3 @@
-/* global process */
-
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import path from "node:path";

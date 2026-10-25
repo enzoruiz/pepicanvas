@@ -41,9 +41,37 @@ func (q *Queries) AllOutboxStats(ctx context.Context) (AllOutboxStatsRow, error)
 	return i, err
 }
 
+const insertMediaUsageOutbox = `-- name: InsertMediaUsageOutbox :exec
+INSERT INTO canvas_outbox (tenant_id, canvas_id, operation_id, correlation_id, kind, mutation, object_id, z, created_at, next_attempt_at)
+VALUES ($1, $2, $3, $4,
+    'media_usage', $5, '', 0, $6, $6)
+`
+
+type InsertMediaUsageOutboxParams struct {
+	TenantID      string
+	CanvasID      string
+	OperationID   string
+	CorrelationID pgtype.Text
+	Usage         []byte
+	CreatedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) InsertMediaUsageOutbox(ctx context.Context, arg InsertMediaUsageOutboxParams) error {
+	_, err := q.db.Exec(ctx, insertMediaUsageOutbox,
+		arg.TenantID,
+		arg.CanvasID,
+		arg.OperationID,
+		arg.CorrelationID,
+		arg.Usage,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 INSERT INTO canvas_outbox (tenant_id, canvas_id, revision, operation_id, correlation_id, kind, mutation, object_id, z, created_at, next_attempt_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+VALUES ($1, $2, $3::bigint, $4, $5,
+    $6, $7, $8, $9, $10, $10)
 `
 
 type InsertOutboxEventParams struct {
@@ -59,6 +87,7 @@ type InsertOutboxEventParams struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+// Canvas mutations always have a revision; only media usage records have none.
 func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error {
 	_, err := q.db.Exec(ctx, insertOutboxEvent,
 		arg.TenantID,
@@ -91,7 +120,7 @@ type ListOutboxHeadsRow struct {
 	ID            int64
 	TenantID      string
 	CanvasID      string
-	Revision      int64
+	Revision      pgtype.Int8
 	CorrelationID pgtype.Text
 	Kind          string
 	Mutation      []byte
@@ -155,7 +184,7 @@ type ListPendingOutboxRow struct {
 	ID            int64
 	TenantID      string
 	CanvasID      string
-	Revision      int64
+	Revision      pgtype.Int8
 	CorrelationID pgtype.Text
 	Kind          string
 	Mutation      []byte

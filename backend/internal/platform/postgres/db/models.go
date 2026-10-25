@@ -71,7 +71,7 @@ type CanvasOutbox struct {
 	ID            int64
 	TenantID      string
 	CanvasID      string
-	Revision      int64
+	Revision      pgtype.Int8
 	OperationID   string
 	CorrelationID pgtype.Text
 	Kind          string
@@ -110,6 +110,7 @@ type InvitationOperation struct {
 	Status         pgtype.Text
 	CorrelationID  pgtype.Text
 	AcceptedAt     pgtype.Timestamptz
+	CanvasID       pgtype.Text
 }
 
 type MediaAsset struct {
@@ -154,6 +155,7 @@ type MediaUsage struct {
 	QuotaBytes    int64
 	UsedBytes     int64
 	ReservedBytes int64
+	Version       int64
 }
 
 type Membership struct {

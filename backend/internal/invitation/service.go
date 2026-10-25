@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
@@ -225,20 +227,58 @@ func (s *Service) revoke(ctx context.Context, request RevokeRequest, fingerprint
 }
 
 // Accept turns the pending invitation of request.Token into a moderator
-// membership of its tenant. Every unusable token gets the one ErrUnavailable,
-// so the answer reveals nothing about the invitation or its tenant.
+// membership of its tenant and consumes the invitation. Every unusable token
+// gets the one ErrUnavailable, so the answer reveals nothing about the
+// invitation or its tenant. A retry under the same operation ID returns the
+// first answer while it is retained, even after the link was consumed.
 func (s *Service) Accept(ctx context.Context, request AcceptRequest) (Acceptance, error) {
+	if !access.ValidOperationID(request.OperationID) {
+		return Acceptance{}, ErrInvalid
+	}
 	tokenHash, ok := hashToken(request.Token)
 	if !ok {
 		return Acceptance{}, ErrUnavailable
 	}
+	fingerprint := operationFingerprint(OperationAccept, request.AccountID, tokenHash[:])
+
+	result, err := s.accept(ctx, request, tokenHash, fingerprint)
+	if errors.Is(err, ErrOperationRetained) || errors.Is(err, ErrMemberTaken) {
+		// A concurrent acceptance committed the operation ID or a membership
+		// of this account first: replay it, or reject the second effect.
+		result, err = s.accept(ctx, request, tokenHash, fingerprint)
+		if errors.Is(err, ErrOperationRetained) {
+			return Acceptance{}, ErrOperationConflict
+		}
+		if errors.Is(err, ErrMemberTaken) {
+			return Acceptance{}, ErrUnavailable
+		}
+	}
+	return result, err
+}
+
+func (s *Service) accept(ctx context.Context, request AcceptRequest, tokenHash, fingerprint [32]byte) (Acceptance, error) {
 	now := s.now()
+	notBefore := now.Add(-OperationRetention)
 
 	var result Acceptance
 	err := s.store.InTx(ctx, func(tx Tx) error {
+		// The row lock comes first: a concurrent acceptance of the same
+		// link commits before this one reads its operation, so a retry
+		// under the same operation ID replays it.
 		stored, found, err := tx.LockInvitationByToken(ctx, tokenHash)
 		if err != nil {
 			return fmt.Errorf("invitation: lock invitation: %w", err)
+		}
+		record, retained, err := tx.Operation(ctx, request.OperationID, notBefore)
+		if err != nil {
+			return fmt.Errorf("invitation: find operation: %w", err)
+		}
+		if retained {
+			if subtle.ConstantTimeCompare(record.Fingerprint[:], fingerprint[:]) != 1 {
+				return ErrOperationConflict
+			}
+			result = record.Acceptance
+			return nil
 		}
 		if !found || !stored.Pending(now) {
 			return ErrUnavailable
@@ -258,17 +298,56 @@ func (s *Service) Accept(ctx context.Context, request AcceptRequest) (Acceptance
 			return ErrUnavailable
 		}
 		if err := tx.AddModerator(ctx, tenant.ID, request.AccountID); err != nil {
+			if errors.Is(err, ErrMemberTaken) {
+				return err
+			}
 			return fmt.Errorf("invitation: add moderator: %w", err)
 		}
 		if err := tx.MarkAccepted(ctx, stored.ID, request.AccountID, now); err != nil {
 			return fmt.Errorf("invitation: mark accepted: %w", err)
 		}
-		result = Acceptance{TenantID: tenant.ID, InvitationID: stored.ID}
-		return nil
+		result = Acceptance{TenantID: tenant.ID, CanvasID: tenant.CanvasID, InvitationID: stored.ID}
+		return s.record(ctx, tx, Record{
+			OperationID:   request.OperationID,
+			Kind:          OperationAccept,
+			OwnerID:       request.AccountID,
+			Fingerprint:   fingerprint,
+			Acceptance:    result,
+			CorrelationID: request.CorrelationID,
+			AcceptedAt:    now,
+		}, notBefore)
 	})
 	if err != nil {
 		return Acceptance{}, err
 	}
+	return result, nil
+}
+
+// Moderations lists the canvases the account moderates, by tenant ID. Each
+// membership passes TE-001 canvas view, so tenants without an active
+// subscription are left out. Owner memberships are not listed.
+func (s *Service) Moderations(ctx context.Context, account access.AccountID) ([]Moderation, error) {
+	var result []Moderation
+	err := s.store.InTx(ctx, func(tx Tx) error {
+		moderated, err := tx.ModeratedCanvases(ctx, account)
+		if err != nil {
+			return fmt.Errorf("invitation: list moderated canvases: %w", err)
+		}
+		result = make([]Moderation, 0, len(moderated))
+		for _, canvas := range moderated {
+			membership := canvas.Membership
+			if membership.Role != access.RoleModerator ||
+				access.Check(access.CanvasRequest(membership, true, membership.TenantID, access.ActionView)) != nil {
+				continue
+			}
+			result = append(result, Moderation{TenantID: membership.TenantID, CanvasID: canvas.CanvasID, Role: membership.Role})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(result, func(a, b Moderation) int { return strings.Compare(a.TenantID, b.TenantID) })
 	return result, nil
 }
 

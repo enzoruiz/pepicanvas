@@ -18,7 +18,8 @@ import (
 // MaxOutboxPage bounds the records one outbox query returns.
 const MaxOutboxPage = 1000
 
-// OutboxStore reads and settles the outbox records CanvasStore writes.
+// OutboxStore reads and settles the outbox records CanvasStore and MediaStore
+// write.
 type OutboxStore struct {
 	pool *pgxpool.Pool
 }
@@ -153,28 +154,36 @@ func toStats(row db.AllOutboxStatsRow) outbox.Stats {
 	return stats
 }
 
-// toRecord decodes a stored record. A mutation that cannot be decoded leaves
-// the event without a mutation and sets Malformed. Head rows convert to the
-// pending row type, so both queries must keep the same columns.
+// toRecord decodes a stored record. A mutation or media usage that cannot be
+// decoded leaves the event without it and sets Malformed. A media usage
+// record has no revision and sets Usage. Head rows convert to the pending row
+// type, so both queries must keep the same columns.
 func toRecord(row db.ListPendingOutboxRow) outbox.Record {
-	mutation, err := outbox.DecodeMutation(row.Kind, row.Mutation)
-	if err != nil {
-		err = fmt.Errorf("postgres: outbox record %d: %w", row.ID, err)
-	}
-	return outbox.Record{
+	record := outbox.Record{
 		ID: row.ID,
 		Event: resync.Event{
 			Key:           canvas.Key{TenantID: row.TenantID, CanvasID: row.CanvasID},
-			Mutation:      mutation,
-			Result:        canvas.Result{Revision: row.Revision, ObjectID: row.ObjectID, Z: row.Z},
 			CorrelationID: row.CorrelationID.String,
 		},
 		CreatedAt:   row.CreatedAt.Time,
 		Attempts:    int(row.Attempts),
 		NextAttempt: row.NextAttemptAt.Time,
 		LastError:   row.LastError.String,
-		Malformed:   err,
 	}
+	var err error
+	if row.Kind == outbox.KindMediaUsage {
+		var usage outbox.MediaUsage
+		if usage, err = outbox.DecodeMediaUsage(row.Mutation); err == nil {
+			record.Usage = &usage
+		}
+	} else {
+		record.Event.Result = canvas.Result{Revision: row.Revision.Int64, ObjectID: row.ObjectID, Z: row.Z}
+		record.Event.Mutation, err = outbox.DecodeMutation(row.Kind, row.Mutation)
+	}
+	if err != nil {
+		record.Malformed = fmt.Errorf("postgres: outbox record %d: %w", row.ID, err)
+	}
+	return record
 }
 
 // pageSize clamps a requested page to [1, MaxOutboxPage].

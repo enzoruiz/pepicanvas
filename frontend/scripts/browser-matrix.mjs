@@ -1,5 +1,3 @@
-/* global URL, fetch, process */
-
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { access, mkdir, readFile, rename, rm, stat } from "node:fs/promises";

@@ -15,6 +15,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/pgtest"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
+	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 )
 
 // Image is the MinIO server pinned by digest (MinIO
@@ -82,6 +84,22 @@ func Start(t testing.TB) *Server {
 		t.Fatalf("create bucket: %v", err)
 	}
 	return &Server{Endpoint: endpoint, Client: client}
+}
+
+// Storage opens the media storage adapter over Bucket with the root
+// credentials.
+func (s *Server) Storage(t testing.TB) *s3.Storage {
+	t.Helper()
+	storage, err := s3.Open(context.Background(), s3.Config{
+		Endpoint:  s.Endpoint,
+		Bucket:    Bucket,
+		AccessKey: secret.New(secret.KindPassword, AccessKey),
+		SecretKey: secret.New(secret.KindPassword, SecretKey),
+	})
+	if err != nil {
+		t.Fatalf("open S3 storage: %v", err)
+	}
+	return storage
 }
 
 // Exists reports whether key is stored in Bucket.

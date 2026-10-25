@@ -23,8 +23,9 @@ var allowRules = [...]rule{
 
 	{role: RoleModerator, resource: ResourceCanvas, action: ActionView},
 	{role: RoleModerator, resource: ResourceCanvas, action: ActionEdit},
+	// A moderator gets content permissions only: no members, invitations,
+	// subscription, OBS credential, or dimensions (US-005, US-006).
 	{role: RoleModerator, resource: ResourceMembership, action: ActionView},
-	{role: RoleModerator, resource: ResourceMembership, action: ActionAdminister, targetRoles: []Role{RoleModerator}},
 
 	{role: RoleOperator, resource: ResourceSubscription, action: ActionView},
 	{role: RoleOperator, resource: ResourceSubscription, action: ActionActivate},

@@ -244,6 +244,42 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 	for name, o := range invalidOrigins {
 		cases[name] = []string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + o}
 	}
+	// US-016 S17: media storage is configured completely or not at all, and
+	// a bad media configuration stops the process before the database is
+	// opened, without echoing a credential.
+	const (
+		accessKey = "PEPICANVAS_S3_ACCESS_KEY=s3-access-decoy"
+		secretKey = "PEPICANVAS_S3_SECRET_KEY=s3-secret-decoy"
+	)
+	s3 := []string{"PEPICANVAS_S3_ENDPOINT=127.0.0.1:1", "PEPICANVAS_S3_BUCKET=media", accessKey, secretKey}
+	invalidMedia := map[string]struct {
+		env  []string
+		want []string
+	}{
+		"partial S3": {
+			env:  []string{"PEPICANVAS_S3_ENDPOINT=127.0.0.1:1", accessKey, "PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"},
+			want: []string{"media storage is partially configured", "PEPICANVAS_S3_BUCKET", "PEPICANVAS_S3_SECRET_KEY"},
+		},
+		"S3 without a cgroup root": {
+			env:  s3,
+			want: []string{"media storage is partially configured", "PEPICANVAS_MEDIA_CGROUP_ROOT"},
+		},
+		"cgroup root without S3": {
+			env:  []string{"PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"},
+			want: []string{"media storage is partially configured", "PEPICANVAS_S3_ENDPOINT", "PEPICANVAS_S3_BUCKET", "PEPICANVAS_S3_ACCESS_KEY", "PEPICANVAS_S3_SECRET_KEY"},
+		},
+		"invalid S3 secure": {
+			env:  append([]string{"PEPICANVAS_S3_SECURE=yes", "PEPICANVAS_MEDIA_CGROUP_ROOT=/sys/fs/cgroup/pepicanvas"}, s3...),
+			want: []string{"PEPICANVAS_S3_SECURE must be true or false"},
+		},
+		"cgroup root that is not delegated": {
+			env:  append([]string{"PEPICANVAS_MEDIA_CGROUP_ROOT=" + t.TempDir()}, s3...),
+			want: []string{"media inspection containment is unavailable"},
+		},
+	}
+	for name, c := range invalidMedia {
+		cases[name] = append([]string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin}, c.env...)
+	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command(bin)
@@ -263,7 +299,60 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 				(!strings.Contains(string(out), "allowed origin must be exactly scheme://host[:port]") || strings.Contains(string(out), "127.0.0.1:1")) {
 				t.Fatalf("the origin was not rejected before the database was opened:\n%s", out)
 			}
+			if c, invalid := invalidMedia[name]; invalid {
+				for _, want := range c.want {
+					if !strings.Contains(string(out), want) {
+						t.Fatalf("output lacks %q:\n%s", want, out)
+					}
+				}
+				for _, leak := range []string{"s3-access-decoy", "s3-secret-decoy", "127.0.0.1:1/pepicanvas"} {
+					if strings.Contains(string(out), leak) {
+						t.Fatalf("output contains %q:\n%s", leak, out)
+					}
+				}
+			}
 		})
+	}
+}
+
+// US-016 S17: without object storage the server still answers the storage
+// quota of a canvas, refuses uploads with media_unavailable, and says once
+// that media is disabled.
+func TestServerServesMediaUsageWithoutObjectStorage(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	server := start(t, bin,
+		"PEPICANVAS_DATABASE_URL="+dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN="+origin,
+	)
+	alice := registerAndSignIn(t, server, "op-media-alice-01", "alice@example.com")
+	seed(t, dsn,
+		"INSERT INTO tenants (tenant_id, subscription_status) VALUES ('tenant-a', 'active')",
+		"INSERT INTO canvases (tenant_id, canvas_id) VALUES ('tenant-a', 'main')",
+		"INSERT INTO memberships (tenant_id, account_id, role) SELECT 'tenant-a', account_id, 'owner' FROM accounts WHERE email = 'alice@example.com'",
+	)
+	mediaPath := "/api/tenants/tenant-a/canvases/main/media"
+
+	res := request(t, server, http.MethodGet, mediaPath+"/usage", "", alice.cookie)
+	body, _ := io.ReadAll(res.Body)
+	const want = `{"quota_bytes":1000000000,"used_bytes":0,"reserved_bytes":0,"available_bytes":1000000000}` + "\n"
+	if res.StatusCode != http.StatusOK || string(body) != want {
+		t.Fatalf("usage = %d %s, want 200 %s", res.StatusCode, body, want)
+	}
+
+	res = requestWith(t, server, http.MethodPost, mediaPath+"/uploads?operation_id=op-media-up-01&reference_id=ref-01", "bytes", alice.cookie, alice.csrf)
+	if got := decodeBody(t, res); res.StatusCode != http.StatusServiceUnavailable || got["error"] != "media_unavailable" {
+		t.Fatalf("upload = %d %v, want 503 media_unavailable", res.StatusCode, got)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM media_operations"); n != 0 {
+		t.Fatalf("media operations after a refused upload = %d, want 0", n)
+	}
+	server.stop(t)
+
+	if n := strings.Count(server.logs.String(), `"msg":"media storage disabled"`); n != 1 {
+		t.Fatalf("media disabled logs = %d, want 1\n%s", n, server.logs)
 	}
 }
 
@@ -986,6 +1075,115 @@ func TestOwnerManagesInvitationsAcrossRestart(t *testing.T) {
 		"session token":    strings.TrimPrefix(alice.cookie, "__Host-pcs="),
 		"CSRF token":       alice.csrf,
 		"owner email":      "alice@example.com",
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}
+
+// US-005: an account accepts an owner's link over real PostgreSQL, the
+// acceptance retried after a restart replays its answer, and the new
+// moderator lists the canvas and is refused owner routes.
+func TestModeratorAcceptsAnInvitationAcrossRestart(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	env := []string{
+		"PEPICANVAS_DATABASE_URL=" + dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN=" + origin,
+	}
+
+	server := start(t, bin, env...)
+	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	bob := registerAndSignIn(t, server, "op-process-bob-001", "bob@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	res, activation := activate(t, server, operator, "op-process-act-a01", "alice@example.com")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("activate alice = %d", res.StatusCode)
+	}
+	tenantID, canvasID := activation["tenant_id"].(string), activation["canvas_id"].(string)
+	canvasPath := "/api/tenants/" + tenantID + "/canvases/" + canvasID
+
+	const token = "pci_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-c01","token":"`+token+`"}`, alice.cookie, alice.csrf); res.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d", res.StatusCode)
+	}
+
+	// S1: no session, no acceptance and no list.
+	if res := request(t, server, http.MethodPost, "/api/invitations/accept", `{"operation_id":"op-process-acc-n01","token":"`+token+`"}`, ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous accept = %d, want 401", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/memberships", "", ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous memberships = %d, want 401", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, canvasPath, "", bob.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("canvas before acceptance = %d, want 403", res.StatusCode)
+	}
+
+	accept := `{"operation_id":"op-process-acc-a01","token":"` + token + `"}`
+	res = requestWith(t, server, http.MethodPost, "/api/invitations/accept", accept, bob.cookie, bob.csrf)
+	accepted, _ := io.ReadAll(res.Body)
+	want := `{"tenant_id":"` + tenantID + `","canvas_id":"` + canvasID + `"}` + "\n"
+	if res.StatusCode != http.StatusOK || string(accepted) != want {
+		t.Fatalf("accept = %d %s, want %s", res.StatusCode, accepted, want)
+	}
+	if n := count(t, dsn, `SELECT count(*) FROM memberships WHERE tenant_id = $1 AND role = 'moderator'`, tenantID); n != 1 {
+		t.Fatalf("moderator memberships = %d, want 1", n)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	// S12: the acceptance retried after a restart returns the identical body.
+	server = start(t, bin, env...)
+	res = requestWith(t, server, http.MethodPost, "/api/invitations/accept", accept, bob.cookie, bob.csrf)
+	if again, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusOK || string(again) != string(accepted) {
+		t.Fatalf("replay after restart = %d %s, want %s", res.StatusCode, again, accepted)
+	}
+	// The consumed link under another operation is unavailable.
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations/accept", `{"operation_id":"op-process-acc-a02","token":"`+token+`"}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("consumed link = %d, want 404", res.StatusCode)
+	}
+	if n := count(t, dsn, `SELECT count(*) FROM memberships WHERE tenant_id = $1 AND role = 'moderator'`, tenantID); n != 1 {
+		t.Fatalf("moderator memberships after replay = %d, want 1", n)
+	}
+
+	// S17: the moderated canvas is listed and readable.
+	res = request(t, server, http.MethodGet, "/api/memberships", "", bob.cookie)
+	listed, _ := io.ReadAll(res.Body)
+	if want := `{"memberships":[{"tenant_id":"` + tenantID + `","canvas_id":"` + canvasID + `","role":"moderator"}]}` + "\n"; res.StatusCode != http.StatusOK || string(listed) != want {
+		t.Fatalf("memberships = %d %s, want %s", res.StatusCode, listed, want)
+	}
+	if res := request(t, server, http.MethodGet, canvasPath, "", bob.cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("moderated canvas = %d, want 200", res.StatusCode)
+	}
+
+	// S8: the moderator is refused the owner's dimensions and invitations.
+	if res := requestWith(t, server, http.MethodPut, canvasPath+"/dimensions", `{"operation_id":"op-process-dim-b01","width":1280,"height":720}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator resize = %d, want 403", res.StatusCode)
+	}
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-b01","token":"pci_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator create = %d, want 403", res.StatusCode)
+	}
+	if res := request(t, server, http.MethodGet, "/api/invitations", "", bob.cookie); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("moderator list = %d, want 403", res.StatusCode)
+	}
+	server.stop(t)
+	logs += server.logs.String()
+
+	if !strings.Contains(logs, `"msg":"invitation accepted"`) {
+		t.Fatal("no invitation accepted log")
+	}
+	for name, s := range map[string]string{
+		"invitation token": "pci_",
+		"session token":    strings.TrimPrefix(bob.cookie, "__Host-pcs="),
+		"CSRF token":       bob.csrf,
+		"moderator email":  "bob@example.com",
 	} {
 		if strings.Contains(logs, s) {
 			t.Errorf("process logs contain the %s", name)

@@ -90,6 +90,17 @@ func TestInvitationStore(t *testing.T) {
 		{"RetentionExpires", testInvitationRetentionExpiresInPostgres},
 		{"FailedStepLeavesNothingAndRetrySucceedsOnce", testFailedInvitationStepLeavesNothingAndRetrySucceedsOnce},
 		{"StoreReportsTakenTokensAndRetainedOperations", testInvitationStoreReportsTakenTokensAndRetainedOperations},
+		{"AcceptanceGrantsExactlyThatTenant", testInvitationAcceptanceGrantsExactlyThatTenant},
+		{"ConcurrentAcceptancesOfOneLinkGrantOneMembership", testConcurrentAcceptancesOfOneLinkGrantOneMembership},
+		{"ConcurrentAcceptancesUnderOneOperationGiveOneEffect", testConcurrentAcceptancesUnderOneOperationGiveOneEffect},
+		{"WaitingRetryReplaysTheHeldAcceptance", testWaitingRetryReplaysTheHeldAcceptance},
+		{"AcceptanceOperationConflicts", testInvitationAcceptanceOperationConflicts},
+		{"AcceptanceRetentionExpires", testInvitationAcceptanceRetentionExpires},
+		{"LostAcceptanceAnswerReplaysTheCommit", testLostAcceptanceAnswerReplaysTheCommit},
+		{"UnusableLinksWriteNothing", testUnusableInvitationLinksWriteNothing},
+		{"OneAccountAcceptingTwoLinksOfOneTenantGetsOneMembership", testOneAccountAcceptingTwoLinksOfOneTenantGetsOneMembership},
+		{"AcceptancesOfTwoTenantsNeverCross", testInvitationAcceptancesOfTwoTenantsNeverCross},
+		{"StoreReportsTakenMemberships", testInvitationStoreReportsTakenMemberships},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, f) })
 	}
@@ -130,8 +141,23 @@ func revokeWith(svc *invitation.Service, owner access.AccountID, op, invitationI
 	return svc.Revoke(context.Background(), invitation.RevokeRequest{OwnerID: owner, OperationID: op, InvitationID: invitationID, CorrelationID: correlation})
 }
 
+// acceptWith accepts under a new operation ID.
 func acceptWith(svc *invitation.Service, account access.AccountID, token secret.Value) (invitation.Acceptance, error) {
-	return svc.Accept(context.Background(), invitation.AcceptRequest{AccountID: account, Token: token})
+	return acceptOp(svc, account, nextInvitationOp("op-accept"), token, invitationCorrelation)
+}
+
+func acceptOp(svc *invitation.Service, account access.AccountID, op string, token secret.Value, correlation string) (invitation.Acceptance, error) {
+	return svc.Accept(context.Background(), invitation.AcceptRequest{AccountID: account, OperationID: op, Token: token, CorrelationID: correlation})
+}
+
+// canvasOf returns the canvas of a tenant.
+func canvasOf(t *testing.T, pool *pgxpool.Pool, tenantID string) string {
+	t.Helper()
+	var canvas string
+	if err := pool.QueryRow(context.Background(), "SELECT canvas_id FROM tenants WHERE tenant_id = $1", tenantID).Scan(&canvas); err != nil {
+		t.Fatalf("read canvas of %s: %v", tenantID, err)
+	}
+	return canvas
 }
 
 // invitationRows counts what invitation operations write, scoped to a tenant.
@@ -364,7 +390,7 @@ func testRevocationAndAcceptanceKeepTheFirstCommit(t *testing.T, f invitations) 
 	token = newToken(t)
 	acceptedFirst := mustCreateInvitation(t, f, owner, token)
 	accepted, err := acceptWith(f.svc, guest, token)
-	if err != nil || accepted != (invitation.Acceptance{TenantID: tenant, InvitationID: acceptedFirst.ID}) {
+	if err != nil || accepted != (invitation.Acceptance{TenantID: tenant, CanvasID: canvasOf(t, f.pool, tenant), InvitationID: acceptedFirst.ID}) {
 		t.Fatalf("Accept = %+v, %v", accepted, err)
 	}
 	if got, err := revokeWith(f.svc, owner, nextInvitationOp("op-revoke"), acceptedFirst.ID, invitationCorrelation); err != nil || got.Status != access.InvitationAccepted {
@@ -426,7 +452,7 @@ func testHeldAcceptanceMakesTheWaitingRevocationAnswerAccepted(t *testing.T, f i
 	if m, found, err := f.subs.accounts.MembershipOf(ctx, guest, tenant); err != nil || !found || m.Role != access.RoleModerator {
 		t.Fatalf("membership = %+v, %v, %v; want moderator", m, found, err)
 	}
-	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 3, moderators: 1}) {
 		t.Fatalf("rows = %+v", rows)
 	}
 }
@@ -786,27 +812,35 @@ func testFailedInvitationStepLeavesNothingAndRetrySucceedsOnce(t *testing.T, f i
 		}
 	})
 
+	// S5: a fault before the commit leaves the link pending and grants
+	// nothing; the retry under the same operation ID accepts once.
 	t.Run("accept", func(t *testing.T) {
-		for _, step := range []string{"LockInvitationByToken", "LockTenant", "IsMember", "AddModerator", "MarkAccepted", "commit"} {
+		for _, step := range []string{"LockInvitationByToken", "Operation", "LockTenant", "IsMember", "AddModerator", "MarkAccepted", "RecordOperation", "commit"} {
 			owner, tenant := seedOwner(t, f, uniqueEmail("accept-"+strings.ToLower(step)))
 			guest := seedAccount(t, f.subs, uniqueEmail("guest-"+strings.ToLower(step)))
-			token := newToken(t)
+			token, op := newToken(t), nextInvitationOp("op-fault-accept")
 			created := mustCreateInvitation(t, f, owner, token)
 			fail(f.store, step)
-			if _, err := acceptWith(f.svc, guest, token); !errors.Is(err, injected) {
+			if _, err := acceptOp(f.svc, guest, op, token, invitationCorrelation); !errors.Is(err, injected) {
 				t.Fatalf("%s: error = %v, want the injected fault", step, err)
 			}
 			if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, records: 1}) {
 				t.Fatalf("%s: failed acceptance left %+v", step, rows)
 			}
+			if _, found, err := f.subs.accounts.MembershipOf(context.Background(), guest, tenant); err != nil || found {
+				t.Fatalf("%s: membership found = %v, %v; want none", step, found, err)
+			}
 			postgres.SetInvitationFault(f.store, nil)
-			if got, err := acceptWith(f.svc, guest, token); err != nil || got.InvitationID != created.ID {
-				t.Fatalf("%s: retry = %+v, %v", step, got, err)
+			want := invitation.Acceptance{TenantID: tenant, CanvasID: canvasOf(t, f.pool, tenant), InvitationID: created.ID}
+			for range 2 {
+				if got, err := acceptOp(f.svc, guest, op, token, invitationCorrelation); err != nil || got != want {
+					t.Fatalf("%s: retry = %+v, %v; want %+v", step, got, err, want)
+				}
 			}
 			if _, err := acceptWith(f.svc, guest, token); !errors.Is(err, invitation.ErrUnavailable) {
-				t.Fatalf("%s: second acceptance: error = %v, want ErrUnavailable", step, err)
+				t.Fatalf("%s: acceptance under another operation: error = %v, want ErrUnavailable", step, err)
 			}
-			if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 1, moderators: 1}) {
+			if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
 				t.Fatalf("%s: rows after retry = %+v", step, rows)
 			}
 		}
@@ -841,6 +875,540 @@ func testInvitationStoreReportsTakenTokensAndRetainedOperations(t *testing.T, f 
 		t.Fatalf("RecordOperation of a retained ID: error = %v, want ErrOperationRetained", err)
 	}
 	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, records: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// acceptRecord is the stored row of an acceptance operation.
+type acceptRecord struct {
+	kind, owner, tenant, invitation, canvas, status, correlation string
+}
+
+func readAcceptRecord(t *testing.T, pool *pgxpool.Pool, op string) acceptRecord {
+	t.Helper()
+	var r acceptRecord
+	err := pool.QueryRow(context.Background(), `SELECT kind, owner_account_id, tenant_id, invitation_id, coalesce(canvas_id, ''), coalesce(status, ''), coalesce(correlation_id, '')
+		FROM invitation_operations WHERE operation_id = $1 AND created_at IS NULL AND expires_at IS NULL`, op).
+		Scan(&r.kind, &r.owner, &r.tenant, &r.invitation, &r.canvas, &r.status, &r.correlation)
+	if err != nil {
+		t.Fatalf("read record %s: %v", op, err)
+	}
+	return r
+}
+
+func testInvitationAcceptanceGrantsExactlyThatTenant(t *testing.T, f invitations) {
+	ctx := context.Background()
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	_, otherTenant := seedOwner(t, f, uniqueEmail("other-owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	created := mustCreateInvitation(t, f, owner, token)
+	pending := mustCreateInvitation(t, f, owner, newToken(t))
+	pendingRow := rowText(t, f.pool, pending.ID)
+
+	op := nextInvitationOp("op-accept")
+	got, err := acceptOp(f.svc, guest, op, token, invitationCorrelation)
+	want := invitation.Acceptance{TenantID: tenant, CanvasID: canvasOf(t, f.pool, tenant), InvitationID: created.ID}
+	if err != nil || got != want {
+		t.Fatalf("Accept = %+v, %v; want %+v", got, err, want)
+	}
+	if m, found, err := f.subs.accounts.MembershipOf(ctx, guest, tenant); err != nil || !found || m.Role != access.RoleModerator {
+		t.Fatalf("membership = %+v, %v, %v; want moderator", m, found, err)
+	}
+	if _, found, err := f.subs.accounts.MembershipOf(ctx, guest, otherTenant); err != nil || found {
+		t.Fatalf("membership in the other tenant found = %v, %v; want none", found, err)
+	}
+	if n := count(t, f.pool, "SELECT count(*) FROM invitations WHERE invitation_id = $1 AND accepted_by = $2 AND accepted_at = $3 AND revoked_at IS NULL",
+		created.ID, string(guest), f.clock.Now()); n != 1 {
+		t.Fatal("the invitation was not consumed by the guest at the acceptance time")
+	}
+	if got := rowText(t, f.pool, pending.ID); got != pendingRow {
+		t.Fatalf("the other pending invitation changed: %s", got)
+	}
+	record := readAcceptRecord(t, f.pool, op)
+	if record != (acceptRecord{"accept", string(guest), tenant, created.ID, want.CanvasID, "accepted", invitationCorrelation}) {
+		t.Fatalf("record = %+v", record)
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 2, accepted: 1, records: 3, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	moderations, err := f.svc.Moderations(ctx, guest)
+	if err != nil || len(moderations) != 1 || moderations[0] != (invitation.Moderation{TenantID: tenant, CanvasID: want.CanvasID, Role: access.RoleModerator}) {
+		t.Fatalf("Moderations = %+v, %v", moderations, err)
+	}
+	if moderations, err := f.svc.Moderations(ctx, owner); err != nil || len(moderations) != 0 {
+		t.Fatalf("owner Moderations = %+v, %v; want none", moderations, err)
+	}
+}
+
+// S3: of 16 accounts accepting one link at once, one gets the membership and
+// every other gets the one safe rejection.
+func testConcurrentAcceptancesOfOneLinkGrantOneMembership(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	token := newToken(t)
+	created := mustCreateInvitation(t, f, owner, token)
+	const n = 16
+	guests := make([]access.AccountID, n)
+	for i := range n {
+		guests[i] = seedAccount(t, f.subs, uniqueEmail("guest"))
+	}
+
+	answers := make([]invitation.Acceptance, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			<-start
+			answers[i], errs[i] = acceptWith(f.svc, guests[i], token)
+		})
+	}
+	close(start)
+	wg.Wait()
+	winner := -1
+	for i := range n {
+		switch {
+		case errs[i] == nil && winner < 0 && answers[i].InvitationID == created.ID:
+			winner = i
+		case errors.Is(errs[i], invitation.ErrUnavailable) && answers[i] == (invitation.Acceptance{}):
+		default:
+			t.Fatalf("acceptance %d = %+v, %v", i, answers[i], errs[i])
+		}
+	}
+	if winner < 0 {
+		t.Fatal("no acceptance succeeded")
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if n := count(t, f.pool, "SELECT count(*) FROM memberships WHERE tenant_id = $1 AND account_id = $2 AND role = 'moderator'", tenant, string(guests[winner])); n != 1 {
+		t.Fatal("the membership is not the winner's")
+	}
+}
+
+// S7/S12: retries of one operation racing each other give one effect and
+// the same answer.
+func testConcurrentAcceptancesUnderOneOperationGiveOneEffect(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	mustCreateInvitation(t, f, owner, token)
+
+	const n = 16
+	op := nextInvitationOp("op-concurrent-accept")
+	answers := make([]invitation.Acceptance, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			<-start
+			answers[i], errs[i] = acceptOp(f.svc, guest, op, token, invitationCorrelation)
+		})
+	}
+	close(start)
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil || answers[i] != answers[0] || answers[0].TenantID != tenant {
+			t.Fatalf("acceptance %d = %+v, %v; want %+v", i, answers[i], errs[i], answers[0])
+		}
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func testInvitationAcceptanceOperationConflicts(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	other := seedAccount(t, f.subs, uniqueEmail("other"))
+	token, second := newToken(t), newToken(t)
+	mustCreateInvitation(t, f, owner, token)
+	secondInvitation := mustCreateInvitation(t, f, owner, second)
+	op := nextInvitationOp("op-accept")
+	if _, err := acceptOp(f.svc, guest, op, token, invitationCorrelation); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	before, secondRow := countInvitationRows(t, f.pool, tenant), rowText(t, f.pool, secondInvitation.ID)
+
+	for name, call := range map[string]func() error{
+		"another token":   func() error { _, err := acceptOp(f.svc, guest, op, second, invitationCorrelation); return err },
+		"another account": func() error { _, err := acceptOp(f.svc, other, op, token, invitationCorrelation); return err },
+		"revoke under the accept ID": func() error {
+			_, err := revokeWith(f.svc, owner, op, secondInvitation.ID, invitationCorrelation)
+			return err
+		},
+	} {
+		if err := call(); !errors.Is(err, invitation.ErrOperationConflict) {
+			t.Fatalf("%s: error = %v, want ErrOperationConflict", name, err)
+		}
+	}
+	if got := countInvitationRows(t, f.pool, tenant); got != before {
+		t.Fatalf("rows = %+v, want %+v", got, before)
+	}
+	if got := rowText(t, f.pool, secondInvitation.ID); got != secondRow {
+		t.Fatalf("a conflicting acceptance changed the second invitation: %s", got)
+	}
+}
+
+// S12: the operation ID replays until one microsecond before retention
+// expiry; at expiry the retry is a new acceptance of a consumed link.
+func testInvitationAcceptanceRetentionExpires(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	mustCreateInvitation(t, f, owner, token)
+	clock := &accountClock{now: f.clock.Now()}
+	svc, _ := f.service(clock.Now)
+	op := nextInvitationOp("op-accept-retention")
+	first, err := acceptOp(svc, guest, op, token, invitationCorrelation)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	clock.Advance(invitation.OperationRetention - time.Microsecond)
+	if again, err := acceptOp(svc, guest, op, token, invitationCorrelation); err != nil || again != first {
+		t.Fatalf("replay before expiry = %+v, %v; want %+v", again, err, first)
+	}
+	clock.Advance(time.Microsecond)
+	if again, err := acceptOp(svc, guest, op, token, invitationCorrelation); !errors.Is(err, invitation.ErrUnavailable) || again != (invitation.Acceptance{}) {
+		t.Fatalf("retry at expiry = %+v, %v; want ErrUnavailable", again, err)
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// S6: the commit succeeds but the answer is lost; the retry under the same
+// operation ID returns the committed answer and one membership exists.
+func testLostAcceptanceAnswerReplaysTheCommit(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	created := mustCreateInvitation(t, f, owner, token)
+	op := nextInvitationOp("op-accept-lost")
+
+	// The acceptance commits; its answer never reaches the caller.
+	if _, err := acceptOp(f.svc, guest, op, token, invitationCorrelation); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	want := invitation.Acceptance{TenantID: tenant, CanvasID: canvasOf(t, f.pool, tenant), InvitationID: created.ID}
+	for range 2 {
+		if got, err := acceptOp(f.svc, guest, op, token, "retry-correlation-0002"); err != nil || got != want {
+			t.Fatalf("retry = %+v, %v; want %+v", got, err, want)
+		}
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if record := readAcceptRecord(t, f.pool, op); record.correlation != invitationCorrelation {
+		t.Fatalf("record correlation = %q, want the first", record.correlation)
+	}
+}
+
+// S4: expired, revoked, consumed, inactive-subscription, member, and owner
+// acceptances write nothing and record no operation.
+func testUnusableInvitationLinksWriteNothing(t *testing.T, f invitations) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, owner access.AccountID, tenant string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID)
+	}{
+		{"expired", func(t *testing.T, owner access.AccountID, _ string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			created := mustCreateInvitation(t, f, owner, token)
+			svc, _ := f.service(func() time.Time { return created.ExpiresAt })
+			return svc, guest
+		}},
+		{"revoked", func(t *testing.T, owner access.AccountID, _ string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			created := mustCreateInvitation(t, f, owner, token)
+			if _, err := revokeWith(f.svc, owner, nextInvitationOp("op-revoke"), created.ID, invitationCorrelation); err != nil {
+				t.Fatal(err)
+			}
+			return f.svc, guest
+		}},
+		{"accepted", func(t *testing.T, owner access.AccountID, _ string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			mustCreateInvitation(t, f, owner, token)
+			if _, err := acceptWith(f.svc, seedAccount(t, f.subs, uniqueEmail("first")), token); err != nil {
+				t.Fatal(err)
+			}
+			return f.svc, guest
+		}},
+		{"inactive subscription", func(t *testing.T, owner access.AccountID, tenant string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			mustCreateInvitation(t, f, owner, token)
+			exec(t, f.pool, "UPDATE tenants SET subscription_status = 'inactive' WHERE tenant_id = $1", tenant)
+			return f.svc, guest
+		}},
+		{"already a moderator", func(t *testing.T, owner access.AccountID, _ string, guest access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			earlier := newToken(t)
+			mustCreateInvitation(t, f, owner, earlier)
+			if _, err := acceptWith(f.svc, guest, earlier); err != nil {
+				t.Fatal(err)
+			}
+			mustCreateInvitation(t, f, owner, token)
+			return f.svc, guest
+		}},
+		{"the owner", func(t *testing.T, owner access.AccountID, _ string, _ access.AccountID, token secret.Value) (*invitation.Service, access.AccountID) {
+			mustCreateInvitation(t, f, owner, token)
+			return f.svc, owner
+		}},
+	} {
+		owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+		guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+		token := newToken(t)
+		svc, account := tc.setup(t, owner, tenant, guest, token)
+		before := countInvitationRows(t, f.pool, tenant)
+		role, member, err := f.subs.accounts.MembershipOf(ctx, account, tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		op := nextInvitationOp("op-unusable")
+		if got, err := acceptOp(svc, account, op, token, invitationCorrelation); !errors.Is(err, invitation.ErrUnavailable) || got != (invitation.Acceptance{}) {
+			t.Fatalf("%s: Accept = %+v, %v; want ErrUnavailable", tc.name, got, err)
+		}
+		if got := countInvitationRows(t, f.pool, tenant); got != before {
+			t.Fatalf("%s: rows = %+v, want %+v", tc.name, got, before)
+		}
+		if again, found, err := f.subs.accounts.MembershipOf(ctx, account, tenant); err != nil || found != member || again != role {
+			t.Fatalf("%s: membership = %+v, %v, %v; want %+v, %v", tc.name, again, found, err, role, member)
+		}
+		if n := count(t, f.pool, "SELECT count(*) FROM invitation_operations WHERE operation_id = $1", op); n != 0 {
+			t.Fatalf("%s: the refused acceptance recorded its operation", tc.name)
+		}
+	}
+}
+
+// US-004 advisory A1: while one acceptance of an account holds its commit,
+// the same account's acceptance of another link of the tenant waits on the
+// membership key and then gets the safe rejection, not a raw error.
+func testOneAccountAcceptingTwoLinksOfOneTenantGetsOneMembership(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	first, second := newToken(t), newToken(t)
+	mustCreateInvitation(t, f, owner, first)
+	pending := mustCreateInvitation(t, f, owner, second)
+
+	heldSvc, heldStore := f.service(f.clock.Now)
+	reached, release := hold(t, heldStore, "commit")
+	held, waiting := make(chan error, 1), make(chan error, 1)
+	var answer invitation.Acceptance
+	var wg sync.WaitGroup
+	t.Cleanup(func() { release(); wg.Wait() })
+	wg.Go(func() {
+		_, err := acceptWith(heldSvc, guest, first)
+		held <- err
+	})
+	select {
+	case <-reached:
+	case err := <-held:
+		t.Fatalf("acceptance ended before commit: %v", err)
+	}
+	wg.Go(func() {
+		var err error
+		answer, err = acceptWith(f.svc, guest, second)
+		waiting <- err
+	})
+	waitForLockWait(t, f.pool)
+	release()
+	if err := <-held; err != nil {
+		t.Fatalf("held acceptance: %v", err)
+	}
+	if err := <-waiting; err != invitation.ErrUnavailable || answer != (invitation.Acceptance{}) {
+		t.Fatalf("waiting acceptance = %+v, %v; want exactly ErrUnavailable", answer, err)
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 2, accepted: 1, records: 3, moderators: 1}) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if n := count(t, f.pool, "SELECT count(*) FROM invitations WHERE invitation_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL", pending.ID); n != 1 {
+		t.Fatal("the rejected acceptance consumed its link")
+	}
+}
+
+// S9: simultaneous acceptances of two tenants' links bind each account to its
+// own tenant and canvas, and each lists only its own moderated canvas.
+func testInvitationAcceptancesOfTwoTenantsNeverCross(t *testing.T, f invitations) {
+	ctx := context.Background()
+	ownerA, tenantA := seedOwner(t, f, uniqueEmail("owner-a"))
+	ownerB, tenantB := seedOwner(t, f, uniqueEmail("owner-b"))
+	guests := []access.AccountID{seedAccount(t, f.subs, uniqueEmail("guest-a")), seedAccount(t, f.subs, uniqueEmail("guest-b"))}
+	tenants := []string{tenantA, tenantB}
+	tokens := []secret.Value{newToken(t), newToken(t)}
+	created := make([]invitation.Invitation, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, owner := range []access.AccountID{ownerA, ownerB} {
+		wg.Go(func() {
+			created[i], errs[i] = createWith(f.svc, owner, nextInvitationOp("op-two-create"), tokens[i], invitationCorrelation)
+		})
+	}
+	wg.Wait()
+	if errs[0] != nil || errs[1] != nil {
+		t.Fatalf("Create: %v, %v", errs[0], errs[1])
+	}
+	ops := []string{nextInvitationOp("op-two-accept"), nextInvitationOp("op-two-accept")}
+	answers := make([]invitation.Acceptance, 2)
+	start := make(chan struct{})
+	for i := range guests {
+		wg.Go(func() {
+			<-start
+			answers[i], errs[i] = acceptOp(f.svc, guests[i], ops[i], tokens[i], invitationCorrelation)
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	for i, tenant := range tenants {
+		canvas := canvasOf(t, f.pool, tenant)
+		want := invitation.Acceptance{TenantID: tenant, CanvasID: canvas, InvitationID: created[i].ID}
+		if errs[i] != nil || answers[i] != want {
+			t.Fatalf("Accept %d = %+v, %v; want %+v", i, answers[i], errs[i], want)
+		}
+		if record := readAcceptRecord(t, f.pool, ops[i]); record.tenant != tenant || record.canvas != canvas || record.invitation != created[i].ID {
+			t.Fatalf("record %d = %+v", i, record)
+		}
+		for j, other := range tenants {
+			m, found, err := f.subs.accounts.MembershipOf(ctx, guests[i], other)
+			if err != nil || found != (i == j) || (found && m.Role != access.RoleModerator) {
+				t.Fatalf("MembershipOf(guest %d, tenant %d) = %+v, %v, %v", i, j, m, found, err)
+			}
+		}
+		moderations, err := f.svc.Moderations(ctx, guests[i])
+		if err != nil || len(moderations) != 1 || moderations[0] != (invitation.Moderation{TenantID: tenant, CanvasID: canvas, Role: access.RoleModerator}) {
+			t.Fatalf("Moderations(guest %d) = %+v, %v", i, moderations, err)
+		}
+	}
+
+	// A moderator of both lists both by tenant ID; an inactive one drops out.
+	both := seedAccount(t, f.subs, uniqueEmail("both"))
+	for i := range tenants {
+		token := newToken(t)
+		mustCreateInvitation(t, f, []access.AccountID{ownerA, ownerB}[i], token)
+		if _, err := acceptWith(f.svc, both, token); err != nil {
+			t.Fatalf("Accept by both %d: %v", i, err)
+		}
+	}
+	sorted := append([]string(nil), tenants...)
+	if sorted[0] > sorted[1] {
+		sorted[0], sorted[1] = sorted[1], sorted[0]
+	}
+	moderations, err := f.svc.Moderations(ctx, both)
+	if err != nil || len(moderations) != 2 || moderations[0].TenantID != sorted[0] || moderations[1].TenantID != sorted[1] {
+		t.Fatalf("Moderations(both) = %+v, %v; want %v in order", moderations, err, sorted)
+	}
+	exec(t, f.pool, "UPDATE tenants SET subscription_status = 'inactive' WHERE tenant_id = $1", tenantA)
+	moderations, err = f.svc.Moderations(ctx, both)
+	if err != nil || len(moderations) != 1 || moderations[0].TenantID != tenantB {
+		t.Fatalf("Moderations(both) after deactivating A = %+v, %v; want only B", moderations, err)
+	}
+}
+
+func testInvitationStoreReportsTakenMemberships(t *testing.T, f invitations) {
+	ctx := context.Background()
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	before := countInvitationRows(t, f.pool, tenant)
+	err := f.store.InTx(ctx, func(tx invitation.Tx) error { return tx.AddModerator(ctx, tenant, owner) })
+	if !errors.Is(err, invitation.ErrMemberTaken) {
+		t.Fatalf("AddModerator of the owner: error = %v, want ErrMemberTaken", err)
+	}
+	if got := countInvitationRows(t, f.pool, tenant); got != before {
+		t.Fatalf("rows = %+v, want %+v", got, before)
+	}
+}
+
+// S12/S16: an acceptance replays across a server restart with its first
+// correlation; the records hold only the token hash.
+func TestInvitationAcceptanceReplaysAfterRestart(t *testing.T) {
+	server := pgtest.Start(t)
+	clock := newAccountClock()
+	f := openInvitations(t, server, clock)
+	ctx := context.Background()
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	created := mustCreateInvitation(t, f, owner, token)
+	op := nextInvitationOp("op-restart-accept")
+	first, err := acceptOp(f.svc, guest, op, token, invitationCorrelation)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	before := countInvitationRows(t, f.pool, tenant)
+
+	server.Restart(t)
+	f = openInvitations(t, server, clock)
+	clock.Advance(invitation.OperationRetention - time.Microsecond)
+
+	if again, err := acceptOp(f.svc, guest, op, token, "retry-correlation-0002"); err != nil || again != first {
+		t.Fatalf("retry after restart = %+v, %v; want %+v", again, err, first)
+	}
+	if _, err := acceptOp(f.svc, guest, op, newToken(t), invitationCorrelation); !errors.Is(err, invitation.ErrOperationConflict) {
+		t.Fatalf("another token under the operation: error = %v, want ErrOperationConflict", err)
+	}
+	if got := countInvitationRows(t, f.pool, tenant); got != before {
+		t.Fatalf("rows = %+v, want %+v", got, before)
+	}
+	if record := readAcceptRecord(t, f.pool, op); record.correlation != invitationCorrelation || record.invitation != created.ID {
+		t.Fatalf("record = %+v, want the first correlation", record)
+	}
+	if m, found, err := f.subs.accounts.MembershipOf(ctx, guest, tenant); err != nil || !found || m.Role != access.RoleModerator {
+		t.Fatalf("membership after restart = %+v, %v, %v", m, found, err)
+	}
+	if moderations, err := f.svc.Moderations(ctx, guest); err != nil || len(moderations) != 1 || moderations[0].TenantID != tenant {
+		t.Fatalf("Moderations after restart = %+v, %v", moderations, err)
+	}
+
+	body := strings.TrimPrefix(token.Reveal(), "pci_")
+	var stored string
+	if err := f.pool.QueryRow(ctx, `SELECT concat_ws(',',
+		(SELECT string_agg(row_to_json(i)::text, ',') FROM invitations i),
+		(SELECT string_agg(row_to_json(o)::text, ',') FROM invitation_operations o),
+		(SELECT string_agg(row_to_json(m)::text, ',') FROM memberships m))`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored, body) {
+		t.Fatal("a stored row contains the token")
+	}
+}
+
+// S6/S7: a retry that waits on the invitation lock while the first attempt
+// commits reads the operation after the wait and replays the committed answer.
+func testWaitingRetryReplaysTheHeldAcceptance(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	guest := seedAccount(t, f.subs, uniqueEmail("guest"))
+	token := newToken(t)
+	mustCreateInvitation(t, f, owner, token)
+	op := nextInvitationOp("op-accept-held")
+
+	heldSvc, heldStore := f.service(f.clock.Now)
+	reached, release := hold(t, heldStore, "commit")
+	held, waiting := make(chan error, 1), make(chan error, 1)
+	var first, retry invitation.Acceptance
+	var wg sync.WaitGroup
+	t.Cleanup(func() { release(); wg.Wait() })
+	wg.Go(func() {
+		var err error
+		first, err = acceptOp(heldSvc, guest, op, token, invitationCorrelation)
+		held <- err
+	})
+	select {
+	case <-reached:
+	case err := <-held:
+		t.Fatalf("acceptance ended before commit: %v", err)
+	}
+	wg.Go(func() {
+		var err error
+		retry, err = acceptOp(f.svc, guest, op, token, "retry-correlation-0002")
+		waiting <- err
+	})
+	waitForLockWait(t, f.pool)
+	release()
+	if err := <-held; err != nil {
+		t.Fatalf("held acceptance: %v", err)
+	}
+	if err := <-waiting; err != nil || retry != first || first.TenantID != tenant {
+		t.Fatalf("waiting retry = %+v, %v; want %+v", retry, err, first)
+	}
+	if rows := countInvitationRows(t, f.pool, tenant); rows != (invitationRows{invitations: 1, accepted: 1, records: 2, moderators: 1}) {
 		t.Fatalf("rows = %+v", rows)
 	}
 }

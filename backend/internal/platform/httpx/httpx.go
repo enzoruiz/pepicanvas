@@ -100,6 +100,21 @@ const (
 	ErrIdentityTaken ErrorCode = "identity_taken"
 	ErrRateLimited   ErrorCode = "rate_limited"
 	ErrInternal      ErrorCode = "internal"
+
+	// Media upload codes (US-016). ErrLengthRequired answers an upload
+	// without an exact Content-Length; ErrQuotaExceeded one that does not
+	// fit the canvas quota; ErrMediaRejected one that inspection rejected,
+	// with its closed rejection code as the reason; ErrUploadInProgress a
+	// retry of an upload that has not finished; ErrReferenceExists a
+	// reference ID already in use; ErrUploadFailed a storage or inspection
+	// failure; ErrMediaUnavailable a server without media storage.
+	ErrLengthRequired   ErrorCode = "length_required"
+	ErrQuotaExceeded    ErrorCode = "quota_exceeded"
+	ErrMediaRejected    ErrorCode = "media_rejected"
+	ErrUploadInProgress ErrorCode = "upload_in_progress"
+	ErrReferenceExists  ErrorCode = "reference_exists"
+	ErrUploadFailed     ErrorCode = "upload_failed"
+	ErrMediaUnavailable ErrorCode = "media_unavailable"
 )
 
 var errorStatus = map[ErrorCode]int{
@@ -112,7 +127,17 @@ var errorStatus = map[ErrorCode]int{
 	ErrIdentityTaken:        http.StatusConflict,
 	ErrRateLimited:          http.StatusTooManyRequests,
 	ErrInternal:             http.StatusInternalServerError,
+	ErrLengthRequired:       http.StatusLengthRequired,
+	ErrQuotaExceeded:        http.StatusRequestEntityTooLarge,
+	ErrMediaRejected:        http.StatusUnprocessableEntity,
+	ErrUploadInProgress:     http.StatusConflict,
+	ErrReferenceExists:      http.StatusConflict,
+	ErrUploadFailed:         http.StatusBadGateway,
+	ErrMediaUnavailable:     http.StatusServiceUnavailable,
 }
+
+// maxReasonBytes bounds the public reason of an error.
+const maxReasonBytes = 64
 
 // Responder writes public errors. The internal error is logged through the
 // redacting logger and never reaches the response.
@@ -122,12 +147,40 @@ type Responder struct {
 
 type errorBody struct {
 	Error         ErrorCode `json:"error"`
+	Reason        string    `json:"reason,omitempty"`
 	CorrelationID string    `json:"correlation_id,omitempty"`
 }
 
 // Error writes code with its fixed status and logs err with the correlation ID.
 // An unknown code is treated as ErrInternal.
 func (rs Responder) Error(w http.ResponseWriter, r *http.Request, code ErrorCode, err error) {
+	rs.write(w, r, code, "", err)
+}
+
+// ErrorWithReason writes code like Error and adds reason, a category of a
+// closed public vocabulary chosen by the caller, such as a media rejection
+// code. A reason that is not a short lower-case identifier is dropped, so no
+// input can be reflected through it.
+func (rs Responder) ErrorWithReason(w http.ResponseWriter, r *http.Request, code ErrorCode, reason string, err error) {
+	if !publicReason(reason) {
+		reason = ""
+	}
+	rs.write(w, r, code, reason, err)
+}
+
+func publicReason(reason string) bool {
+	if reason == "" || len(reason) > maxReasonBytes {
+		return false
+	}
+	for i := 0; i < len(reason); i++ {
+		if (reason[i] < 'a' || reason[i] > 'z') && reason[i] != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func (rs Responder) write(w http.ResponseWriter, r *http.Request, code ErrorCode, reason string, err error) {
 	status, ok := errorStatus[code]
 	if !ok {
 		code, status = ErrInternal, errorStatus[ErrInternal]
@@ -152,7 +205,7 @@ func (rs Responder) Error(w http.ResponseWriter, r *http.Request, code ErrorCode
 	h.Set("Content-Type", "application/json")
 	h.Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: code, CorrelationID: id.String()})
+	_ = json.NewEncoder(w).Encode(errorBody{Error: code, Reason: reason, CorrelationID: id.String()})
 }
 
 // Recover turns a handler panic into a generic internal error. The panic value

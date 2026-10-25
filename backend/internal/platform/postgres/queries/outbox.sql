@@ -1,6 +1,13 @@
 -- name: InsertOutboxEvent :exec
+-- Canvas mutations always have a revision; only media usage records have none.
 INSERT INTO canvas_outbox (tenant_id, canvas_id, revision, operation_id, correlation_id, kind, mutation, object_id, z, created_at, next_attempt_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10);
+VALUES (sqlc.arg(tenant_id), sqlc.arg(canvas_id), sqlc.arg(revision)::bigint, sqlc.arg(operation_id), sqlc.arg(correlation_id),
+    sqlc.arg(kind), sqlc.arg(mutation), sqlc.arg(object_id), sqlc.arg(z), sqlc.arg(created_at), sqlc.arg(created_at));
+
+-- name: InsertMediaUsageOutbox :exec
+INSERT INTO canvas_outbox (tenant_id, canvas_id, operation_id, correlation_id, kind, mutation, object_id, z, created_at, next_attempt_at)
+VALUES (sqlc.arg(tenant_id), sqlc.arg(canvas_id), sqlc.arg(operation_id), sqlc.arg(correlation_id),
+    'media_usage', sqlc.arg(usage), '', 0, sqlc.arg(created_at), sqlc.arg(created_at));
 
 -- name: ListPendingOutbox :many
 SELECT id, tenant_id, canvas_id, revision, correlation_id, kind, mutation, object_id, z, created_at, attempts, next_attempt_at, last_error

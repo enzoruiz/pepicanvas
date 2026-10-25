@@ -38,11 +38,14 @@ interface PendingRegistration {
 interface AuthGateProps {
   children: (session: Session) => ReactNode;
   newOperationId?: () => string;
+  // Fixed text shown next to the sign-in and registration forms.
+  note?: string;
 }
 
 export function AuthGate({
   children,
   newOperationId = () => crypto.randomUUID(),
+  note,
 }: AuthGateProps) {
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
@@ -154,6 +157,7 @@ export function AuthGate({
   return (
     <section aria-label={registering ? "Create account" : "Sign in"}>
       <h2>{registering ? "Create account" : "Sign in"}</h2>
+      {note && <p>{note}</p>}
       {notice && <p role="status">{notice}</p>}
       <form onSubmit={(event) => void submit(event)} noValidate>
         <label>
