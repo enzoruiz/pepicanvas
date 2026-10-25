@@ -103,6 +103,13 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 		{httpx.ErrConflict, http.StatusConflict},
 		{httpx.ErrRateLimited, http.StatusTooManyRequests},
 		{httpx.ErrInternal, http.StatusInternalServerError},
+		{httpx.ErrLengthRequired, http.StatusLengthRequired},
+		{httpx.ErrQuotaExceeded, http.StatusRequestEntityTooLarge},
+		{httpx.ErrMediaRejected, http.StatusUnprocessableEntity},
+		{httpx.ErrUploadInProgress, http.StatusConflict},
+		{httpx.ErrReferenceExists, http.StatusConflict},
+		{httpx.ErrUploadFailed, http.StatusBadGateway},
+		{httpx.ErrMediaUnavailable, http.StatusServiceUnavailable},
 	}
 	for _, tc := range cases {
 		logs.Reset()
@@ -137,6 +144,63 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 		}
 		if rec2["correlation_id"] != id || rec2["error_code"] != string(tc.code) {
 			t.Errorf("%s: log record = %v, want correlation %s", tc.code, rec2, id)
+		}
+	}
+}
+
+func TestMediaCodesAreStable(t *testing.T) {
+	// The editor matches these exact public identifiers (US-016).
+	for code, want := range map[httpx.ErrorCode]string{
+		httpx.ErrLengthRequired:   "length_required",
+		httpx.ErrQuotaExceeded:    "quota_exceeded",
+		httpx.ErrMediaRejected:    "media_rejected",
+		httpx.ErrUploadInProgress: "upload_in_progress",
+		httpx.ErrReferenceExists:  "reference_exists",
+		httpx.ErrUploadFailed:     "upload_failed",
+		httpx.ErrMediaUnavailable: "media_unavailable",
+	} {
+		if string(code) != want {
+			t.Errorf("code = %q, want %q", code, want)
+		}
+	}
+}
+
+// The reason is a closed public category; anything that is not a short
+// lower-case identifier is dropped, so a caller cannot reflect input.
+func TestResponderErrorWithReasonCarriesOnlyAClosedReason(t *testing.T) {
+	token := decoyToken(t)
+	var logs bytes.Buffer
+	responder := httpx.Responder{Logger: slog.New(logging.NewHandler(slog.NewJSONHandler(&logs, nil)))}
+	for reason, want := range map[string]string{
+		"unsupported_kind":           `"reason":"unsupported_kind"`,
+		"":                           "",
+		token:                        "",
+		"Unsupported Kind":           "",
+		strings.Repeat("a", 65):      "",
+		"invalid_metadata\"x":        "",
+		"dimensions_exceeded":        `"reason":"dimensions_exceeded"`,
+		strings.Repeat("a", 64):      `"reason":"` + strings.Repeat("a", 64) + `"`,
+		"stream_count_exceeded_2":    "",
+		"frame_count_exceeded":       `"reason":"frame_count_exceeded"`,
+		"../etc":                     "",
+		"https://bucket.example.com": "",
+	} {
+		logs.Reset()
+		h := httpx.Correlate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			responder.ErrorWithReason(w, r, httpx.ErrMediaRejected, reason, errors.New("rejected "+token))
+		}))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+		id := rec.Header().Get(httpx.CorrelationHeader)
+		wantBody := fmt.Sprintf(`{"error":"media_rejected","correlation_id":%q}`, id)
+		if want != "" {
+			wantBody = fmt.Sprintf(`{"error":"media_rejected",%s,"correlation_id":%q}`, want, id)
+		}
+		if rec.Code != http.StatusUnprocessableEntity || strings.TrimSpace(rec.Body.String()) != wantBody {
+			t.Errorf("reason %q: %d %s, want 422 %s", reason, rec.Code, rec.Body.String(), wantBody)
+		}
+		if strings.Contains(rec.Body.String()+logs.String(), token) {
+			t.Errorf("reason %q leaked the decoy", reason)
 		}
 	}
 }

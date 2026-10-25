@@ -697,6 +697,7 @@ func TestSignInRateLimitPerAccountAndIP(t *testing.T) {
 		RegisterPerIP:               httpapi.Rate{Limit: 100, Window: time.Minute},
 		InvitationsPerAccount:       httpapi.DefaultLimits.InvitationsPerAccount,
 		InvitationAcceptsPerAccount: httpapi.DefaultLimits.InvitationAcceptsPerAccount,
+		UploadsPerAccount:           httpapi.DefaultLimits.UploadsPerAccount,
 	}
 	e := newEnv(t, limits)
 	e.register("op-http-rate-00001", "alice@example.com")
@@ -761,6 +762,7 @@ func TestDefaultLimits(t *testing.T) {
 		RegisterPerIP:               httpapi.Rate{Limit: 10, Window: time.Hour},
 		InvitationsPerAccount:       httpapi.Rate{Limit: 20, Window: time.Hour},
 		InvitationAcceptsPerAccount: httpapi.Rate{Limit: 20, Window: time.Hour},
+		UploadsPerAccount:           httpapi.Rate{Limit: 60, Window: time.Hour},
 	}
 	if httpapi.DefaultLimits != want {
 		t.Fatalf("DefaultLimits = %+v", httpapi.DefaultLimits)
@@ -796,6 +798,7 @@ func TestSecretsNeverReachLogsOrErrorBodies(t *testing.T) {
 		RegisterPerIP:               httpapi.Rate{Limit: 100, Window: time.Minute},
 		InvitationsPerAccount:       httpapi.DefaultLimits.InvitationsPerAccount,
 		InvitationAcceptsPerAccount: httpapi.DefaultLimits.InvitationAcceptsPerAccount,
+		UploadsPerAccount:           httpapi.DefaultLimits.UploadsPerAccount,
 	})
 	e.register("op-http-secrets-01", "alice@example.com")
 	alice := e.signIn("alice@example.com")

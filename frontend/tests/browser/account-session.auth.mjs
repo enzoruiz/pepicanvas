@@ -1,5 +1,3 @@
-/* global document, URL */
-
 import { randomBytes } from "node:crypto";
 
 import { expect, test } from "@playwright/test";

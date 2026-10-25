@@ -1,12 +1,10 @@
-/* global console, process, setTimeout */
-
-// Runs the US-001, US-002, US-004, and US-007 end-to-end scenarios on every
-// browser of the support matrix against a disposable PostgreSQL container and the
-// real Go server, which serves the production frontend build. The scenarios
-// get the database URL in PEPICANVAS_E2E_DATABASE_URL, which the server and
-// the host-side `server grant-operator` command share. Each spec file runs
-// in its own Playwright invocation, so it gets a fresh server whose per-IP
-// rate limits are not spent by the other files.
+// Runs the US-001, US-002, US-004, US-007, and US-016 end-to-end scenarios
+// on every browser of the support matrix against a disposable PostgreSQL
+// container and the real Go server, which serves the production frontend
+// build. The scenarios get the database URL in PEPICANVAS_E2E_DATABASE_URL,
+// which the server and the host-side `server grant-operator` command share.
+// Each spec file runs in its own Playwright invocation, so it gets a fresh
+// server whose per-IP rate limits are not spent by the other files.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";

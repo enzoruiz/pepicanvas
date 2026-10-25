@@ -1,5 +1,3 @@
-/* global console, process */
-
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";

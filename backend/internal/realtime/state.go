@@ -22,16 +22,23 @@ func NewState() *State {
 
 // Decide returns the rejection reason for a command, or "" when it can be accepted.
 func (s *State) Decide(command Command) Reason {
+	if command.Kind == KindUsage {
+		return ""
+	}
 	if object, ok := s.objects[command.ObjectID]; ok && object.Deleted {
 		return ReasonObjectDeleted
 	}
 	return ""
 }
 
-// Apply folds one accepted event into the state.
+// Apply folds one accepted event into the state. A usage event only
+// advances the sequence.
 func (s *State) Apply(event Event) {
 	if event.Sequence > s.sequence {
 		s.sequence = event.Sequence
+	}
+	if event.Kind == KindUsage {
+		return
 	}
 	if current, ok := s.objects[event.ObjectID]; ok && current.Deleted {
 		return
