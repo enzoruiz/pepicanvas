@@ -357,3 +357,31 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// The fixture is shared with latency-evidence.node-test.mjs, so the Go and
+// Node readers must produce the same frontendDependencies for it.
+func TestLockPackagesSkipsLinkEntries(t *testing.T) {
+	var fixture struct {
+		Lock                 json.RawMessage     `json:"lock"`
+		FrontendDependencies []latency.Component `json:"frontendDependencies"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join("..", "..", "..", "frontend", "scripts", "testdata", "latency-lock-link.json"))), &fixture); err != nil {
+		t.Fatal(err)
+	}
+	got, err := lockPackages(fixture.Lock)
+	if err != nil {
+		t.Fatalf("lockPackages: %v", err)
+	}
+	if !reflect.DeepEqual(got, fixture.FrontendDependencies) {
+		t.Fatalf("lockPackages = %+v, want %+v", got, fixture.FrontendDependencies)
+	}
+}
+
+func TestLockPackagesRejectsAnEntryWithoutVersionOrLink(t *testing.T) {
+	for _, entry := range []string{`{}`, `{"link":false}`} {
+		_, err := lockPackages([]byte(`{"packages":{"":{},"node_modules/x":` + entry + `}}`))
+		if err == nil || err.Error() != "node_modules/x has no version" {
+			t.Fatalf("lockPackages(%s) error = %v, want node_modules/x has no version", entry, err)
+		}
+	}
+}

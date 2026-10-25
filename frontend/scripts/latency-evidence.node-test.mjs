@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -95,6 +96,28 @@ test("parseLockPackages rejects empty packages and entries without version", () 
     () =>
       parseLockPackages(JSON.stringify({ packages: { "node_modules/x": {} } })),
     /node_modules\/x has no version/,
+  );
+  assert.throws(
+    () =>
+      parseLockPackages(
+        JSON.stringify({ packages: { "node_modules/x": { link: false } } }),
+      ),
+    /node_modules\/x has no version/,
+  );
+});
+
+// The same fixture backs latencycheck's TestLockPackagesSkipsLinkEntries, so
+// both readers must produce this one list.
+test("parseLockPackages skips link entries and matches the shared fixture", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("./testdata/latency-lock-link.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    parseLockPackages(JSON.stringify(fixture.lock)),
+    fixture.frontendDependencies,
   );
 });
 
