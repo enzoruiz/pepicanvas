@@ -16,7 +16,7 @@ import {
   prepareExtractedBrowser,
 } from "./browser-cache.mjs";
 import { browserCachePaths, repositoryRoot } from "./browser-matrix.mjs";
-import { buildVersions } from "./latency-evidence.mjs";
+import { buildVersions, describeExit } from "./latency-evidence.mjs";
 
 const frontendRoot = path.join(repositoryRoot, "frontend");
 const backendRoot = path.join(repositoryRoot, "backend");
@@ -151,7 +151,7 @@ async function main() {
       { cwd: backendRoot, env: goEnv, stdio: "inherit" },
     );
     if (check.error || check.status !== 0) {
-      failed.push(`latencycheck (exit ${check.status ?? check.error.message})`);
+      failed.push(`latencycheck (${describeExit(check)})`);
     }
   }
   if (failed.length > 0) {

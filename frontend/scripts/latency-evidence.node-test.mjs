@@ -6,6 +6,7 @@ import {
   assembleEvidence,
   buildVersions,
   commandPlan,
+  describeExit,
   parseGoModRequires,
   parseLockPackages,
   transmissionId,
@@ -239,4 +240,21 @@ test("assembleEvidence builds the schema object in schema order", () => {
   assert.deepEqual(evidence.transmission, transmission);
   assert.equal(evidence.versions, versions);
   assert.equal(evidence.samples, samples);
+});
+
+test("describeExit names how a child process ended", () => {
+  assert.equal(describeExit({ status: 1, signal: null }), "exit 1");
+  assert.equal(
+    describeExit({ status: null, signal: "SIGKILL" }),
+    "signal SIGKILL",
+  );
+  assert.equal(
+    describeExit({
+      status: null,
+      signal: null,
+      error: new Error("spawn go ENOENT"),
+    }),
+    "spawn go ENOENT",
+  );
+  assert.equal(describeExit({ status: null, signal: null }), "unknown");
 });

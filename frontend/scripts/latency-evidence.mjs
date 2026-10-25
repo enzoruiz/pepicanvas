@@ -194,3 +194,12 @@ export function assembleEvidence({ transmission, versions, samples }) {
     samples,
   };
 }
+
+// describeExit names how a spawnSync child ended: a killed child has a null
+// status and no error, so neither can be assumed.
+export function describeExit({ status, signal, error }) {
+  if (error) return error.message;
+  if (signal) return `signal ${signal}`;
+  if (status !== null && status !== undefined) return `exit ${status}`;
+  return "unknown";
+}
