@@ -3,17 +3,19 @@
 //
 // A sample is valid when it has at least 5 pings, no ping has a negative RTT,
 // the nearest-rank p95 of its ping RTTs is at most 100 ms, it saw no
-// disconnect, it was accepted at or after measurementStartNs, its command
-// and render correlation IDs are equal 32-character lowercase hex values, and
-// no earlier sample has the same id, operationId or sequence. An
-// invalid sample increments every reason it fails (negative RTT pings skip the
-// RTT p95 check) and is excluded from all percentiles.
+// disconnect, it was accepted at or after measurementStartNs, its command and
+// render correlation IDs are equal 32-character lowercase hex values, its
+// latency is not negative, and no earlier sample has the same id, operationId
+// or sequence. An invalid sample increments every reason it fails (negative
+// RTT pings skip the RTT p95 and latency checks) and is excluded from all
+// percentiles.
 //
-// A transmission is MEASURED only when its client is one of the pinned
-// clients, every versions field equals the pins, it has at least 100 valid
-// samples and every kind has a valid sample; otherwise it is INCONCLUSIVE with
-// the reasons, in this order: incompatible_client, version_mismatch:<field> in
-// schema field order, insufficient_samples, missing_kind:<kind> in Kinds order.
+// A transmission is MEASURED only when its scenario is Scenario, its client is
+// one of the pinned clients, every versions field equals the pins, it has at
+// least 100 valid samples and every kind has a valid sample; otherwise it is
+// INCONCLUSIVE with the reasons, in this order: unknown_scenario,
+// incompatible_client, version_mismatch:<field> in schema field order,
+// insufficient_samples, missing_kind:<kind> in Kinds order.
 package latency
 
 // Evidence is one transmission's latency evidence file.
@@ -97,6 +99,9 @@ const (
 	Inconclusive Result = "INCONCLUSIVE"
 )
 
+// Scenario is the only scenario this package evaluates.
+const Scenario = "remote-render-latency"
+
 // Kinds are the measured command kinds, in report order.
 var Kinds = []string{"create", "move", "resize", "rotate", "delete", "media"}
 
@@ -109,13 +114,14 @@ const (
 	ReasonBeforeMeasurementStart = "before_measurement_start"
 	ReasonCorrelationMismatch    = "correlation_mismatch"
 	ReasonDuplicateSample        = "duplicate_sample"
+	ReasonNegativeLatency        = "negative_latency"
 )
 
 // InvalidReasons lists every invalid sample reason in report order.
 var InvalidReasons = []string{
 	ReasonTooFewPings, ReasonNegativeRTT, ReasonRTTP95Exceeded,
 	ReasonDisconnected, ReasonBeforeMeasurementStart, ReasonCorrelationMismatch,
-	ReasonDuplicateSample,
+	ReasonDuplicateSample, ReasonNegativeLatency,
 }
 
 // Report summarizes one evaluated transmission.

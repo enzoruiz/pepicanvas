@@ -53,6 +53,9 @@ func Evaluate(evidence Evidence, pins Pins) Report {
 		report.LatencyP95Ms = &value
 	}
 
+	if evidence.Transmission.ScenarioID != Scenario {
+		report.Reasons = append(report.Reasons, "unknown_scenario")
+	}
 	if !slices.Contains(pins.Clients, evidence.Transmission.Client) {
 		report.Reasons = append(report.Reasons, "incompatible_client")
 	}
@@ -92,6 +95,9 @@ func sampleReasons(sample Sample, measurementStartNs int64) []string {
 	case len(rtts) > 0 && NearestRankP95(rtts) > maximumRTTP95Ms:
 		reasons = append(reasons, ReasonRTTP95Exceeded)
 	}
+	// A render cannot precede its acceptance, so a negative latency means the
+	// clock mapping is broken. It is undefined without a usable ping.
+	negativeLatency := len(rtts) > 0 && !negative && sampleLatencyMs(sample) < 0
 	if sample.Disconnects != 0 {
 		reasons = append(reasons, ReasonDisconnected)
 	}
@@ -100,6 +106,9 @@ func sampleReasons(sample Sample, measurementStartNs int64) []string {
 	}
 	if sample.CommandCorrelationID != sample.RenderCorrelationID || !correlationPattern.MatchString(sample.CommandCorrelationID) {
 		reasons = append(reasons, ReasonCorrelationMismatch)
+	}
+	if negativeLatency {
+		reasons = append(reasons, ReasonNegativeLatency)
 	}
 	return reasons
 }
@@ -135,7 +144,7 @@ func pingRTTs(pings []Ping) []float64 {
 }
 
 // sampleLatencyMs maps the render instant to the server clock with the offset
-// of the minimum-RTT ping (the first one on ties). The sample must be valid.
+// of the minimum-RTT ping (the first one on ties). The sample needs a ping.
 func sampleLatencyMs(sample Sample) float64 {
 	best := sample.Pings[0]
 	for _, ping := range sample.Pings[1:] {

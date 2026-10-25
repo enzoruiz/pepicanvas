@@ -218,6 +218,12 @@ func TestEvaluateSampleValidity(t *testing.T) {
 		{name: "negative rtt ping", mutate: func(s *latency.Sample, _ latency.Transmission) {
 			s.Pings[2].ClientReceivedMs = s.Pings[2].ClientSentMs - 0.5
 		}, wantReason: []string{latency.ReasonNegativeRTT}},
+		{name: "render before acceptance", mutate: func(s *latency.Sample, _ latency.Transmission) {
+			s.RenderedAtMs -= 2
+		}, wantReason: []string{latency.ReasonNegativeLatency}},
+		{name: "render at acceptance passes", mutate: func(s *latency.Sample, _ latency.Transmission) {
+			s.RenderedAtMs--
+		}},
 		{name: "every reason counted once", mutate: func(s *latency.Sample, tr latency.Transmission) {
 			s.Pings = s.Pings[:4]
 			s.Pings[0].ClientReceivedMs = s.Pings[0].ClientSentMs - 1
@@ -494,6 +500,19 @@ func TestEvaluateRepeatedMeasurementsAreInconclusive(t *testing.T) {
 	}
 	if report.InvalidByReason[latency.ReasonDuplicateSample] != 102-len(latency.Kinds) {
 		t.Fatalf("InvalidByReason = %v", report.InvalidByReason)
+	}
+}
+
+func TestEvaluateUnknownScenario(t *testing.T) {
+	value := evidence(102)
+	value.Transmission.ScenarioID = "other-scenario"
+	value.Versions.Go = "0"
+
+	report := latency.Evaluate(value, testPins())
+
+	want := []string{"unknown_scenario", "version_mismatch:go"}
+	if report.Result != latency.Inconclusive || !reflect.DeepEqual(report.Reasons, want) {
+		t.Fatalf("result = %s %v, want INCONCLUSIVE %v", report.Result, report.Reasons, want)
 	}
 }
 
