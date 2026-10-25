@@ -62,6 +62,12 @@ type probe struct {
 	mu            sync.Mutex
 	subscribers   map[*subscriber]struct{}
 	streamsClosed bool
+
+	// stampMu guards stamps, the acceptance stamp of each accepted
+	// sequence, and stampOrder, those sequences oldest first.
+	stampMu    sync.Mutex
+	stamps     map[uint64]time.Duration
+	stampOrder []uint64
 }
 
 type subscriber struct {
@@ -137,6 +143,7 @@ func newProbe(opts options) (*probe, error) {
 		mux:         http.NewServeMux(),
 		buffer:      opts.buffer,
 		subscribers: map[*subscriber]struct{}{},
+		stamps:      map[uint64]time.Duration{},
 	}
 	p.mux.HandleFunc("/probe/ping", p.ping)
 	p.mux.HandleFunc("/probe/commands", p.command)
@@ -206,7 +213,6 @@ func (p *probe) command(w http.ResponseWriter, r *http.Request) {
 		Payload:       []byte(req.Payload),
 		CorrelationID: id.String(),
 	})
-	acceptedAt := p.clock()
 	switch {
 	case errors.Is(err, realtime.ErrInvalidCommand):
 		http.Error(w, "invalid command", http.StatusBadRequest)
@@ -225,6 +231,7 @@ func (p *probe) command(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, rejectedResponse{Outcome: string(result.Outcome), Reason: string(result.Reason)})
 		return
 	}
+	acceptedAt := p.stamp(result.Sequence)
 	p.publish(result.Sequence)
 	writeJSON(w, http.StatusOK, acceptedResponse{
 		Outcome:       string(result.Outcome),
@@ -232,6 +239,29 @@ func (p *probe) command(w http.ResponseWriter, r *http.Request) {
 		AcceptedAtNs:  int64(acceptedAt),
 		CorrelationID: result.CorrelationID,
 	})
+}
+
+// stamp returns the acceptance stamp of sequence. The first acceptance reads
+// the clock; a retried operation, which the hub answers with the same
+// sequence, gets that first stamp back, so a retry never shortens the
+// measured latency. Stamps are kept as long as the hub keeps results for
+// deduplication, oldest evicted first.
+func (p *probe) stamp(sequence uint64) time.Duration {
+	p.stampMu.Lock()
+	defer p.stampMu.Unlock()
+	if at, ok := p.stamps[sequence]; ok {
+		return at
+	}
+	at := p.clock()
+	p.stamps[sequence] = at
+	p.stampOrder = append(p.stampOrder, sequence)
+	if overflow := len(p.stampOrder) - realtime.DefaultRetentionMaxOperations; overflow > 0 {
+		for _, old := range p.stampOrder[:overflow] {
+			delete(p.stamps, old)
+		}
+		p.stampOrder = append([]uint64(nil), p.stampOrder[overflow:]...)
+	}
+	return at
 }
 
 // decodeCommand reads exactly one JSON object with known fields. A set must

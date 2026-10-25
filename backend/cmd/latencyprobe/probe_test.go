@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -466,12 +467,15 @@ func TestEventsArriveInSequenceOrderWithConcurrentCommands(t *testing.T) {
 }
 
 func TestRetriedOperationIsNotBroadcastTwice(t *testing.T) {
-	h := startHarness(t, options{})
+	// The clock advances on every read, so a retry stamped anew would carry
+	// a later acceptedAtNs than the first acceptance.
+	var ticks atomic.Int64
+	h := startHarness(t, options{clock: func() time.Duration { return time.Duration(ticks.Add(1)) }})
 	s := h.subscribe(t)
 	body := `{"operationId":"op-1","objectId":"box-1","kind":"set","payload":{"op":"rotate","rotation":90}}`
 	first := h.accept(t, body)
 	second := h.accept(t, body)
-	if second.Sequence != first.Sequence || second.CorrelationID != first.CorrelationID {
+	if second != first {
 		t.Errorf("retry = %+v, first %+v", second, first)
 	}
 	if event := s.nextCanvas(t); event.Sequence != first.Sequence {
@@ -665,7 +669,7 @@ func TestNewProbeRequiresItsHost(t *testing.T) {
 
 func TestNewProbeRejectsMissingStaticDirectory(t *testing.T) {
 	for _, static := range []string{filepath.Join(t.TempDir(), "missing"), writeFile(t)} {
-		if _, err := newProbe(options{static: static}); err == nil {
+		if _, err := newProbe(options{static: static, host: "127.0.0.1:1"}); err == nil {
 			t.Errorf("newProbe(%q) succeeded", static)
 		}
 	}
