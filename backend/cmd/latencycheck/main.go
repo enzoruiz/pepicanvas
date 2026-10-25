@@ -7,7 +7,7 @@
 //
 //	<file> <transmissionId> result=<MEASURED|INCONCLUSIVE> samples=<n> valid=<n> rtt_p95_ms=<x|-> latency_p95_ms=<x|-> reasons=<comma list|->
 //	  kinds create=<n> move=<n> resize=<n> rotate=<n> delete=<n> media=<n>
-//	  invalid too_few_pings=<n> negative_rtt=<n> rtt_p95_exceeded=<n> disconnected=<n> before_measurement_start=<n> correlation_mismatch=<n>
+//	  invalid too_few_pings=<n> negative_rtt=<n> rtt_p95_exceeded=<n> disconnected=<n> before_measurement_start=<n> correlation_mismatch=<n> duplicate_sample=<n>
 //
 // Percentiles are nearest-rank p95 in milliseconds with three decimals, or "-"
 // when there is no valid sample. kinds counts valid samples per kind; invalid

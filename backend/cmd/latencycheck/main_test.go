@@ -185,7 +185,7 @@ func writeEvidence(t *testing.T, value latency.Evidence) string {
 	return writeFile(t, t.TempDir(), value.Transmission.ID+".json", string(data))
 }
 
-const zeroInvalidLine = "  invalid too_few_pings=0 negative_rtt=0 rtt_p95_exceeded=0 disconnected=0 before_measurement_start=0 correlation_mismatch=0\n"
+const zeroInvalidLine = "  invalid too_few_pings=0 negative_rtt=0 rtt_p95_exceeded=0 disconnected=0 before_measurement_start=0 correlation_mismatch=0 duplicate_sample=0\n"
 
 func TestLoadPins(t *testing.T) {
 	r := writeRepo(t)
@@ -213,7 +213,7 @@ func TestRunResults(t *testing.T) {
 	shortOut := shortPath + " tx-short result=INCONCLUSIVE samples=6 valid=5 rtt_p95_ms=10.000 latency_p95_ms=6.000" +
 		" reasons=version_mismatch:ffmpeg,insufficient_samples,missing_kind:create\n" +
 		"  kinds create=0 move=1 resize=1 rotate=1 delete=1 media=1\n" +
-		"  invalid too_few_pings=0 negative_rtt=0 rtt_p95_exceeded=0 disconnected=1 before_measurement_start=0 correlation_mismatch=0\n"
+		"  invalid too_few_pings=0 negative_rtt=0 rtt_p95_exceeded=0 disconnected=1 before_measurement_start=0 correlation_mismatch=0 duplicate_sample=0\n"
 	emptyOut := empty + " tx-empty result=INCONCLUSIVE samples=0 valid=0 rtt_p95_ms=- latency_p95_ms=-" +
 		" reasons=insufficient_samples,missing_kind:create,missing_kind:move,missing_kind:resize,missing_kind:rotate,missing_kind:delete,missing_kind:media\n" +
 		"  kinds create=0 move=0 resize=0 rotate=0 delete=0 media=0\n" + zeroInvalidLine

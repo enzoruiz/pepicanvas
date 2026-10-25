@@ -446,6 +446,57 @@ func TestEvaluateReportsEveryReasonInOrder(t *testing.T) {
 	}
 }
 
+func TestEvaluateRejectsDuplicateSamples(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		duplicate func(original latency.Sample, copy *latency.Sample)
+	}{
+		{"same sample", func(latency.Sample, *latency.Sample) {}},
+		{"same id", func(original latency.Sample, copy *latency.Sample) {
+			copy.OperationID, copy.Sequence = "op-new", 999
+		}},
+		{"same operation", func(original latency.Sample, copy *latency.Sample) {
+			copy.ID, copy.Sequence = "s-new", 999
+		}},
+		{"same sequence", func(original latency.Sample, copy *latency.Sample) {
+			copy.ID, copy.OperationID = "s-new", "op-new"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := evidence(100)
+			copy := value.Samples[0]
+			tc.duplicate(value.Samples[0], &copy)
+			value.Samples[99] = copy
+
+			report := latency.Evaluate(value, testPins())
+
+			if report.Valid != 99 || report.InvalidByReason[latency.ReasonDuplicateSample] != 1 {
+				t.Fatalf("valid = %d, invalid = %v, want 99 valid and 1 duplicate", report.Valid, report.InvalidByReason)
+			}
+			if report.Result != latency.Inconclusive || !reflect.DeepEqual(report.Reasons, []string{"insufficient_samples"}) {
+				t.Fatalf("result = %s %v, want INCONCLUSIVE [insufficient_samples]", report.Result, report.Reasons)
+			}
+		})
+	}
+}
+
+// Six real measurements repeated to reach 102 samples must never be MEASURED.
+func TestEvaluateRepeatedMeasurementsAreInconclusive(t *testing.T) {
+	value := evidence(102)
+	for i := range value.Samples {
+		value.Samples[i] = value.Samples[i%len(latency.Kinds)]
+	}
+
+	report := latency.Evaluate(value, testPins())
+
+	if report.Result != latency.Inconclusive || report.Valid != len(latency.Kinds) {
+		t.Fatalf("result = %s valid = %d, want INCONCLUSIVE with %d valid", report.Result, report.Valid, len(latency.Kinds))
+	}
+	if report.InvalidByReason[latency.ReasonDuplicateSample] != 102-len(latency.Kinds) {
+		t.Fatalf("InvalidByReason = %v", report.InvalidByReason)
+	}
+}
+
 func TestEvaluateNoValidSamples(t *testing.T) {
 	for _, total := range []int{0, 3} {
 		t.Run(fmt.Sprint(total), func(t *testing.T) {

@@ -3,8 +3,9 @@
 //
 // A sample is valid when it has at least 5 pings, no ping has a negative RTT,
 // the nearest-rank p95 of its ping RTTs is at most 100 ms, it saw no
-// disconnect, it was accepted at or after measurementStartNs and its command
-// and render correlation IDs are equal 32-character lowercase hex values. An
+// disconnect, it was accepted at or after measurementStartNs, its command
+// and render correlation IDs are equal 32-character lowercase hex values, and
+// no earlier sample has the same id, operationId or sequence. An
 // invalid sample increments every reason it fails (negative RTT pings skip the
 // RTT p95 check) and is excluded from all percentiles.
 //
@@ -107,12 +108,14 @@ const (
 	ReasonDisconnected           = "disconnected"
 	ReasonBeforeMeasurementStart = "before_measurement_start"
 	ReasonCorrelationMismatch    = "correlation_mismatch"
+	ReasonDuplicateSample        = "duplicate_sample"
 )
 
 // InvalidReasons lists every invalid sample reason in report order.
 var InvalidReasons = []string{
 	ReasonTooFewPings, ReasonNegativeRTT, ReasonRTTP95Exceeded,
 	ReasonDisconnected, ReasonBeforeMeasurementStart, ReasonCorrelationMismatch,
+	ReasonDuplicateSample,
 }
 
 // Report summarizes one evaluated transmission.

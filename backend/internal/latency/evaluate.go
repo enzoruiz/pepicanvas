@@ -27,8 +27,12 @@ func Evaluate(evidence Evidence, pins Pins) Report {
 	}
 
 	var rtts, latencies []float64
+	seen := newSeenSamples()
 	for _, sample := range evidence.Samples {
 		reasons := sampleReasons(sample, evidence.Transmission.MeasurementStartNs)
+		if seen.repeats(sample) {
+			reasons = append(reasons, ReasonDuplicateSample)
+		}
 		for _, reason := range reasons {
 			report.InvalidByReason[reason]++
 		}
@@ -98,6 +102,28 @@ func sampleReasons(sample Sample, measurementStartNs int64) []string {
 		reasons = append(reasons, ReasonCorrelationMismatch)
 	}
 	return reasons
+}
+
+// seenSamples remembers the identity of every earlier sample, so a sample
+// that repeats an id, operation or sequence is never counted as a second
+// measurement.
+type seenSamples struct {
+	ids, operations map[string]bool
+	sequences       map[int64]bool
+}
+
+func newSeenSamples() seenSamples {
+	return seenSamples{ids: map[string]bool{}, operations: map[string]bool{}, sequences: map[int64]bool{}}
+}
+
+// repeats reports whether sample shares an identity with an earlier one and
+// then records it.
+func (s seenSamples) repeats(sample Sample) bool {
+	repeated := s.ids[sample.ID] || s.operations[sample.OperationID] || s.sequences[sample.Sequence]
+	s.ids[sample.ID] = true
+	s.operations[sample.OperationID] = true
+	s.sequences[sample.Sequence] = true
+	return repeated
 }
 
 func pingRTTs(pings []Ping) []float64 {
