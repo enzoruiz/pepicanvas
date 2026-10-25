@@ -105,6 +105,17 @@ export function reduceBoxes(state: BoxState, event: CanvasEvent): BoxState {
   return { ...state, objects };
 }
 
+// applyBoxEvent folds a box event and reports whether it changed the boxes.
+// reduceBoxes returns the same state on every no-op path, so an event that
+// changed nothing has no render to mark.
+export function applyBoxEvent(
+  state: BoxState,
+  event: CanvasEvent,
+): { boxes: BoxState; changed: boolean } {
+  const boxes = reduceBoxes(state, event);
+  return { boxes, changed: boxes !== state };
+}
+
 export function mediaAction(event: CanvasEvent): "play" | "pause" | undefined {
   const payload = event.payload;
   if (payload?.op !== "media") return undefined;

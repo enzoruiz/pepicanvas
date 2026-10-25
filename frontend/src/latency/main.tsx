@@ -7,10 +7,10 @@ import { createRoot } from "react-dom/client";
 
 import { CanvasSurface } from "../canvas/CanvasSurface";
 import {
+  applyBoxEvent,
   emptyBoxes,
   mediaAction,
   parseCanvasEvent,
-  reduceBoxes,
   type CanvasEvent,
 } from "./canvasEvents";
 import { trackDisconnects } from "./disconnects";
@@ -67,10 +67,14 @@ audio.load();
 const now = () => performance.now();
 const registry = createRenderRegistry();
 
+// An event that leaves the boxes unchanged is never marked rendered, so the
+// runner's wait for it times out instead of measuring nothing.
 async function render(event: CanvasEvent): Promise<void> {
   const action = mediaAction(event);
   if (action === undefined) {
-    boxes = reduceBoxes(boxes, event);
+    const next = applyBoxEvent(boxes, event);
+    if (!next.changed) return;
+    boxes = next.boxes;
     renderBoxes();
   } else {
     await applyMedia(audio, action);

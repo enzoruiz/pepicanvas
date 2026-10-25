@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyBoxEvent,
   emptyBoxes,
   mediaAction,
   parseCanvasEvent,
@@ -198,6 +199,46 @@ describe("reduceBoxes", () => {
     expect(reduceBoxes(before, set(2, "zz", { op: "move", x: 1, y: 1 }))).toBe(
       before,
     );
+  });
+});
+
+describe("applyBoxEvent", () => {
+  const remove = (sequence: number, objectId: string): CanvasEvent => ({
+    sequence,
+    operationId: `op-${sequence}`,
+    objectId,
+    kind: "delete",
+    payload: null,
+    correlationId,
+  });
+
+  it.each([
+    ["a delete of an unknown object", remove(2, "zz")],
+    [
+      "a create with invalid geometry",
+      set(2, "b", { op: "create", x: 1, y: 2, width: "3", height: 4 }),
+    ],
+    ["an unknown op", set(2, "a", { op: "explode" })],
+  ])("reports %s as no change", (_name, event) => {
+    const before = reduceBoxes(emptyBoxes, create(1, "a"));
+
+    expect(applyBoxEvent(before, event)).toEqual({
+      boxes: before,
+      changed: false,
+    });
+  });
+
+  it.each([
+    ["a valid create", create(2, "b")],
+    ["a move", set(2, "a", { op: "move", x: 5, y: 6 })],
+    ["a delete", remove(2, "a")],
+  ])("reports %s as a change", (_name, event) => {
+    const before = reduceBoxes(emptyBoxes, create(1, "a"));
+
+    expect(applyBoxEvent(before, event)).toEqual({
+      boxes: reduceBoxes(before, event),
+      changed: true,
+    });
   });
 });
 

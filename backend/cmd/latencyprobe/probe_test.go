@@ -789,6 +789,35 @@ func TestRunServesUntilCancelledThenShutsDown(t *testing.T) {
 	h.accept(t, `{"operationId":"op-1","objectId":"box-1","kind":"delete"}`)
 	s.nextCanvas(t)
 
+	// run wires the guard to the address it listens on, not to a name for it.
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(base, "http://"))
+	foreign := []struct{ name, host, origin string }{
+		{"foreign host", "evil.example", ""},
+		{"localhost name", "localhost:" + port, ""},
+		{"hostile origin", "", "http://evil.example"},
+	}
+	for _, tc := range foreign {
+		req, err := http.NewRequest(http.MethodPost, base+"/probe/commands", strings.NewReader(`{"operationId":"op-foreign","objectId":"box-foreign","kind":"delete"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.host != "" {
+			req.Host = tc.host
+		}
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403", tc.name, resp.StatusCode)
+		}
+	}
+	s.quiet(t)
+
 	cancel()
 	s.ended(t)
 	select {
