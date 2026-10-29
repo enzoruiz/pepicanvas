@@ -8,7 +8,7 @@
 // uploads need object storage and contained inspection, and with them the
 // asset reconciler runs (TE-013). Without any media variable, uploads answer
 // media_unavailable. Shutdown stops HTTP, then the publisher and the hub,
-// then the reconciler, then the relay, then the registry.
+// then the reconciler, then the relay, then the registry, then the tracer.
 //
 // Usage:
 //
@@ -26,6 +26,9 @@
 //	PEPICANVAS_ALLOWED_ORIGIN  exact editor origin, scheme://host[:port] (required)
 //	PEPICANVAS_LISTEN_ADDR     listen address (default 127.0.0.1:8080)
 //	PEPICANVAS_STATIC_DIR      built frontend directory (optional)
+//	PEPICANVAS_TRACE_FILE      owner-only file of exported spans, one JSON
+//	                           object per line (optional; unset keeps export
+//	                           disabled and local logs correlated)
 //
 // Media storage (optional; setting any of the first six requires the five
 // without a default, or the server refuses to start):
@@ -71,6 +74,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/tracing"
 	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
@@ -170,6 +174,12 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 			return err
 		}
 	}
+	// So does an unusable trace file. The tracer stops last, after the hub.
+	tracer, stopTracer, err := tracerFromEnv(getenv, logger)
+	if err != nil {
+		return err
+	}
+	defer stopTracer()
 
 	startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
@@ -191,7 +201,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	publisher, err := outbox.NewPublisher(outbox.Config{
 		Store:  postgres.NewOutboxStore(pool),
-		Sink:   outbox.NewHubSink(hub),
+		Sink:   tracing.Sink(outbox.NewHubSink(tracing.Actor(hub, tracer)), tracer),
 		Logger: logger,
 	})
 	if err != nil {
@@ -252,6 +262,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Ingress:     in,
 		Logger:      logger,
 		Limits:      httpapi.DefaultLimits,
+		Tracer:      tracer,
 	})
 	if err != nil {
 		return err

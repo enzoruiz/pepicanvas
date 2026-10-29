@@ -13,6 +13,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 )
 
@@ -51,7 +52,8 @@ type Config struct {
 	Secure    bool
 }
 
-// Storage implements media.Storage over one bucket.
+// Storage implements media.Storage over one bucket. Every call runs in an s3
+// span of the caller's trace that records only its operation and outcome.
 type Storage struct {
 	client *minio.Client
 	bucket string
@@ -87,7 +89,9 @@ func Open(ctx context.Context, config Config) (*Storage, error) {
 // PUT is conditional: an existing object is never replaced and Put returns
 // media.ErrObjectExists. Put returns when ctx is done even if body is blocked;
 // the copy goroutine then ends when body returns from Read.
-func (s *Storage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) error {
+func (s *Storage) Put(ctx context.Context, key string, owner media.Owner, body io.Reader, size int64) (err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanS3, telemetry.Attr("operation", "put"))
+	defer func() { endSpan(span, err) }()
 	if size < 0 {
 		return fmt.Errorf("s3: negative size")
 	}
@@ -127,7 +131,7 @@ func (s *Storage) Put(ctx context.Context, key string, owner media.Owner, body i
 	}
 	// If-None-Match: * makes the store refuse to replace an existing object.
 	options.SetMatchETagExcept("*")
-	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, options)
+	_, err = s.client.PutObject(ctx, s.bucket, key, reader, size, options)
 	reader.Close()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
@@ -175,7 +179,9 @@ func copyExact(w io.Writer, body io.Reader, size int64) error {
 }
 
 // Open returns the stored bytes, or media.ErrNotFound for a missing key.
-func (s *Storage) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+func (s *Storage) Open(ctx context.Context, key string) (_ io.ReadCloser, err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanS3, telemetry.Attr("operation", "open"))
+	defer func() { endSpan(span, err) }()
 	if _, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{}); err != nil {
 		if minio.ToErrorResponse(err).Code == minio.NoSuchKey {
 			return nil, media.ErrNotFound
@@ -191,7 +197,9 @@ func (s *Storage) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 
 // Stat describes an object and its owner, or returns media.ErrNotFound for a
 // missing key. An object without valid owner metadata is unowned.
-func (s *Storage) Stat(ctx context.Context, key string) (media.Object, error) {
+func (s *Storage) Stat(ctx context.Context, key string) (_ media.Object, err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanS3, telemetry.Attr("operation", "stat"))
+	defer func() { endSpan(span, err) }()
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if minio.ToErrorResponse(err).Code == minio.NoSuchKey {
@@ -211,7 +219,9 @@ func (s *Storage) Stat(ctx context.Context, key string) (media.Object, error) {
 }
 
 // List returns up to limit objects whose keys sort after after, in key order.
-func (s *Storage) List(ctx context.Context, after string, limit int) ([]media.Object, error) {
+func (s *Storage) List(ctx context.Context, after string, limit int) (_ []media.Object, err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanS3, telemetry.Attr("operation", "list"))
+	defer func() { endSpan(span, err) }()
 	if limit <= 0 {
 		return nil, fmt.Errorf("%w: list limit must be positive", media.ErrInvalid)
 	}
@@ -243,9 +253,28 @@ func (s *Storage) List(ctx context.Context, after string, limit int) ([]media.Ob
 }
 
 // Delete removes an object. Deleting a missing key succeeds.
-func (s *Storage) Delete(ctx context.Context, key string) error {
+func (s *Storage) Delete(ctx context.Context, key string) (err error) {
+	ctx, span := telemetry.Start(ctx, telemetry.SpanS3, telemetry.Attr("operation", "delete"))
+	defer func() { endSpan(span, err) }()
 	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("s3: remove object: %w", err)
 	}
 	return nil
+}
+
+// endSpan ends the span of one storage call with its closed outcome: ok,
+// not_found, exists, or error. Keys, the bucket, and error text are never
+// exported.
+func endSpan(span *telemetry.Span, err error) {
+	switch {
+	case err == nil:
+		span.SetAttr("outcome", "ok")
+	case errors.Is(err, media.ErrNotFound):
+		span.SetAttr("outcome", "not_found")
+	case errors.Is(err, media.ErrObjectExists):
+		span.SetAttr("outcome", "exists")
+	default:
+		span.SetAttr("outcome", "error")
+	}
+	span.End(err)
 }

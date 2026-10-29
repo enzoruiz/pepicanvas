@@ -16,6 +16,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 )
 
 // DefaultReservationTTL is how long a pending upload holds its reservation
@@ -115,15 +116,19 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 // tenant whose subscription is not active returns media.ErrInactive and
 // writes nothing, except Abandon: a failed upload always releases its
 // reservation. An equal retry of a command committed before the deactivation
-// still replays its result, since a replay has no effect.
-func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (media.Result, error) {
+// still replays its result, since a replay has no effect. It runs in a
+// postgres span of the caller's trace.
+func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (_ media.Result, err error) {
+	var replay bool
+	ctx, span := telemetry.Start(ctx, telemetry.SpanPostgres, telemetry.Attr("operation", "media.apply"))
+	defer func() { endApply(span, replay, err) }()
 	if err := media.ValidateCommand(key, operation, command); err != nil {
 		return media.Result{}, err
 	}
 	fingerprint := media.Fingerprint(command)
 	var result media.Result
 	var written bool
-	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		written = false
 		q := db.New(tx)
 		locked, now, err := s.lock(ctx, q, key)
@@ -147,7 +152,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 			return media.ErrInactive
 		}
 		if err != nil || found {
-			result = replayed
+			result, replay = replayed, found
 			return err
 		}
 		usage, err := s.expire(ctx, q, key, locked, now)
