@@ -139,3 +139,11 @@ WHERE operation_id IN (
 -- name: InsertMembershipRevocation :exec
 INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, correlation_id, accepted_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+
+-- name: GetMemberAccess :one
+-- The account's role with its tenant's status and access version, read in
+-- one statement so the grant's version matches the facts it was read with.
+SELECT m.role, t.subscription_status, t.access_version
+FROM memberships m
+JOIN tenants t ON t.tenant_id = m.tenant_id
+WHERE m.tenant_id = $1 AND m.account_id = $2;

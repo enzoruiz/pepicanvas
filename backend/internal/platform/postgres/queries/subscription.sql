@@ -69,7 +69,9 @@ INSERT INTO access_cuts (tenant_id, version, correlation_id, created_at)
 VALUES ($1, $2, $3, $4);
 
 -- name: ListPendingCuts :many
-SELECT id, tenant_id, version, correlation_id, created_at
+-- Deactivation and revocation cuts share one outbox; account_id names the
+-- revoked account of a revocation cut.
+SELECT id, kind, tenant_id, account_id, version, correlation_id, created_at
 FROM access_cuts
 WHERE applied_at IS NULL
 ORDER BY id

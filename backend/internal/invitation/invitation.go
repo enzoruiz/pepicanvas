@@ -123,6 +123,13 @@ type MemberRevocationRecord struct {
 	AcceptedAt    time.Time
 }
 
+// MemberAccess is an account's membership in a tenant with the tenant's
+// subscription status and access version, read together.
+type MemberAccess struct {
+	Membership access.Membership
+	Version    uint64
+}
+
 // Invitation is what the owner sees of an invitation. It never carries the token.
 type Invitation struct {
 	ID        string
@@ -278,6 +285,10 @@ type Tx interface {
 	// RecordMemberRevocation drops records accepted at or before purgeBefore
 	// and retains record. It returns ErrOperationRetained for a retained ID.
 	RecordMemberRevocation(ctx context.Context, record MemberRevocationRecord, purgeBefore time.Time) error
+	// MemberAccess reads the account's role in the tenant with the tenant's
+	// status and access version in one statement. found is false when the
+	// account has no role there, including when the tenant does not exist.
+	MemberAccess(ctx context.Context, tenantID string, account access.AccountID) (MemberAccess, bool, error)
 }
 
 // Store runs invitation transactions.

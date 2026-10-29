@@ -277,12 +277,17 @@ func (r *CutRelay) pass() time.Duration {
 // cut settled. A cut the Cutter applied, even over its close budget, or can
 // never apply settles; any other failure leaves it pending for a retry.
 func (r *CutRelay) deliver(pending PendingCut) bool {
-	cut := revocation.Cut{
-		OperationID:   fmt.Sprintf("cut-%d", pending.ID),
-		Type:          revocation.TypeDeactivation,
-		Target:        revocation.Target{Kind: revocation.TargetTenant, TenantID: pending.TenantID},
-		Version:       pending.Version,
-		CorrelationID: pending.CorrelationID,
+	log := r.config.Logger.With(
+		slog.Int64("cut_id", pending.ID),
+		slog.String("kind", string(pending.Kind)),
+		slog.String("tenant_id", pending.TenantID),
+		slog.Uint64("version", pending.Version),
+		slog.String("correlation_id", pending.CorrelationID),
+	)
+	cut, err := pending.cut()
+	if err != nil {
+		// Applying it as anything else could cut the wrong connections.
+		return r.reject(pending, log, err)
 	}
 	ctx, cancel := context.WithTimeout(r.config.Correlate(r.abort, pending.CorrelationID), r.config.AttemptTimeout)
 	report, err := r.config.Cutter.Apply(ctx, cut)
@@ -291,12 +296,6 @@ func (r *CutRelay) deliver(pending PendingCut) bool {
 		// Close ran out of time: the cut stays pending as it was.
 		return false
 	}
-	log := r.config.Logger.With(
-		slog.Int64("cut_id", pending.ID),
-		slog.String("tenant_id", pending.TenantID),
-		slog.Uint64("version", pending.Version),
-		slog.String("correlation_id", pending.CorrelationID),
-	)
 	switch {
 	case err == nil || errors.Is(err, revocation.ErrBudgetExceeded):
 		if !r.settle(pending) {
@@ -312,16 +311,43 @@ func (r *CutRelay) deliver(pending PendingCut) bool {
 		log.Info("access cut applied", attrs...)
 	case errors.Is(err, revocation.ErrInvalidCut) || errors.Is(err, revocation.ErrOperationConflict):
 		// Retrying cannot succeed.
-		if !r.settle(pending) {
-			return false
-		}
-		r.rejected.Add(1)
-		log.Error("access cut rejected", slog.String("error", err.Error()))
+		return r.reject(pending, log, err)
 	default:
 		r.retries.Add(1)
 		log.Warn("access cut apply failed", slog.String("error", err.Error()))
 		return false
 	}
+	return true
+}
+
+// cut maps a pending cut to the registry's cut: a deactivation targets the
+// whole tenant, a revocation the revoked account in that tenant.
+func (p PendingCut) cut() (revocation.Cut, error) {
+	cut := revocation.Cut{
+		OperationID:   fmt.Sprintf("cut-%d", p.ID),
+		Version:       p.Version,
+		CorrelationID: p.CorrelationID,
+	}
+	switch p.Kind {
+	case CutDeactivation:
+		cut.Type = revocation.TypeDeactivation
+		cut.Target = revocation.Target{Kind: revocation.TargetTenant, TenantID: p.TenantID}
+	case CutRevocation:
+		cut.Type = revocation.TypeRevocation
+		cut.Target = revocation.Target{Kind: revocation.TargetAccount, TenantID: p.TenantID, ID: string(p.AccountID)}
+	default:
+		return revocation.Cut{}, fmt.Errorf("subscription: unknown cut kind %q", p.Kind)
+	}
+	return cut, nil
+}
+
+// reject settles a cut that can never be applied and logs it as an error.
+func (r *CutRelay) reject(pending PendingCut, log *slog.Logger, err error) bool {
+	if !r.settle(pending) {
+		return false
+	}
+	r.rejected.Add(1)
+	log.Error("access cut rejected", slog.String("error", err.Error()))
 	return true
 }
 

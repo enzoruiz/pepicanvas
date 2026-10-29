@@ -440,3 +440,18 @@ func (t *invitationTx) RecordMemberRevocation(ctx context.Context, record invita
 	}
 	return t.store.step(ctx, "RecordMemberRevocation")
 }
+
+func (t *invitationTx) MemberAccess(ctx context.Context, tenantID string, account access.AccountID) (invitation.MemberAccess, bool, error) {
+	row, err := t.q.GetMemberAccess(ctx, db.GetMemberAccessParams{TenantID: tenantID, AccountID: string(account)})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return invitation.MemberAccess{}, false, t.store.step(ctx, "MemberAccess")
+	}
+	if err != nil {
+		return invitation.MemberAccess{}, false, err
+	}
+	member := invitation.MemberAccess{
+		Membership: access.Membership{TenantID: tenantID, Role: access.Role(row.Role), Subscription: access.SubscriptionStatus(row.SubscriptionStatus)},
+		Version:    uint64(row.AccessVersion),
+	}
+	return member, true, t.store.step(ctx, "MemberAccess")
+}

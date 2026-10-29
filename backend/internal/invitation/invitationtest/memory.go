@@ -13,6 +13,7 @@ import (
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
 
 type state struct {
@@ -77,8 +78,12 @@ func (s state) clone() state {
 // lock steps then read the rows that transaction committed, as a PostgreSQL
 // row lock does, and the insert steps see its unique keys.
 type MemoryStore struct {
-	mu                sync.Mutex
-	state             state
+	mu    sync.Mutex
+	state state
+	// outbox holds every committed access cut in commit order, as the
+	// access_cuts table that revocations and deactivations share.
+	outbox            []subscription.PendingCut
+	applied           map[int64]time.Time
 	failures          map[string]error
 	before            map[string]func()
 	transactions      int
@@ -86,7 +91,10 @@ type MemoryStore struct {
 	operationLookups  int
 }
 
-var _ invitation.Store = (*MemoryStore)(nil)
+var (
+	_ invitation.Store      = (*MemoryStore)(nil)
+	_ subscription.CutStore = (*MemoryStore)(nil)
+)
 
 // NewMemoryStore returns an empty store.
 func NewMemoryStore() *MemoryStore {
@@ -101,6 +109,7 @@ func NewMemoryStore() *MemoryStore {
 			cuts:        map[cutKey]invitation.RevocationCut{},
 			revocations: map[string]invitation.MemberRevocationRecord{},
 		},
+		applied:  map[int64]time.Time{},
 		failures: map[string]error{},
 		before:   map[string]func(){},
 	}
@@ -212,6 +221,75 @@ func (m *MemoryStore) MemberRevocations() map[string]invitation.MemberRevocation
 	return maps.Clone(m.state.revocations)
 }
 
+// DeactivateTenant commits what a US-003 deactivation of the tenant writes to
+// the facts this store shares with it: the tenant turns inactive, its access
+// version increments, and a deactivation cut joins the outbox.
+func (m *MemoryStore) DeactivateTenant(tenantID, correlationID string, at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tenant := m.state.tenants[tenantID]
+	tenant.Status = access.SubscriptionInactive
+	m.state.tenants[tenantID] = tenant
+	m.state.versions[tenantID]++
+	m.publish(subscription.PendingCut{Kind: subscription.CutDeactivation, AccessCut: subscription.AccessCut{
+		TenantID: tenantID, Version: m.state.versions[tenantID], CorrelationID: correlationID, CreatedAt: at,
+	}})
+}
+
+// Outbox returns every committed access cut, pending or applied, in commit
+// order.
+func (m *MemoryStore) Outbox() []subscription.PendingCut {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.outbox)
+}
+
+// AppliedAt returns when the cut was settled.
+func (m *MemoryStore) AppliedAt(id int64) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	at, ok := m.applied[id]
+	return at, ok
+}
+
+// PendingCuts returns up to limit committed cuts not yet settled, oldest
+// first. FailOnce("PendingCuts", err) makes the next call fail.
+func (m *MemoryStore) PendingCuts(_ context.Context, limit int) ([]subscription.PendingCut, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("PendingCuts"); err != nil {
+		return nil, err
+	}
+	var pending []subscription.PendingCut
+	for _, cut := range m.outbox {
+		if _, settled := m.applied[cut.ID]; !settled && len(pending) < limit {
+			pending = append(pending, cut)
+		}
+	}
+	return pending, nil
+}
+
+// SettleCut marks a pending cut applied; an applied or unknown cut is
+// unchanged. FailOnce("SettleCut", err) makes the next call fail.
+func (m *MemoryStore) SettleCut(_ context.Context, id int64, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("SettleCut"); err != nil {
+		return err
+	}
+	if _, settled := m.applied[id]; !settled && id >= 1 && id <= int64(len(m.outbox)) {
+		m.applied[id] = at
+	}
+	return nil
+}
+
+// publish appends a committed cut to the outbox with the next ID. The caller
+// holds m.mu.
+func (m *MemoryStore) publish(cut subscription.PendingCut) {
+	cut.ID = int64(len(m.outbox)) + 1
+	m.outbox = append(m.outbox, cut)
+}
+
 // Records returns the committed operation records by operation ID.
 func (m *MemoryStore) Records() map[string]invitation.Record {
 	m.mu.Lock()
@@ -254,6 +332,20 @@ func (m *MemoryStore) InTx(_ context.Context, fn func(invitation.Tx) error) erro
 		return err
 	}
 	m.state.merge(base, tx.state)
+	var written []invitation.RevocationCut
+	for key, cut := range tx.state.cuts {
+		if _, ok := base.cuts[key]; !ok {
+			written = append(written, cut)
+		}
+	}
+	slices.SortFunc(written, func(a, b invitation.RevocationCut) int {
+		return cmp.Or(strings.Compare(a.TenantID, b.TenantID), cmp.Compare(a.Version, b.Version))
+	})
+	for _, cut := range written {
+		m.publish(subscription.PendingCut{Kind: subscription.CutRevocation, AccountID: cut.AccountID, AccessCut: subscription.AccessCut{
+			TenantID: cut.TenantID, Version: cut.Version, CorrelationID: cut.CorrelationID, CreatedAt: cut.CreatedAt,
+		}})
+	}
 	return nil
 }
 
@@ -605,4 +697,22 @@ func (t *memoryTx) RecordMemberRevocation(_ context.Context, record invitation.M
 	}
 	t.state.revocations[record.OperationID] = record
 	return nil
+}
+
+func (t *memoryTx) MemberAccess(_ context.Context, tenantID string, account access.AccountID) (invitation.MemberAccess, bool, error) {
+	if err := t.store.step("MemberAccess"); err != nil {
+		return invitation.MemberAccess{}, false, err
+	}
+	// A plain read sees what other transactions committed, as in READ
+	// COMMITTED.
+	committed := t.store.state
+	role, ok := committed.memberships[[2]string{tenantID, string(account)}]
+	tenant, exists := committed.tenants[tenantID]
+	if !ok || !exists {
+		return invitation.MemberAccess{}, false, nil
+	}
+	return invitation.MemberAccess{
+		Membership: access.Membership{TenantID: tenantID, Role: role, Subscription: tenant.Status},
+		Version:    committed.versions[tenantID],
+	}, true, nil
 }

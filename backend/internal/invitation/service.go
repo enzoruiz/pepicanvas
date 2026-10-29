@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 )
 
@@ -482,6 +483,35 @@ func (s *Service) revokeMember(ctx context.Context, request RevokeMemberRequest,
 		s.committed()
 	}
 	return result, nil
+}
+
+// EditorGrant returns the access facts an editor connection of the account's
+// session to the tenant's canvas is authorized with: its membership, owner or
+// moderator, read with the tenant's access version. A non-member, a revoked
+// moderator, and a member of an inactive tenant get the TE-001 denial.
+func (s *Service) EditorGrant(ctx context.Context, account access.AccountID, sessionID, tenantID string) (revocation.Grant, error) {
+	var member MemberAccess
+	var found bool
+	err := s.store.InTx(ctx, func(tx Tx) error {
+		var err error
+		if member, found, err = tx.MemberAccess(ctx, tenantID, account); err != nil {
+			return fmt.Errorf("invitation: read member access: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return revocation.Grant{}, err
+	}
+	if err := access.Check(access.CanvasRequest(member.Membership, found, tenantID, access.ActionView)); err != nil {
+		return revocation.Grant{}, err
+	}
+	return revocation.Grant{
+		TenantID:  tenantID,
+		AccountID: string(account),
+		SessionID: sessionID,
+		Client:    revocation.ClientEditor,
+		Version:   member.Version,
+	}, nil
 }
 
 // membershipRequest builds the TE-001 request for an account acting on the

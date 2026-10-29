@@ -103,6 +103,33 @@ func (q *Queries) GetInvitationOperation(ctx context.Context, arg GetInvitationO
 	return i, err
 }
 
+const getMemberAccess = `-- name: GetMemberAccess :one
+SELECT m.role, t.subscription_status, t.access_version
+FROM memberships m
+JOIN tenants t ON t.tenant_id = m.tenant_id
+WHERE m.tenant_id = $1 AND m.account_id = $2
+`
+
+type GetMemberAccessParams struct {
+	TenantID  string
+	AccountID string
+}
+
+type GetMemberAccessRow struct {
+	Role               string
+	SubscriptionStatus string
+	AccessVersion      int64
+}
+
+// The account's role with its tenant's status and access version, read in
+// one statement so the grant's version matches the facts it was read with.
+func (q *Queries) GetMemberAccess(ctx context.Context, arg GetMemberAccessParams) (GetMemberAccessRow, error) {
+	row := q.db.QueryRow(ctx, getMemberAccess, arg.TenantID, arg.AccountID)
+	var i GetMemberAccessRow
+	err := row.Scan(&i.Role, &i.SubscriptionStatus, &i.AccessVersion)
+	return i, err
+}
+
 const getMembershipRevocation = `-- name: GetMembershipRevocation :one
 SELECT owner_account_id, fingerprint, tenant_id, account_id, version, correlation_id, accepted_at
 FROM membership_revocations
