@@ -3,8 +3,8 @@
 // process it runs the outbox publisher, which delivers committed canvas
 // mutations to the realtime hub (TE-012), the live-connection registry
 // (TE-002), and the relay that applies each confirmed access cut to it
-// (US-003); cuts a stopped process left pending are applied at start, before
-// the server listens. The canvas storage quota is always served (US-016);
+// (US-003 deactivations, US-006 moderator revocations); cuts a stopped
+// process left pending are applied at start, before the server listens. The canvas storage quota is always served (US-016);
 // uploads need object storage and contained inspection, and with them the
 // asset reconciler runs (TE-013). Without any media variable, uploads answer
 // media_unavailable. Shutdown stops HTTP, then the publisher and the hub,
@@ -244,8 +244,9 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Canvases:      postgres.NewCanvasStore(pool, postgres.WithCommitted(func(canvas.Key) { publisher.Notify() })),
 		Subscriptions: subscription.NewService(subscriptions, subscription.WithCommitted(relay.Notify)),
 		Tenants:       subscriptions,
-		// The store clock keeps PostgreSQL's precision, so replayed answers match.
-		Invitations: invitation.NewService(invitations, invitation.WithClock(invitations.Now)),
+		// The store clock keeps PostgreSQL's precision, so replayed answers
+		// match. A committed moderator revocation wakes the relay (US-006).
+		Invitations: invitation.NewService(invitations, invitation.WithClock(invitations.Now), invitation.WithCommitted(relay.Notify)),
 		Media:       mediaStore,
 		Storage:     storage,
 		Inspector:   inspector,
@@ -266,9 +267,9 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if err := relay.Start(); err != nil {
 		return err
 	}
-	// Runs after the HTTP server drained, so no deactivation commits a cut
-	// the stopped relay would leave for the next start, and before the pool
-	// closes.
+	// Runs after the HTTP server drained, so no deactivation or revocation
+	// commits a cut the stopped relay would leave for the next start, and
+	// before the pool closes.
 	defer func() {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancelShutdown()
