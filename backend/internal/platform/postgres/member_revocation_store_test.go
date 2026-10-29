@@ -358,3 +358,36 @@ func testMemberRevocationWaitsForASharedTenantLock(t *testing.T, f invitations) 
 		t.Fatalf("rows = %+v", rows)
 	}
 }
+
+// A correlation longer than the stored 128 octets is ErrInvalid before any
+// write; exactly 128 octets is stored on the record and the cut.
+func testMemberRevocationRejectsAnOverlongCorrelation(t *testing.T, f invitations) {
+	owner, tenant := seedOwner(t, f, uniqueEmail("owner"))
+	moderator := seedModerator(t, f, owner, uniqueEmail("moderator"))
+	before := countRevocationRows(t, f.pool, tenant)
+
+	_, err := f.svc.RevokeMember(context.Background(), invitation.RevokeMemberRequest{
+		OwnerID: owner, OperationID: nextInvitationOp("op-revoke-long-corr"), AccountID: moderator,
+		CorrelationID: strings.Repeat("c", 129),
+	})
+	if !errors.Is(err, invitation.ErrInvalid) {
+		t.Fatalf("129-octet correlation: error = %v, want ErrInvalid", err)
+	}
+	if rows := countRevocationRows(t, f.pool, tenant); rows != before {
+		t.Fatalf("rows = %+v, want %+v", rows, before)
+	}
+
+	longest := strings.Repeat("c", 128)
+	if _, err := f.svc.RevokeMember(context.Background(), invitation.RevokeMemberRequest{
+		OwnerID: owner, OperationID: nextInvitationOp("op-revoke-max-corr"), AccountID: moderator,
+		CorrelationID: longest,
+	}); err != nil {
+		t.Fatalf("128-octet correlation: %v", err)
+	}
+	if n := count(t, f.pool, "SELECT count(*) FROM access_cuts WHERE tenant_id = $1 AND correlation_id = $2", tenant, longest); n != 1 {
+		t.Fatalf("cuts with the correlation = %d, want 1", n)
+	}
+	if n := count(t, f.pool, "SELECT count(*) FROM membership_revocations WHERE tenant_id = $1 AND correlation_id = $2", tenant, longest); n != 1 {
+		t.Fatalf("records with the correlation = %d, want 1", n)
+	}
+}

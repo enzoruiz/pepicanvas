@@ -394,7 +394,8 @@ func (s *Service) Members(ctx context.Context, owner access.AccountID) ([]Member
 // owner are ErrNotFound. A retry under the same operation ID returns the
 // first answer while it is retained.
 func (s *Service) RevokeMember(ctx context.Context, request RevokeMemberRequest) (MemberRevocation, error) {
-	if !idPattern.MatchString(string(request.AccountID)) || !access.ValidOperationID(request.OperationID) {
+	if !idPattern.MatchString(string(request.AccountID)) || !access.ValidOperationID(request.OperationID) ||
+		len(request.CorrelationID) > MaxCorrelationBytes {
 		return MemberRevocation{}, ErrInvalid
 	}
 	fingerprint := operationFingerprint(OperationRevokeMember, request.OwnerID, []byte(request.AccountID))

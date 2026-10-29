@@ -679,6 +679,9 @@ func (t *memoryTx) RecordCut(_ context.Context, cut invitation.RevocationCut) er
 	if err := t.store.step("RecordCut"); err != nil {
 		return err
 	}
+	if err := storedCorrelation(cut.CorrelationID); err != nil {
+		return err
+	}
 	t.state.cuts[cutKey{cut.TenantID, cut.Version}] = cut
 	return nil
 }
@@ -686,6 +689,9 @@ func (t *memoryTx) RecordCut(_ context.Context, cut invitation.RevocationCut) er
 func (t *memoryTx) RecordMemberRevocation(_ context.Context, record invitation.MemberRevocationRecord, purgeBefore time.Time) error {
 	t.store.operationLookups++
 	if err := t.store.step("RecordMemberRevocation"); err != nil {
+		return err
+	}
+	if err := storedCorrelation(record.CorrelationID); err != nil {
 		return err
 	}
 	for id, r := range t.state.revocations {
@@ -720,4 +726,13 @@ func (t *memoryTx) MemberAccess(_ context.Context, tenantID string, account acce
 		Membership: access.Membership{TenantID: tenantID, Role: role, Subscription: tenant.Status},
 		Version:    committed.versions[tenantID],
 	}, true, nil
+}
+
+// storedCorrelation refuses a correlation PostgreSQL's 128-octet check
+// refuses.
+func storedCorrelation(correlationID string) error {
+	if len(correlationID) > 128 {
+		return fmt.Errorf("invitationtest: correlation of %d octets", len(correlationID))
+	}
+	return nil
 }

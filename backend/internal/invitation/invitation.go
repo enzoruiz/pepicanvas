@@ -46,6 +46,9 @@ const (
 	// OperationRetention is how long an operation ID replays its answer. An
 	// operation accepted at T is retained while now < T + OperationRetention.
 	OperationRetention = 10 * time.Minute
+	// MaxCorrelationBytes bounds the correlation a revocation stores on its
+	// record and its cut, as PostgreSQL checks.
+	MaxCorrelationBytes = 128
 )
 
 // CreateRequest is one owner's request to store a client-generated token.

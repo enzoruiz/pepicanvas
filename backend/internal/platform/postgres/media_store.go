@@ -148,10 +148,15 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		// SHARE, membership FOR SHARE cannot deadlock with a revocation, which
 		// takes the tenant FOR UPDATE before the membership FOR UPDATE: whoever
 		// holds the tenant row first finishes before the other reaches the
-		// membership.
+		// membership. A missing actor never replays. On an inactive tenant
+		// the tenant decides first: the answer is media.ErrInactive, as for a
+		// member, so the denial does not depend on who acts.
 		if operation.AccountID != "" && !abandon {
 			_, err := q.LockActorMembership(ctx, db.LockActorMembershipParams{TenantID: key.TenantID, AccountID: operation.AccountID})
 			if errors.Is(err, pgx.ErrNoRows) {
+				if !accepted {
+					return media.ErrInactive
+				}
 				return access.ErrAccessDenied
 			}
 			if err != nil {

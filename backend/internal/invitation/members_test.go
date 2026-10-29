@@ -237,6 +237,7 @@ func TestMalformedRevokeMemberRequestsAreRejectedBeforeAnyTransaction(t *testing
 		"short account":        revokeMember(revokeOpID, moderatorA[1:]),
 		"upper case account":   revokeMember(revokeOpID, access.AccountID(strings.ToUpper(string(moderatorA)))),
 		"account symbols":      revokeMember(revokeOpID, moderatorA[1:]+"!"),
+		"long correlation":     withCorrelation(revokeMember(revokeOpID, moderatorA), strings.Repeat("c", 129)),
 	} {
 		if got, err := service.RevokeMember(context.Background(), request); !errors.Is(err, invitation.ErrInvalid) || got != (invitation.MemberRevocation{}) {
 			t.Fatalf("%s: RevokeMember = %+v, %v; want ErrInvalid", name, got, err)
@@ -339,5 +340,22 @@ func TestTheSameRevokeMemberOperationCommittedConcurrentlyForAnotherAccountIsACo
 	}
 	if _, ok := store.Membership(tenantA, guest); ok || len(store.Cuts()) != 1 || *committed != 1 {
 		t.Fatal("want only the committed revocation of guest")
+	}
+}
+
+func withCorrelation(request invitation.RevokeMemberRequest, correlationID string) invitation.RevokeMemberRequest {
+	request.CorrelationID = correlationID
+	return request
+}
+
+// A correlation of exactly 128 octets, the stored bound, is accepted.
+func TestRevokeMemberAcceptsTheLongestCorrelation(t *testing.T) {
+	service, store, _, _ := memberFixture(t)
+	request := withCorrelation(revokeMember(revokeOpID, moderatorA), strings.Repeat("c", 128))
+	if _, err := service.RevokeMember(context.Background(), request); err != nil {
+		t.Fatalf("RevokeMember with a 128-octet correlation: %v", err)
+	}
+	if cuts := store.Cuts(); len(cuts) != 1 || cuts[0].CorrelationID != request.CorrelationID {
+		t.Fatalf("cuts = %+v, want one with the correlation", cuts)
 	}
 }

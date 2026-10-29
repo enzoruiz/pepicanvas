@@ -105,6 +105,7 @@ func TestInvitationStore(t *testing.T) {
 		{"FailedMemberRevocationLeavesNothing", testFailedMemberRevocationLeavesNothing},
 		{"MemberRevocationReplaysConflictsAndExpires", testMemberRevocationReplaysConflictsAndExpires},
 		{"MemberRevocationRejectionsWriteNothing", testMemberRevocationRejectionsWriteNothing},
+		{"MemberRevocationRejectsAnOverlongCorrelation", testMemberRevocationRejectsAnOverlongCorrelation},
 		{"MemberRevocationOfTwoTenantsNeverCross", testMemberRevocationOfTwoTenantsNeverCross},
 		{"ConcurrentMemberRevocationsGiveOneEffect", testConcurrentMemberRevocationsGiveOneEffect},
 		{"MemberRevocationWaitsForASharedTenantLock", testMemberRevocationWaitsForASharedTenantLock},

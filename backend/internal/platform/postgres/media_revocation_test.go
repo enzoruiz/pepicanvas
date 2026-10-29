@@ -27,6 +27,7 @@ func TestMediaCommandsAndMemberRevocation(t *testing.T) {
 		{"CommandWaitingBehindTheRevocationIsRejected", testMediaCommandWaitingBehindTheRevocationIsRejected},
 		{"RevokedActorWritesNothingAndReplaysNothing", testRevokedActorWritesNothingAndReplaysNothing},
 		{"RevocationInOneTenantKeepsTheOther", testMediaRevocationInOneTenantKeepsTheOther},
+		{"InactiveTenantTakesPrecedenceOverAMissingActor", testInactiveTenantTakesPrecedenceOverAMissingActor},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, f) })
 	}
@@ -289,5 +290,39 @@ func testMediaRevocationInOneTenantKeepsTheOther(t *testing.T, f invitations) {
 	}
 	if rows := countRevocationRows(t, f.pool, tenantB); rows != (revocationRows{moderators: 1, version: 1}) {
 		t.Fatalf("B rows = %+v", rows)
+	}
+}
+
+// A tenant whose subscription is inactive answers media.ErrInactive whether
+// or not the actor is still a member: the dead tenant decides first, and
+// neither case writes or replays.
+func testInactiveTenantTakesPrecedenceOverAMissingActor(t *testing.T, f invitations) {
+	owner, moderator, store, key, assetID := moderatedCanvas(t, f)
+	retained := actedBy(moderator)
+	if _, err := store.Apply(context.Background(), key, retained, media.Attach{AssetID: assetID, ReferenceID: "reference-before"}); err != nil {
+		t.Fatalf("Attach before the revocation: %v", err)
+	}
+	if _, err := revokeMemberWith(f.svc, owner, nextInvitationOp("op-revoke-media-inactive"), moderator); err != nil {
+		t.Fatalf("RevokeMember: %v", err)
+	}
+	if _, err := f.pool.Exec(context.Background(), "UPDATE tenants SET subscription_status = 'inactive' WHERE tenant_id = $1", key.TenantID); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	before := mediaWrites(t, f.pool, key)
+
+	for name, apply := range map[string]struct {
+		operation media.Operation
+		command   media.Command
+	}{
+		"revoked actor":             {actedBy(moderator), media.Attach{AssetID: assetID, ReferenceID: "reference-after"}},
+		"revoked actor equal retry": {retained, media.Attach{AssetID: assetID, ReferenceID: "reference-before"}},
+		"owner still a member":      {actedBy(owner), media.Attach{AssetID: assetID, ReferenceID: "reference-owner"}},
+	} {
+		if _, err := store.Apply(context.Background(), key, apply.operation, apply.command); !errors.Is(err, media.ErrInactive) {
+			t.Fatalf("%s on an inactive tenant: error = %v, want media.ErrInactive", name, err)
+		}
+	}
+	if after := mediaWrites(t, f.pool, key); after != before {
+		t.Fatalf("writes changed:\n%s\nwant\n%s", after, before)
 	}
 }
