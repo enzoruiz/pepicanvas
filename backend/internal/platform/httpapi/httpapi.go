@@ -197,6 +197,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/uploads", in.Route(ingress.Session, http.HandlerFunc(a.uploadMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references", in.Route(ingress.Session, http.HandlerFunc(a.attachMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/detach", in.Route(ingress.Session, http.HandlerFunc(a.detachMedia)))
+	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/content", a.mediaContent)
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/locks", a.listLocks)
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions", in.Route(ingress.Session, http.HandlerFunc(a.openLockSession)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}/heartbeat", in.Route(ingress.Session, http.HandlerFunc(a.heartbeatLock)))

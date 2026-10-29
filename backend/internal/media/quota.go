@@ -216,6 +216,9 @@ type Store interface {
 	Apply(ctx context.Context, key CanvasKey, operation Operation, command Command) (Result, error)
 	// Ready returns a ready asset, or ErrNotFound for any other state.
 	Ready(ctx context.Context, key CanvasKey, assetID string) (Asset, error)
+	// ReadyReference returns the ready asset a reference of the canvas names,
+	// or ErrNotFound for a missing reference or an asset in any other state.
+	ReadyReference(ctx context.Context, key CanvasKey, referenceID string) (Asset, error)
 	// Collect releases expired reservations and returns up to limit assets
 	// whose stored bytes must be deleted.
 	Collect(ctx context.Context, limit int) ([]Garbage, error)

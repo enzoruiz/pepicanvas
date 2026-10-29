@@ -266,6 +266,33 @@ func (s *MediaStore) Ready(ctx context.Context, key media.CanvasKey, assetID str
 	}, nil
 }
 
+// ReadyReference returns the ready asset that referenceID names in the
+// canvas of key. A missing reference, one of another canvas, or an asset that
+// is not ready is ErrNotFound.
+func (s *MediaStore) ReadyReference(ctx context.Context, key media.CanvasKey, referenceID string) (media.Asset, error) {
+	if err := media.ValidateKey(key); err != nil {
+		return media.Asset{}, err
+	}
+	if referenceID == "" || len(referenceID) > media.MaxIdentifierBytes {
+		return media.Asset{}, fmt.Errorf("%w: reference identifier must have 1 to %d bytes", media.ErrInvalid, media.MaxIdentifierBytes)
+	}
+	row, err := db.New(s.pool).GetReadyReference(ctx, db.GetReadyReferenceParams{TenantID: key.TenantID, CanvasID: key.CanvasID, ReferenceID: referenceID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return media.Asset{}, media.ErrNotFound
+	}
+	if err != nil {
+		return media.Asset{}, wrapMedia("read referenced asset", err)
+	}
+	return media.Asset{
+		ID:            row.AssetID,
+		State:         media.StateReady,
+		Kind:          media.Kind(row.Kind.String),
+		DeclaredBytes: row.DeclaredBytes,
+		StorageKey:    row.StorageKey,
+		References:    int(row.Refs),
+	}, nil
+}
+
 // Collect releases the expired reservations of up to limit canvases, one
 // canvas transaction at a time, and returns up to limit assets whose stored
 // bytes must be deleted.

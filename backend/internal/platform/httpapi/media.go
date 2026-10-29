@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
@@ -16,8 +20,15 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 )
 
-// uploadContentType is the only accepted upload body type: the raw bytes.
+// uploadContentType is the upload body type that declares no media type.
 const uploadContentType = "application/octet-stream"
+
+// imageTypes are the image media types an upload may declare (US-011), which
+// the inspection must then find, and the only types the content route serves.
+var imageTypes = map[string]bool{"image/png": true, "image/jpeg": true, "image/webp": true, "image/gif": true}
+
+// sniffBytes is how much of a stored file http.DetectContentType reads.
+const sniffBytes = 512
 
 var errMediaUnavailable = errors.New("media storage is not configured")
 
@@ -39,10 +50,14 @@ func newUsageBody(usage media.Usage) usageBody {
 	}
 }
 
+// uploadResult is the upload answer. ObjectID names the canvas image object
+// the upload created, equal to AssetID; it is omitted when the upload created
+// none (a replacement, audio, or video).
 type uploadResult struct {
-	AssetID string    `json:"asset_id"`
-	Kind    string    `json:"kind"`
-	Usage   usageBody `json:"usage"`
+	AssetID  string    `json:"asset_id"`
+	ObjectID string    `json:"object_id,omitempty"`
+	Kind     string    `json:"kind"`
+	Usage    usageBody `json:"usage"`
 }
 
 type attachBody struct {
@@ -145,10 +160,14 @@ func (a *api) mediaUsage(w http.ResponseWriter, r *http.Request) {
 // reference_id, or with replace=true as the replacement of the asset that
 // reference names. The ingress checks Origin and the CSRF token before the
 // session is read; the edit access and then the per-account upload limit are
-// checked before the request is parsed, and the declared size, the exact
-// Content-Length, before anything is reserved. The caller is reauthorized
-// before each commit. A retry under the same operation ID repeats the answer
-// without a second effect.
+// checked before the request is parsed, and the content type and the
+// declared size, the exact Content-Length, before anything is reserved. The
+// body is application/octet-stream, which declares nothing, or one of the
+// image types, which the inspection must confirm; another image type, SVG
+// included, is rejected as an unsupported kind, and a declared image above
+// the image byte limit as too large. The caller is reauthorized before each
+// commit. A retry under the same operation ID repeats the answer without a
+// second effect.
 func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -175,8 +194,16 @@ func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrBadRequest, errors.New("replace must be true or false"))
 		return
 	}
-	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != uploadContentType {
-		a.responder.Error(w, r, httpx.ErrBadRequest, errors.New("content type must be "+uploadContentType))
+	var declared string
+	switch mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); {
+	case err == nil && mediaType == uploadContentType:
+	case err == nil && imageTypes[mediaType]:
+		declared = mediaType
+	case err == nil && strings.HasPrefix(mediaType, "image/"):
+		a.mediaError(w, r, key, media.Reject(media.RejectionUnsupportedKind))
+		return
+	default:
+		a.responder.Error(w, r, httpx.ErrBadRequest, errors.New("content type must be "+uploadContentType+" or a supported image type"))
 		return
 	}
 	switch {
@@ -185,6 +212,10 @@ func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.ContentLength == 0:
 		a.responder.Error(w, r, httpx.ErrBadRequest, errors.New("upload body is empty"))
+		return
+	case declared != "" && r.ContentLength > media.DefaultLimits().MaxImageBytes:
+		// The inspection would reject it, so nothing is reserved or read.
+		a.mediaError(w, r, key, media.Reject(media.RejectionInputTooLarge))
 		return
 	case r.ContentLength > media.QuotaBytes:
 		// It could never fit, so nothing is reserved.
@@ -198,6 +229,7 @@ func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		DeclaredBytes: r.ContentLength,
 		ReferenceID:   query.Get("reference_id"),
 		Replace:       replace,
+		DeclaredType:  declared,
 		Body:          r.Body,
 	})
 	if err != nil {
@@ -205,7 +237,101 @@ func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.logUsage(r, "media upload confirmed", key, result.Usage, slog.String("asset_id", result.AssetID), slog.String("kind", string(result.Kind)))
-	writeJSON(w, http.StatusCreated, uploadResult{AssetID: result.AssetID, Kind: string(result.Kind), Usage: newUsageBody(result.Usage)})
+	writeJSON(w, http.StatusCreated, uploadResult{AssetID: result.AssetID, ObjectID: result.ObjectID, Kind: string(result.Kind), Usage: newUsageBody(result.Usage)})
+}
+
+// mediaContent serves the bytes of the ready image or GIF that a reference of
+// the canvas names, to a caller who may view the canvas; every denial is the
+// canvas route's forbidden. A missing reference, one of another canvas, an
+// asset that is not ready, and audio or video (until US-012) are the same
+// not found. The type is sniffed from the stored bytes and must be one of
+// the image types, matching the asset's kind; anything else is an internal
+// error, never served under a guessed type. The answer is private and
+// revalidated against the asset ID as its ETag. Neither the URL nor the logs
+// hold a storage key.
+func (a *api) mediaContent(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	key, ok := a.authorizeCanvas(w, r, principal, access.ActionView)
+	if !ok {
+		return
+	}
+	if a.Media == nil || a.Storage == nil {
+		a.responder.Error(w, r, httpx.ErrMediaUnavailable, errMediaUnavailable)
+		return
+	}
+	asset, err := a.Media.ReadyReference(r.Context(), mediaKey(key), r.PathValue("referenceID"))
+	switch {
+	case err == nil && (asset.Kind == media.KindImage || asset.Kind == media.KindGIF):
+	case err == nil, errors.Is(err, media.ErrNotFound), errors.Is(err, media.ErrInvalid):
+		a.mediaNotFound(w, r, key, media.ErrNotFound)
+		return
+	default:
+		a.responder.Error(w, r, httpx.ErrInternal, err)
+		return
+	}
+	etag := strconv.Quote(asset.ID)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.Header().Set("ETag", etag)
+		httpx.Revalidate(w)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	body, err := a.Storage.Open(r.Context(), asset.StorageKey)
+	if err != nil {
+		// A ready asset without its bytes is a reconciliation finding.
+		a.responder.Error(w, r, httpx.ErrInternal, fmt.Errorf("open ready asset: %w", err))
+		return
+	}
+	defer body.Close()
+	head := make([]byte, min(sniffBytes, asset.DeclaredBytes))
+	if _, err := io.ReadFull(body, head); err != nil {
+		a.responder.Error(w, r, httpx.ErrInternal, fmt.Errorf("read ready asset: %w", err))
+		return
+	}
+	mediaType := http.DetectContentType(head)
+	if !imageTypes[mediaType] || (mediaType == "image/gif") != (asset.Kind == media.KindGIF) {
+		a.responder.Error(w, r, httpx.ErrInternal, errors.New("stored bytes are not an image of the asset's kind"))
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", mediaType)
+	h.Set("Content-Length", strconv.FormatInt(asset.DeclaredBytes, 10))
+	h.Set("ETag", etag)
+	httpx.Revalidate(w)
+	a.Logger.LogAttrs(r.Context(), slog.LevelInfo, "media content served",
+		slog.String("tenant_id", key.TenantID),
+		slog.String("canvas_id", key.CanvasID),
+		slog.String("asset_id", asset.ID),
+	)
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	rest := io.LimitReader(body, asset.DeclaredBytes-int64(len(head)))
+	if _, err := io.Copy(w, io.MultiReader(bytes.NewReader(head), rest)); err != nil {
+		// The status is sent; the client sees a short body.
+		a.Logger.LogAttrs(r.Context(), slog.LevelWarn, "media content interrupted",
+			slog.String("tenant_id", key.TenantID),
+			slog.String("canvas_id", key.CanvasID),
+			slog.String("asset_id", asset.ID),
+			slog.Any("error", err),
+		)
+	}
+}
+
+// etagMatches reports whether an If-None-Match header names etag, weakly
+// compared, or is the wildcard.
+func etagMatches(header, etag string) bool {
+	for candidate := range strings.SplitSeq(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // attachMedia adds a reference to a ready asset of the canvas. It runs in the

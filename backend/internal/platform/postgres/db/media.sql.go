@@ -272,6 +272,42 @@ func (q *Queries) GetReadyAsset(ctx context.Context, arg GetReadyAssetParams) (G
 	return i, err
 }
 
+const getReadyReference = `-- name: GetReadyReference :one
+SELECT a.asset_id, a.kind, a.declared_bytes, a.storage_key,
+    (SELECT count(*) FROM media_references c
+     WHERE c.tenant_id = a.tenant_id AND c.canvas_id = a.canvas_id AND c.asset_id = a.asset_id)::bigint AS refs
+FROM media_references r
+JOIN media_assets a ON a.tenant_id = r.tenant_id AND a.canvas_id = r.canvas_id AND a.asset_id = r.asset_id
+WHERE r.tenant_id = $1 AND r.canvas_id = $2 AND r.reference_id = $3 AND a.state = 'ready'
+`
+
+type GetReadyReferenceParams struct {
+	TenantID    string
+	CanvasID    string
+	ReferenceID string
+}
+
+type GetReadyReferenceRow struct {
+	AssetID       string
+	Kind          pgtype.Text
+	DeclaredBytes int64
+	StorageKey    string
+	Refs          int64
+}
+
+func (q *Queries) GetReadyReference(ctx context.Context, arg GetReadyReferenceParams) (GetReadyReferenceRow, error) {
+	row := q.db.QueryRow(ctx, getReadyReference, arg.TenantID, arg.CanvasID, arg.ReferenceID)
+	var i GetReadyReferenceRow
+	err := row.Scan(
+		&i.AssetID,
+		&i.Kind,
+		&i.DeclaredBytes,
+		&i.StorageKey,
+		&i.Refs,
+	)
+	return i, err
+}
+
 const getReference = `-- name: GetReference :one
 SELECT asset_id
 FROM media_references
