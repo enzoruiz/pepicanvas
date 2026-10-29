@@ -309,6 +309,11 @@ describe("ModeratorsPanel", () => {
     ["forbidden", 403, "Only the canvas owner can see its moderators."],
     ["unauthorized", 401, "Your session has ended. Sign in again."],
     [
+      "subscription_inactive",
+      403,
+      "Your subscription is inactive. Ask an operator to reactivate it.",
+    ],
+    [
       "internal",
       500,
       "The moderators could not be loaded. Reload the page to try again.",

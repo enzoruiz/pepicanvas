@@ -728,10 +728,9 @@ func (t *memoryTx) MemberAccess(_ context.Context, tenantID string, account acce
 	}, true, nil
 }
 
-// storedCorrelation refuses a correlation PostgreSQL's 128-octet check
-// refuses.
+// storedCorrelation refuses a correlation PostgreSQL's check refuses.
 func storedCorrelation(correlationID string) error {
-	if len(correlationID) > 128 {
+	if len(correlationID) > invitation.MaxCorrelationBytes {
 		return fmt.Errorf("invitationtest: correlation of %d octets", len(correlationID))
 	}
 	return nil
