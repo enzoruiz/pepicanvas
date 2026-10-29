@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
@@ -34,6 +35,12 @@ const expiryOperationID = "reservation-expiry"
 // Every transaction that changes the used or reserved bytes of a canvas also
 // bumps its usage version and writes one media usage outbox record, so the
 // realtime actor learns every committed usage (CTRL-CONS-01).
+//
+// A Complete with Object also creates the asset's canvas image object, bumps
+// the canvas revision, and writes its create_object outbox record in the same
+// transaction. It locks the canvas row before the quota row: MediaStore and
+// CanvasStore take their row locks in the order canvas -> quota -> tenant,
+// and CanvasStore never takes the quota lock.
 type MediaStore struct {
 	pool           *pgxpool.Pool
 	now            func() time.Time
@@ -67,8 +74,8 @@ func WithReservationTTL(ttl time.Duration) MediaStoreOption {
 }
 
 // WithMediaCommitted sets a hook that runs after each commit that wrote a
-// media usage outbox record, for example to wake the outbox publisher. It
-// must not block.
+// media usage or canvas object outbox record, for example to wake the outbox
+// publisher. It must not block.
 func WithMediaCommitted(hook func(media.CanvasKey)) MediaStoreOption {
 	return func(s *MediaStore) { s.committed = hook }
 }
@@ -115,8 +122,9 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 // tenant whose subscription is not active returns media.ErrInactive and
 // writes nothing, except Abandon: a failed upload always releases its
 // reservation. An equal retry of a command committed before the deactivation
-// still replays its result, since a replay has no effect. A command with an
-// acting account that is no longer a member of the tenant returns
+// still replays its result, since a replay has no effect. The result of a
+// Complete with Object, replayed or not, carries the object ID. A command with
+// an acting account that is no longer a member of the tenant returns
 // access.ErrAccessDenied and writes nothing, without a replay either (US-006);
 // Abandon and system work, without an actor, are not checked.
 func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (media.Result, error) {
@@ -124,11 +132,19 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		return media.Result{}, err
 	}
 	fingerprint := media.Fingerprint(command)
+	complete, _ := command.(media.Complete)
 	var result media.Result
 	var written bool
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		written = false
 		q := db.New(tx)
+		var area canvas.Dimensions
+		if complete.Object {
+			var err error
+			if area, err = lockCanvasArea(ctx, q, key); err != nil {
+				return err
+			}
+		}
 		locked, now, err := s.lock(ctx, q, key)
 		if err != nil {
 			return err
@@ -172,6 +188,9 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		}
 		if err != nil || found {
 			result = replayed
+			if complete.Object {
+				result.ObjectID = complete.AssetID
+			}
 			return err
 		}
 		usage, err := s.expire(ctx, q, key, locked, now)
@@ -181,9 +200,18 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		if result, err = applyMedia(ctx, q, key, usage, command, now); err != nil {
 			return err
 		}
-		if written, err = commitUsage(ctx, q, key, locked, result.Usage, operation, now); err != nil {
+		if complete.Object {
+			if err := createImageObject(ctx, q, key, operation, complete, area, now); err != nil {
+				return err
+			}
+			result.ObjectID = complete.AssetID
+		}
+		usageWritten, err := commitUsage(ctx, q, key, locked, result.Usage, operation, now)
+		if err != nil {
 			return err
 		}
+		// The hook wakes the publisher for the object record too.
+		written = usageWritten || complete.Object
 		// An Abandon retains its outcome, so a retry repeats its response.
 		var reason, rejection pgtype.Text
 		if abandon, ok := command.(media.Abandon); ok {
@@ -436,6 +464,46 @@ func (s *MediaStore) ReadyPage(ctx context.Context, after media.Owner, limit int
 		})
 	}
 	return page, nil
+}
+
+// lockCanvasArea locks the canvas row of an object-creating completion
+// against every canvas mutation and returns its dimensions, which stay fixed
+// until commit. It does not take LockCanvas's FOR UPDATE: every other media
+// command holds the quota lock while its usage outbox record checks its
+// foreign key to the canvas row, which FOR UPDATE would block, deadlocking
+// against this completion waiting for the quota lock.
+func lockCanvasArea(ctx context.Context, q *db.Queries, key media.CanvasKey) (canvas.Dimensions, error) {
+	row, err := q.LockCanvasArea(ctx, db.LockCanvasAreaParams{TenantID: key.TenantID, CanvasID: key.CanvasID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return canvas.Dimensions{}, media.ErrNotFound
+	}
+	if err != nil {
+		return canvas.Dimensions{}, err
+	}
+	return canvas.Dimensions{Width: int(row.Width), Height: int(row.Height)}, nil
+}
+
+// createImageObject inserts the image object of an object-creating
+// completion: its ID is the asset ID and its content the reference, fitted
+// into the locked canvas area and placed on top, with the create_object
+// outbox record under the media operation, as CanvasStore.Apply writes for a
+// canvas.CreateObject.
+func createImageObject(ctx context.Context, q *db.Queries, key media.CanvasKey, operation media.Operation, c media.Complete, area canvas.Dimensions, now time.Time) error {
+	canvasKey := canvas.Key{TenantID: key.TenantID, CanvasID: key.CanvasID}
+	canvasOperation := canvas.Operation{ID: operation.ID, CorrelationID: operation.CorrelationID}
+	mutation := canvas.CreateObject{Kind: canvas.KindImage, Content: c.ReferenceID, Transform: canvas.Fit(area, c.ObjectWidth, c.ObjectHeight)}
+	if err := canvas.Validate(canvasKey, canvasOperation, mutation); err != nil {
+		return err
+	}
+	kind, payload, err := outbox.EncodeMutation(mutation)
+	if err != nil {
+		return err
+	}
+	created, err := createObject(ctx, q, canvasKey, c.AssetID, mutation)
+	if err != nil {
+		return err
+	}
+	return insertMutationRecord(ctx, q, canvasKey, canvasOperation, kind, payload, created, now)
 }
 
 // lock creates the quota row of an existing canvas, locks it, and returns its

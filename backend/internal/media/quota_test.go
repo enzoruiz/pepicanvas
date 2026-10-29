@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 )
 
@@ -69,6 +70,8 @@ func TestValidateCommandAcceptsWellFormedCommands(t *testing.T) {
 		media.Reserve{DeclaredBytes: media.QuotaBytes},
 		media.Reserve{DeclaredBytes: 10, ReplacesReference: "object-1"},
 		media.Complete{AssetID: "asset-1", ReferenceID: "object-1", Kind: media.KindVideo},
+		media.Complete{AssetID: "asset-1", ReferenceID: "object-1", Kind: media.KindImage, Object: true, ObjectWidth: 1, ObjectHeight: 1},
+		media.Complete{AssetID: "asset-1", ReferenceID: "object-1", Kind: media.KindGIF, Object: true, ObjectWidth: media.MaxObjectSide, ObjectHeight: media.MaxObjectSide},
 		media.Abandon{AssetID: "asset-1", Reason: media.AbandonCancelled},
 		media.Abandon{AssetID: "asset-1", Reason: media.AbandonFailed},
 		media.Abandon{AssetID: "asset-1", Reason: media.AbandonRejected, Rejection: media.RejectionDimensionsExceeded},
@@ -107,6 +110,13 @@ func TestValidateCommandRejectsMalformedInput(t *testing.T) {
 		{"complete without asset", key, operation, media.Complete{ReferenceID: "o", Kind: media.KindImage}},
 		{"complete without reference", key, operation, media.Complete{AssetID: "a", Kind: media.KindImage}},
 		{"complete with unknown kind", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: "svg"}},
+		{"object without size", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true}},
+		{"object without width", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true, ObjectHeight: 5}},
+		{"object with negative height", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true, ObjectWidth: 5, ObjectHeight: -5}},
+		{"object wider than an object may be", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true, ObjectWidth: media.MaxObjectSide + 1, ObjectHeight: 5}},
+		{"object taller than an object may be", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true, ObjectWidth: 5, ObjectHeight: media.MaxObjectSide + 1}},
+		{"size without object", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, ObjectWidth: 5, ObjectHeight: 5}},
+		{"width without object", key, operation, media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, ObjectWidth: 5}},
 		{"abandon without asset", key, operation, media.Abandon{Reason: media.AbandonFailed}},
 		{"abandon with unknown reason", key, operation, media.Abandon{AssetID: "a", Reason: "lost"}},
 		{"rejected abandon without code", key, operation, media.Abandon{AssetID: "a", Reason: media.AbandonRejected}},
@@ -141,6 +151,7 @@ func TestFingerprintSeparatesIntentAndIgnoresCorrelation(t *testing.T) {
 		media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage},
 		media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindGIF},
 		media.Complete{AssetID: "ao", ReferenceID: "", Kind: media.KindImage},
+		media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindImage, Object: true, ObjectWidth: 1, ObjectHeight: 1},
 		media.Abandon{AssetID: "a", Reason: media.AbandonFailed},
 		media.Abandon{AssetID: "a", Reason: media.AbandonRejected, Rejection: media.RejectionDimensionsExceeded},
 		media.Abandon{AssetID: "a", Reason: media.AbandonRejected, Rejection: media.RejectionInvalidMetadata},
@@ -154,5 +165,26 @@ func TestFingerprintSeparatesIntentAndIgnoresCorrelation(t *testing.T) {
 			t.Fatalf("commands %d and %d share a fingerprint", j, i)
 		}
 		seen[sum] = i
+	}
+}
+
+// US-011: the object size derives from the same stored bytes as the rest of
+// the completion, so a retry that reads it again (or cannot read it) is the
+// same intent; whether an object is created is not.
+func TestFingerprintIncludesTheObjectButNotItsSize(t *testing.T) {
+	small := media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindGIF, Object: true, ObjectWidth: 1, ObjectHeight: 1}
+	large := media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindGIF, Object: true, ObjectWidth: 4096, ObjectHeight: 300}
+	if media.Fingerprint(small) != media.Fingerprint(large) {
+		t.Fatal("completions differing only in object size have different fingerprints")
+	}
+	without := media.Complete{AssetID: "a", ReferenceID: "o", Kind: media.KindGIF}
+	if media.Fingerprint(small) == media.Fingerprint(without) {
+		t.Fatal("a completion with an object fingerprints like one without")
+	}
+}
+
+func TestMaxObjectSideMatchesTheCanvasModel(t *testing.T) {
+	if media.MaxObjectSide != canvas.MaxObjectSize {
+		t.Fatalf("MaxObjectSide = %d, want canvas.MaxObjectSize %d", media.MaxObjectSide, canvas.MaxObjectSize)
 	}
 }

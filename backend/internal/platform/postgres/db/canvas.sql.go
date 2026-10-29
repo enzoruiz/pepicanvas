@@ -193,6 +193,33 @@ func (q *Queries) LockCanvas(ctx context.Context, arg LockCanvasParams) (int64, 
 	return revision, err
 }
 
+const lockCanvasArea = `-- name: LockCanvasArea :one
+SELECT width, height
+FROM canvases
+WHERE tenant_id = $1 AND canvas_id = $2
+FOR NO KEY UPDATE
+`
+
+type LockCanvasAreaParams struct {
+	TenantID string
+	CanvasID string
+}
+
+type LockCanvasAreaRow struct {
+	Width  int32
+	Height int32
+}
+
+// Serializes with every canvas mutation, like LockCanvas, but in the weaker
+// mode an update of non-key columns takes, so foreign key checks of rows that
+// reference the canvas (media usage outbox records) do not wait for it.
+func (q *Queries) LockCanvasArea(ctx context.Context, arg LockCanvasAreaParams) (LockCanvasAreaRow, error) {
+	row := q.db.QueryRow(ctx, lockCanvasArea, arg.TenantID, arg.CanvasID)
+	var i LockCanvasAreaRow
+	err := row.Scan(&i.Width, &i.Height)
+	return i, err
+}
+
 const lockTenantStatus = `-- name: LockTenantStatus :one
 SELECT subscription_status FROM tenants WHERE tenant_id = $1 FOR SHARE
 `
