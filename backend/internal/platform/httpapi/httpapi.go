@@ -30,6 +30,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpx"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ratelimit"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
 )
@@ -132,6 +133,8 @@ type Config struct {
 	// Now is the limiter clock; nil uses time.Now.
 	Now    func() time.Time
 	Limits Limits
+	// Tracer exports each request's root span; nil disables export.
+	Tracer *telemetry.Tracer
 }
 
 type api struct {
@@ -196,7 +199,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/invitations/{invitationID}/revoke", in.Route(ingress.Session, http.HandlerFunc(a.revokeInvitation)))
 	mux.Handle("POST /api/invitations/accept", in.Route(ingress.Session, http.HandlerFunc(a.acceptInvitation)))
 	mux.HandleFunc("GET /api/memberships", a.listMemberships)
-	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
+	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Trace(config.Tracer)(httpx.Private(in.Protect(mux))))), nil
 }
 
 type registerBody struct {
