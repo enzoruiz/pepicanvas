@@ -10,6 +10,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import { CanvasPanel } from "./CanvasPanel";
 
+// The lock holders poll their own route; their behavior is tested in
+// locks/LockOwners.test.tsx.
+vi.mock("../locks/LockOwners", () => ({
+  LockOwners: ({
+    tenantId,
+    canvasId,
+  }: {
+    tenantId: string;
+    canvasId: string;
+  }) => <p data-lock-owners={`${tenantId}/${canvasId}`} />,
+}));
+
 let calls: Call[];
 let replies: Reply[];
 
@@ -102,6 +114,17 @@ describe("CanvasPanel", () => {
     ).toBeInTheDocument();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ method: "GET", path: "/api/canvas" });
+  });
+
+  it("shows who holds each lock of the own canvas", async () => {
+    replies.push(ownCanvas());
+    renderPanel();
+    await ready();
+    expect(
+      [...document.querySelectorAll("[data-lock-owners]")].map((element) =>
+        element.getAttribute("data-lock-owners"),
+      ),
+    ).toEqual([`${tenantId}/${canvasId}`]);
   });
 
   it("draws the confirmed surface and prefills the size form", async () => {

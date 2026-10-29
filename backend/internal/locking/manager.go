@@ -69,7 +69,18 @@ type Manager struct {
 	closed     bool
 	sessions   map[*Session]struct{}
 	leases     map[Key]*entry
+	fences     map[Key]*fence
 	operations map[scope]*operations
+}
+
+// fence keeps a key from every other session while its holder's protected
+// commits run, even after the lease itself ended.
+type fence struct {
+	session *Session
+	// entry is the holder's latest lease on the key; its lease is reported
+	// while the key has no live lease.
+	entry *entry
+	count int
 }
 
 type entry struct {
@@ -111,6 +122,7 @@ func NewManager(config Config) (*Manager, error) {
 		abort:      abort,
 		sessions:   map[*Session]struct{}{},
 		leases:     map[Key]*entry{},
+		fences:     map[Key]*fence{},
 		operations: map[scope]*operations{},
 	}, nil
 }
@@ -156,21 +168,50 @@ func (m *Manager) Attach(conn context.Context, holder Holder) (*Session, error) 
 	return session, nil
 }
 
-// Lookup returns the current lease on key, if any. It does not scope key
-// to a tenant: callers must pass a key of the caller's own tenant.
+// Lookup returns the current lease on key, if any: the live lease, or the
+// ended lease of a holder whose protected commit is still running. It does
+// not scope key to a tenant: callers must pass a key of the caller's own
+// tenant.
 func (m *Manager) Lookup(key Key) (Lease, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e := m.liveLocked(key, m.config.Clock.Now()); e != nil {
+	if e := m.holderLocked(key, m.config.Clock.Now()); e != nil {
 		return e.lease, true
 	}
 	return Lease{}, false
 }
 
+// Leases returns every current lease on one canvas, as Lookup reports
+// each, sorted by object ID. Callers must pass the caller's own tenant.
+func (m *Manager) Leases(tenantID, canvasID string) []Lease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.config.Clock.Now()
+	keys := map[Key]struct{}{}
+	for key := range m.leases {
+		keys[key] = struct{}{}
+	}
+	for key := range m.fences {
+		keys[key] = struct{}{}
+	}
+	var leases []Lease
+	for key := range keys {
+		if key.TenantID != tenantID || key.CanvasID != canvasID {
+			continue
+		}
+		if e := m.holderLocked(key, now); e != nil {
+			leases = append(leases, e.lease)
+		}
+	}
+	slices.SortFunc(leases, func(a, b Lease) int { return compareKeys(a.Key, b.Key) })
+	return leases
+}
+
 // Close rejects new work with ErrClosed at once, releases every lease, and
-// waits for in-flight acquires and heartbeats, which then fail with
-// ErrClosed. If ctx ends first, Close cancels their authorizations, waits
-// for them to return, and returns ctx's error. It is idempotent.
+// waits for in-flight acquires, heartbeats, and protected commits; acquires
+// and heartbeats then fail with ErrClosed. If ctx ends first, Close cancels
+// their contexts, waits for them to return, and returns ctx's error. It is
+// idempotent.
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.closed {
@@ -185,6 +226,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			m.removeLocked(e)
 			m.logEnded(ctx, e, ReasonShutdown)
 		}
+		clear(m.fences)
 		clear(m.operations)
 	}
 	m.mu.Unlock()
@@ -211,7 +253,8 @@ func (m *Manager) Close(ctx context.Context) error {
 
 // Acquire grants the lease on the requested object when it is free or
 // already held by this session, renewing it in the latter case. A lease
-// held by another session is denied and the answer names its holder. A
+// held by another session, or still fenced by its protected commit, is
+// denied and the answer names its holder. A
 // retry with the same operation ID, from this or a later session of the
 // same account, returns the retained answer without a new effect; it does
 // not mean the lease is still held, which only Heartbeat and Lookup tell.
@@ -241,19 +284,26 @@ func (s *Session) Acquire(ctx context.Context, request Request) (Result, error) 
 		return answer, err
 	}
 	result := Result{OperationID: request.OperationID, Outcome: OutcomeGranted}
-	switch e := m.liveLocked(key, now); {
-	case e == nil:
+	e, f := m.liveLocked(key, now), m.fences[key]
+	switch {
+	case e != nil && e.session == s:
+		m.renewLocked(ctx, e, now)
+		result.Lease = e.lease
+	case e != nil:
+		result.Outcome = OutcomeDenied
+		result.Lease = e.lease
+	case f != nil && f.session != s:
+		result.Outcome = OutcomeDenied
+		result.Lease = f.entry.lease
+	default:
 		e = &entry{lease: Lease{Key: key, Holder: s.holder}, session: s}
 		m.leases[key] = e
 		s.held[key] = e
 		delete(s.lost, key)
 		m.renewLocked(ctx, e, now)
-		result.Lease = e.lease
-	case e.session == s:
-		m.renewLocked(ctx, e, now)
-		result.Lease = e.lease
-	default:
-		result.Outcome = OutcomeDenied
+		if f != nil {
+			f.entry = e
+		}
 		result.Lease = e.lease
 	}
 	m.rememberLocked(s.scope(), kindAcquire, request, result, now)
@@ -345,6 +395,62 @@ func (s *Session) Release(ctx context.Context, request Request) (Result, error) 
 	return result, nil
 }
 
+// Protect runs commit while the session holds the live lease on one object
+// of its tenant, and returns commit's error unchanged; otherwise it returns
+// ErrNotHolder without calling commit. Until commit returns, no other
+// session is granted the object, even if the lease ends meanwhile, so it
+// never has two effective holders. Protect does not renew the lease.
+// commit receives a context that ends when Close runs out of time.
+func (s *Session) Protect(ctx context.Context, canvasID, objectID string, commit func(context.Context) error) error {
+	if err := validIdentifiers(map[string]string{"canvas": canvasID, "object": objectID}); err != nil {
+		return err
+	}
+	if commit == nil {
+		return fmt.Errorf("%w: missing commit", ErrInvalidRequest)
+	}
+	m := s.manager
+	commitCtx, done, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	key := Key{TenantID: s.holder.TenantID, CanvasID: canvasID, ObjectID: objectID}
+
+	m.mu.Lock()
+	if err := s.aliveLocked(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	e := m.liveLocked(key, m.config.Clock.Now())
+	if e == nil || e.session != s {
+		m.mu.Unlock()
+		return ErrNotHolder
+	}
+	f := m.fences[key]
+	if f != nil && f.session != s {
+		// Unreachable: no session is granted a key fenced by another.
+		m.mu.Unlock()
+		return ErrNotHolder
+	}
+	if f == nil {
+		f = &fence{session: s}
+		m.fences[key] = f
+	}
+	f.entry = e
+	f.count++
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		f.count--
+		if f.count == 0 && m.fences[key] == f {
+			delete(m.fences, key)
+		}
+	}()
+	return commit(commitCtx)
+}
+
 // Detach releases every lease of the session and rejects further work. The
 // session's connection context ending calls it; transports may call it
 // directly on disconnect. It is idempotent.
@@ -367,8 +473,8 @@ func (s *Session) Detach() {
 	clear(s.lost)
 }
 
-// begin admits one operation that calls the authorizer outside the lock.
-// The returned context also ends when Close runs out of time.
+// begin admits one operation that calls the authorizer or a commit outside
+// the lock. The returned context also ends when Close runs out of time.
 func (s *Session) begin(ctx context.Context) (context.Context, func(), error) {
 	m := s.manager
 	m.mu.Lock()
@@ -413,6 +519,18 @@ func (m *Manager) liveLocked(key Key, now time.Time) *entry {
 		return nil
 	}
 	return e
+}
+
+// holderLocked returns the effective holder's lease on key: the live lease,
+// or else the latest lease of a session whose protected commit still runs.
+func (m *Manager) holderLocked(key Key, now time.Time) *entry {
+	if e := m.liveLocked(key, now); e != nil {
+		return e
+	}
+	if f := m.fences[key]; f != nil {
+		return f.entry
+	}
+	return nil
 }
 
 // renewLocked moves the deadline to TTL after now and reschedules expiry.

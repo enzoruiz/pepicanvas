@@ -881,13 +881,30 @@ func TestServerPublishesCommittedResizesAndStopsThePublisher(t *testing.T) {
 		t.Fatalf("outbox of %s: %d pending, %d delivered; want 0 and 1\n%s", tenant, pending, delivered, server.logs)
 	}
 
+	// US-020: the server serves object locks, and its shutdown ends the
+	// lock sessions.
+	locks := "/api/tenants/" + tenant + "/canvases/" + canvasID + "/locks"
+	res = requestWith(t, server, http.MethodPost, locks+"/sessions", "", alice.cookie, alice.csrf)
+	lockSession, _ := decodeBody(t, res)["lock_session_id"].(string)
+	if res.StatusCode != http.StatusCreated || lockSession == "" {
+		t.Fatalf("open lock session = %d", res.StatusCode)
+	}
+	res = requestWith(t, server, http.MethodPost, locks+"/sessions/"+lockSession+"/acquire", `{"operation_id":"op-publish-lock-01","object_id":"obj-1"}`, alice.cookie, alice.csrf)
+	if body := decodeBody(t, res); res.StatusCode != http.StatusOK || body["outcome"] != "granted" {
+		t.Fatalf("acquire = %d %v", res.StatusCode, body)
+	}
+	res = request(t, server, http.MethodGet, locks, "", alice.cookie)
+	if body, _ := io.ReadAll(res.Body); res.StatusCode != http.StatusOK || string(body) != `{"locks":[{"object_id":"obj-1","holder":{"name":"alice@example.com","mine":true}}]}`+"\n" {
+		t.Fatalf("locks = %d %s", res.StatusCode, body)
+	}
+
 	began := time.Now()
 	server.stop(t)
 	if elapsed := time.Since(began); elapsed > 5*time.Second {
 		t.Fatalf("shutdown took %v, over the 5s budget", elapsed)
 	}
 	logs := server.logs.String()
-	for _, msg := range []string{`"msg":"outbox record delivered"`, `"msg":"stopped"`} {
+	for _, msg := range []string{`"msg":"outbox record delivered"`, `"msg":"lock session ended","reason":"shutdown"`, `"msg":"stopped"`} {
 		if !strings.Contains(logs, msg) {
 			t.Errorf("process logs lack %s\n%s", msg, logs)
 		}

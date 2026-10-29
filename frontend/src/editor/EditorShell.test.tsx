@@ -10,6 +10,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import { EditorShell } from "./EditorShell";
 
+// The lock holders poll their own route; their behavior is tested in
+// locks/LockOwners.test.tsx.
+vi.mock("../locks/LockOwners", () => ({
+  LockOwners: ({
+    tenantId,
+    canvasId,
+  }: {
+    tenantId: string;
+    canvasId: string;
+  }) => <p data-lock-owners={`${tenantId}/${canvasId}`} />,
+}));
+
 let calls: Call[];
 let replies: Reply[];
 

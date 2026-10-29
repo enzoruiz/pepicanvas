@@ -115,6 +115,14 @@ const (
 	ErrReferenceExists  ErrorCode = "reference_exists"
 	ErrUploadFailed     ErrorCode = "upload_failed"
 	ErrMediaUnavailable ErrorCode = "media_unavailable"
+
+	// Object lock codes (US-020). ErrLockSessionGone answers a lock session
+	// that ended, whose locks are already free; the client opens a new one.
+	// ErrNotLockHolder answers a release of a lock the session does not
+	// hold; ErrLockUnavailable a server whose lock service is not serving.
+	ErrLockSessionGone ErrorCode = "lock_session_gone"
+	ErrNotLockHolder   ErrorCode = "not_lock_holder"
+	ErrLockUnavailable ErrorCode = "lock_unavailable"
 )
 
 var errorStatus = map[ErrorCode]int{
@@ -134,6 +142,9 @@ var errorStatus = map[ErrorCode]int{
 	ErrReferenceExists:      http.StatusConflict,
 	ErrUploadFailed:         http.StatusBadGateway,
 	ErrMediaUnavailable:     http.StatusServiceUnavailable,
+	ErrLockSessionGone:      http.StatusGone,
+	ErrNotLockHolder:        http.StatusConflict,
+	ErrLockUnavailable:      http.StatusServiceUnavailable,
 }
 
 // maxReasonBytes bounds the public reason of an error.

@@ -23,7 +23,8 @@ var (
 	// ErrDetached reports work on a session whose connection ended. Its
 	// leases are already released.
 	ErrDetached = errors.New("locking: session detached")
-	// ErrNotHolder reports a release of a lease the session does not hold.
+	// ErrNotHolder reports a release or a protected commit of a lease the
+	// session does not hold.
 	ErrNotHolder = errors.New("locking: not the lease holder")
 )
 

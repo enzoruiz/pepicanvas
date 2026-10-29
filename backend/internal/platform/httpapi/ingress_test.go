@@ -114,6 +114,9 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 	dave := e.owner("op-http-web-dave01", "dave@example.com", "tenant-w", access.SubscriptionActive)
 	moderator := e.register("op-http-web-mod001", "moderator@example.com")
 	e.invs.AddMember("tenant-w", moderator, access.RoleModerator)
+	// Lock sessions outlast the test on the real clock (US-020 S13).
+	e.withLocks(lockOptions{ttl: time.Minute})
+	lock := lockSessionPath(carol.path, e.openLock(carol.signedIn, carol.path))
 
 	type route struct {
 		name, method, path string
@@ -130,6 +133,11 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 		{"sign-out", http.MethodDelete, "/api/session", nil, &leaver, http.StatusNoContent, "SignOut"},
 		{"resize", http.MethodPut, carol.path + "/dimensions", dimensions("op-http-web-dim001", 1280, 720), &carol.signedIn, http.StatusOK, "Apply"},
 		{"member revocation", http.MethodPost, memberRevokePath(string(moderator)), revocation("op-http-web-rev001"), &dave, http.StatusOK, "RevokeMember"},
+		{"lock open", http.MethodPost, carol.path + "/locks/sessions", nil, &carol.signedIn, http.StatusCreated, "LockOpen"},
+		{"lock acquire", http.MethodPost, lock + "/acquire", acquiring("op-http-web-lck001", "obj-web"), &carol.signedIn, http.StatusOK, "LockUse"},
+		{"lock heartbeat", http.MethodPost, lock + "/heartbeat", nil, &carol.signedIn, http.StatusOK, "LockUse"},
+		{"lock release", http.MethodPost, lock + "/release", releasing("op-http-web-lck002", "obj-web", "finished"), &carol.signedIn, http.StatusOK, "LockUse"},
+		{"lock end", http.MethodDelete, lock, nil, &carol.signedIn, http.StatusNoContent, "LockEnd"},
 	}
 	origins := map[string]option{
 		"absent Origin":       withoutOrigin(),

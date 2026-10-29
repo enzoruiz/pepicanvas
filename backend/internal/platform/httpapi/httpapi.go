@@ -3,11 +3,11 @@
 // operator deactivation (US-003), the owner's moderator invitations (US-004),
 // their acceptance and the moderated-canvas list (US-005), the owner's
 // moderator list and revocation (US-006), the owner-only canvas resize
-// (US-007), and the canvas storage quota with its media uploads and
-// references (US-016). Every response is private and
-// correlated, and every route is guarded by the ingress (TE-014): unsafe
-// methods need the exact Origin, session mutations need the session's CSRF
-// token before the session is read, and the abuse limits answer 429
+// (US-007), the canvas storage quota with its media uploads and references
+// (US-016), and the temporary object locks (US-020). Every response is
+// private and correlated, and every route is guarded by the ingress (TE-014):
+// unsafe methods need the exact Origin, session mutations need the session's
+// CSRF token before the session is read, and the abuse limits answer 429
 // (CTRL-WEB-01, CTRL-RATE-01). Invitation tokens arrive only in request bodies
 // and never appear in a response or a log line.
 package httpapi
@@ -129,6 +129,9 @@ type Config struct {
 	// the upload route answers media_unavailable before reserving quota.
 	Storage   media.Storage
 	Inspector media.Inspector
+	// Locks serves the object locks. Without it every lock route answers
+	// lock_unavailable.
+	Locks *Locks
 	// Ingress guards every route; it holds the allowed origins.
 	Ingress *ingress.Ingress
 	Logger  *slog.Logger
@@ -161,6 +164,9 @@ func New(config Config) (http.Handler, error) {
 			return nil, errors.New("httpapi: every limit needs a positive count and window")
 		}
 	}
+	if err := config.Locks.validate(); err != nil {
+		return nil, err
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
@@ -191,6 +197,12 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/uploads", in.Route(ingress.Session, http.HandlerFunc(a.uploadMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references", in.Route(ingress.Session, http.HandlerFunc(a.attachMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/detach", in.Route(ingress.Session, http.HandlerFunc(a.detachMedia)))
+	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/locks", a.listLocks)
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions", in.Route(ingress.Session, http.HandlerFunc(a.openLockSession)))
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}/heartbeat", in.Route(ingress.Session, http.HandlerFunc(a.heartbeatLock)))
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}/acquire", in.Route(ingress.Session, http.HandlerFunc(a.acquireLock)))
+	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}/release", in.Route(ingress.Session, http.HandlerFunc(a.releaseLock)))
+	mux.Handle("DELETE /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}", in.Route(ingress.Session, http.HandlerFunc(a.endLockSession)))
 	mux.Handle("POST /api/activations", in.Route(ingress.Session, http.HandlerFunc(a.activate)))
 	mux.Handle("POST /api/deactivations", in.Route(ingress.Session, http.HandlerFunc(a.deactivate)))
 	mux.HandleFunc("GET /api/canvas", a.ownCanvas)
