@@ -69,6 +69,9 @@ type RelayCounters struct {
 	Retries uint64
 	// StoreErrors counts failed store calls; their cuts stay pending.
 	StoreErrors uint64
+	// Unknown counts cuts of a kind this release does not know, once per
+	// cut; they stay pending for a release that knows it.
+	Unknown uint64
 }
 
 // CutRelay applies the pending access cuts of the cut outbox to the live
@@ -81,9 +84,13 @@ type CutRelay struct {
 	config RelayConfig
 	// failures counts consecutive failed passes. Only the loop uses it.
 	failures int
-	wake     chan struct{}
-	stop     chan struct{}
-	done     chan struct{}
+	// unknownLogged holds the pending cuts of an unknown kind already
+	// logged, among those of the last pass, so each is logged once. Only
+	// the loop uses it.
+	unknownLogged map[int64]struct{}
+	wake          chan struct{}
+	stop          chan struct{}
+	done          chan struct{}
 	// abort cancels the apply in flight when Close runs out of time.
 	abort       context.Context
 	cancelAbort context.CancelFunc
@@ -92,7 +99,7 @@ type CutRelay struct {
 	started bool
 	closed  bool
 
-	applied, exceeded, rejected, retries, storeErrors atomic.Uint64
+	applied, exceeded, rejected, retries, storeErrors, unknown atomic.Uint64
 }
 
 // NewCutRelay validates the configuration. Start runs it.
@@ -181,6 +188,7 @@ func (r *CutRelay) Counters() RelayCounters {
 		Rejected:    r.rejected.Load(),
 		Retries:     r.retries.Load(),
 		StoreErrors: r.storeErrors.Load(),
+		Unknown:     r.unknown.Load(),
 	}
 }
 
@@ -258,37 +266,59 @@ func (r *CutRelay) pass() time.Duration {
 		r.storeFailed("read pending cuts", err)
 		return r.backoff()
 	}
-	for _, cut := range cuts {
+	logged := make(map[int64]struct{})
+	defer func() { r.unknownLogged = logged }()
+	skipped := false
+	for _, pending := range cuts {
 		if r.stopping() {
 			return 0
 		}
-		if !r.deliver(cut) {
+		cut, err := pending.cut()
+		if err != nil {
+			// Applying it as anything else could cut the wrong connections,
+			// and settling it would lose it for a release that knows its
+			// kind. It stays pending and does not hold back later cuts.
+			r.skipUnknown(pending, logged, err)
+			skipped = true
+			continue
+		}
+		if !r.deliver(pending, cut) {
 			return r.backoff()
 		}
 	}
 	r.failures = 0
-	if len(cuts) == r.config.BatchSize {
+	if len(cuts) == r.config.BatchSize && !skipped {
 		return 0
 	}
 	return r.config.PollInterval
 }
 
-// deliver applies one cut and records its outcome. It reports whether the
-// cut settled. A cut the Cutter applied, even over its close budget, or can
-// never apply settles; any other failure leaves it pending for a retry.
-func (r *CutRelay) deliver(pending PendingCut) bool {
-	log := r.config.Logger.With(
+// skipUnknown leaves a cut of an unknown kind pending and logs it once, with
+// its kind and never its account.
+func (r *CutRelay) skipUnknown(pending PendingCut, logged map[int64]struct{}, err error) {
+	logged[pending.ID] = struct{}{}
+	if _, seen := r.unknownLogged[pending.ID]; seen {
+		return
+	}
+	r.unknown.Add(1)
+	r.cutLog(pending).Warn("access cut kind unknown", slog.String("error", err.Error()))
+}
+
+func (r *CutRelay) cutLog(pending PendingCut) *slog.Logger {
+	return r.config.Logger.With(
 		slog.Int64("cut_id", pending.ID),
 		slog.String("kind", string(pending.Kind)),
 		slog.String("tenant_id", pending.TenantID),
 		slog.Uint64("version", pending.Version),
 		slog.String("correlation_id", pending.CorrelationID),
 	)
-	cut, err := pending.cut()
-	if err != nil {
-		// Applying it as anything else could cut the wrong connections.
-		return r.reject(pending, log, err)
-	}
+}
+
+// deliver applies one cut and records its outcome. It reports whether the
+// cut settled. A cut the Cutter applied, even over its close budget, or can
+// never apply settles; any other failure leaves it pending for a retry.
+func (r *CutRelay) deliver(pending PendingCut, cut revocation.Cut) bool {
+	log := r.cutLog(pending)
 	ctx, cancel := context.WithTimeout(r.config.Correlate(r.abort, pending.CorrelationID), r.config.AttemptTimeout)
 	report, err := r.config.Cutter.Apply(ctx, cut)
 	cancel()

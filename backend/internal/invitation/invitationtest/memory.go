@@ -5,6 +5,7 @@ package invitationtest
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -259,6 +260,10 @@ func (m *MemoryStore) PendingCuts(_ context.Context, limit int) ([]subscription.
 	defer m.mu.Unlock()
 	if err := m.fail("PendingCuts"); err != nil {
 		return nil, err
+	}
+	if limit <= 0 {
+		// As PostgreSQL, which refuses a limit it cannot use.
+		return nil, fmt.Errorf("invitationtest: pending cuts: invalid limit %d", limit)
 	}
 	var pending []subscription.PendingCut
 	for _, cut := range m.outbox {

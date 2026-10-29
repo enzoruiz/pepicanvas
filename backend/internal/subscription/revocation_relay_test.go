@@ -388,8 +388,8 @@ func TestARevocationLeftPendingByACrashIsAppliedAtStart(t *testing.T) {
 	})
 }
 
-// kindStore rewrites the kind of every pending cut, as a row written by a
-// newer release this relay does not know.
+// kindStore reports the revocation cuts of its store under another kind,
+// as an older relay reads a cut a newer release wrote.
 type kindStore struct {
 	*invitationtest.MemoryStore
 	kind subscription.CutKind
@@ -398,14 +398,18 @@ type kindStore struct {
 func (s kindStore) PendingCuts(ctx context.Context, limit int) ([]subscription.PendingCut, error) {
 	cuts, err := s.MemoryStore.PendingCuts(ctx, limit)
 	for i := range cuts {
-		cuts[i].Kind = s.kind
+		if cuts[i].Kind == subscription.CutRevocation {
+			cuts[i].Kind = s.kind
+		}
 	}
 	return cuts, err
 }
 
-// A cut of an unknown kind is never applied as a tenant cut: it settles as
-// rejected with an ERROR record and every lease stays live.
-func TestACutOfAnUnknownKindIsRejectedWithoutReachingTheRegistry(t *testing.T) {
+// A cut of an unknown kind is never applied as a tenant cut and never
+// settled: it stays pending for a relay of a release that knows the kind,
+// and the cuts after it in the batch are still applied. It is logged once
+// with its kind, never with the account.
+func TestACutOfAnUnknownKindStaysPendingWithoutBlockingLaterCuts(t *testing.T) {
 	for _, kind := range []subscription.CutKind{"", "suspension"} {
 		t.Run(string(kind), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -413,32 +417,56 @@ func TestACutOfAnUnknownKindIsRejectedWithoutReachingTheRegistry(t *testing.T) {
 				service, store := moderated(t, func() { relay.Notify() })
 				live := newRig(t, kindStore{store, kind}, nil)
 				relay = live.relay
-				ownerConn, modConn := newConn(0), newConn(0)
+				ownerConn, modConn, ownerConnB := newConn(0), newConn(0), newConn(0)
 				ownerLease := register(t, live.registry, memberGrant(t, service, revOwnerA, "session-owner-a", revTenantA), ownerConn)
 				modLease := register(t, live.registry, memberGrant(t, service, revModerator, "session-mod-a", revTenantA), modConn)
+				ownerLeaseB := register(t, live.registry, memberGrant(t, service, revOwnerB, "session-owner-b", revTenantB), ownerConnB)
 				live.start(t)
 
 				revokeModeratorInA(t, service)
+				store.DeactivateTenant(revTenantB, cutCorrelation, time.Now())
+				relay.Notify()
 				synctest.Wait()
 				time.Sleep(revocation.DefaultBudget)
 				synctest.Wait()
+				// Several polls reread the unknown cut.
+				time.Sleep(5 * time.Second)
+				synctest.Wait()
 
-				if calls := live.cutter.recorded(); len(calls) != 0 {
-					t.Fatalf("calls = %+v, want none", calls)
+				cuts := store.Outbox()
+				if len(cuts) != 2 {
+					t.Fatalf("outbox = %+v, want the revocation and the deactivation", cuts)
 				}
+				unknown, deactivation := cuts[0], cuts[1]
+				calls := live.cutter.recorded()
+				if len(calls) != 1 || calls[0].cut != wantCut(deactivation) {
+					t.Fatalf("calls = %+v, want only the deactivation of B", calls)
+				}
+				requireCut(t, ownerLeaseB)
+				requireClosedOnceWith(t, ownerConnB, revocation.ReasonDeactivated, false)
 				requireLive(t, ownerLease)
 				requireLive(t, modLease)
 				requireUntouched(t, ownerConn)
 				requireUntouched(t, modConn)
-				cut := onlyOutboxCut(t, store)
-				if _, settled := store.AppliedAt(cut.ID); !settled {
-					t.Fatal("the unknown cut was not settled")
+				if _, settled := store.AppliedAt(unknown.ID); settled {
+					t.Fatal("the unknown cut was settled")
 				}
-				requireCounters(t, relay, subscription.RelayCounters{Rejected: 1})
-				found := recordsWith(live.logs(), "access cut rejected")
-				if len(found) != 1 || found[0]["level"] != "ERROR" || found[0]["tenant_id"] != revTenantA ||
-					found[0][logging.CorrelationKey] != cutCorrelation || found[0]["cut_id"] != float64(cut.ID) {
-					t.Fatalf("rejected records = %v, want one ERROR record of the cut", found)
+				if _, settled := store.AppliedAt(deactivation.ID); !settled {
+					t.Fatal("the deactivation after the unknown cut was not settled")
+				}
+				requireCounters(t, relay, subscription.RelayCounters{Applied: 1, Unknown: 1})
+				found := recordsWith(live.logs(), "access cut kind unknown")
+				if len(found) != 1 || found[0]["level"] != "WARN" || found[0]["kind"] != string(kind) ||
+					found[0]["tenant_id"] != revTenantA || found[0][logging.CorrelationKey] != cutCorrelation ||
+					found[0]["cut_id"] != float64(unknown.ID) {
+					t.Fatalf("unknown records = %v, want one WARN record of the cut with its kind", found)
+				}
+				for _, record := range live.logs() {
+					for key, value := range record {
+						if value == string(revModerator) {
+							t.Fatalf("record %v logs the account under %q", record, key)
+						}
+					}
 				}
 			})
 		})
