@@ -7,8 +7,10 @@
 // process left pending are applied at start, before the server listens. The canvas storage quota is always served (US-016);
 // uploads need object storage and contained inspection, and with them the
 // asset reconciler runs (TE-013). Without any media variable, uploads answer
-// media_unavailable. Shutdown stops HTTP, then the publisher and the hub,
-// then the reconciler, then the relay, then the registry.
+// media_unavailable. Object locks are held in memory, in lock sessions bound
+// to registry leases (US-020). Shutdown stops HTTP, then the publisher and
+// the hub, then the reconciler, then the relay, then the lock sessions and
+// the lock manager, then the registry.
 //
 // Usage:
 //
@@ -62,11 +64,13 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/invitation"
+	"github.com/enzoruiz/pepicanvas/backend/internal/locking"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/httpapi"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/ingress"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/locksession"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/logging"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
@@ -80,8 +84,9 @@ const (
 	defaultListenAddr = "127.0.0.1:8080"
 	startupTimeout    = 15 * time.Second
 	// shutdownTimeout bounds HTTP draining and closing the outbox publisher,
-	// the realtime hub, and the reconciler, and then the relay and registry
-	// stop; full process shutdown belongs to TE-016.
+	// the realtime hub, and the reconciler, and then the relay, the lock
+	// sessions, the lock manager, and the registry stop; full process
+	// shutdown belongs to TE-016.
 	shutdownTimeout = 5 * time.Second
 	// outboxOperationPrefix starts the operation ID of every command
 	// outbox.HubSink submits (outbox-<record ID>).
@@ -217,6 +222,17 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if err != nil {
 		return err
 	}
+	// Every lock is reauthorized against the memberships on each acquire
+	// and heartbeat, and each lock session holds a registry lease, so an
+	// access cut frees its locks.
+	lockManager, err := locking.NewManager(locking.Config{Authorize: httpapi.LockAuthorizer(store), Logger: logger})
+	if err != nil {
+		return err
+	}
+	lockSessions, err := locksession.New(locksession.Config{Manager: lockManager, Registry: registry, Logger: logger})
+	if err != nil {
+		return err
+	}
 	subscriptions := postgres.NewSubscriptionStore(pool)
 	invitations := postgres.NewInvitationStore(pool)
 	// Every committed usage change wrote an outbox record (CTRL-CONS-01).
@@ -261,6 +277,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Media:       mediaStore,
 		Storage:     storage,
 		Inspector:   inspector,
+		Locks:       &httpapi.Locks{Directory: lockSessions, Manager: lockManager, Grants: store},
 		Ingress:     in,
 		Logger:      logger,
 		Limits:      httpapi.DefaultLimits,
@@ -279,13 +296,22 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 	// Runs after the HTTP server drained, so no deactivation or revocation
-	// commits a cut the stopped relay would leave for the next start, and
-	// before the pool closes.
+	// commits a cut the stopped relay would leave for the next start, and no
+	// lock request is in flight, and before the pool closes. The lock
+	// sessions close before the lock manager, which drains protected
+	// commits, and both before the registry, so sessions end as shutdown
+	// rather than as cut connections.
 	defer func() {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancelShutdown()
 		if err := relay.Close(shutdownCtx); err != nil {
 			logger.Error("cut relay stopped", slog.Any("error", err))
+		}
+		if err := lockSessions.Close(shutdownCtx); err != nil {
+			logger.Error("lock sessions stopped", slog.Any("error", err))
+		}
+		if err := lockManager.Close(shutdownCtx); err != nil {
+			logger.Error("lock manager stopped", slog.Any("error", err))
 		}
 		if err := registry.Close(shutdownCtx); err != nil {
 			logger.Error("registry stopped", slog.Any("error", err))

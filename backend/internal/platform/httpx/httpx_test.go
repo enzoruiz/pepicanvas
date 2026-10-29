@@ -110,6 +110,9 @@ func TestResponderErrorNeverReflectsSecrets(t *testing.T) {
 		{httpx.ErrReferenceExists, http.StatusConflict},
 		{httpx.ErrUploadFailed, http.StatusBadGateway},
 		{httpx.ErrMediaUnavailable, http.StatusServiceUnavailable},
+		{httpx.ErrLockSessionGone, http.StatusGone},
+		{httpx.ErrNotLockHolder, http.StatusConflict},
+		{httpx.ErrLockUnavailable, http.StatusServiceUnavailable},
 	}
 	for _, tc := range cases {
 		logs.Reset()
@@ -158,6 +161,19 @@ func TestMediaCodesAreStable(t *testing.T) {
 		httpx.ErrReferenceExists:  "reference_exists",
 		httpx.ErrUploadFailed:     "upload_failed",
 		httpx.ErrMediaUnavailable: "media_unavailable",
+	} {
+		if string(code) != want {
+			t.Errorf("code = %q, want %q", code, want)
+		}
+	}
+}
+
+func TestLockCodesAreStable(t *testing.T) {
+	// The editor matches these exact public identifiers (US-020).
+	for code, want := range map[httpx.ErrorCode]string{
+		httpx.ErrLockSessionGone: "lock_session_gone",
+		httpx.ErrNotLockHolder:   "not_lock_holder",
+		httpx.ErrLockUnavailable: "lock_unavailable",
 	} {
 		if string(code) != want {
 			t.Errorf("code = %q, want %q", code, want)
