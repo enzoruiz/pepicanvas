@@ -115,7 +115,10 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 // tenant whose subscription is not active returns media.ErrInactive and
 // writes nothing, except Abandon: a failed upload always releases its
 // reservation. An equal retry of a command committed before the deactivation
-// still replays its result, since a replay has no effect.
+// still replays its result, since a replay has no effect. A command with an
+// acting account that is no longer a member of the tenant returns
+// access.ErrAccessDenied and writes nothing, without a replay either (US-006);
+// Abandon and system work, without an actor, are not checked.
 func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (media.Result, error) {
 	if err := media.ValidateCommand(key, operation, command); err != nil {
 		return media.Result{}, err
@@ -139,6 +142,22 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 		}
 		_, abandon := command.(media.Abandon)
 		accepted := abandon || errors.Is(err, pgx.ErrNoRows) || status == string(access.SubscriptionActive)
+		// The actor's membership stays shared-locked until commit, so a
+		// revocation commits either before this read, and the command is
+		// rejected, or after this commit. The order media usage, tenant FOR
+		// SHARE, membership FOR SHARE cannot deadlock with a revocation, which
+		// takes the tenant FOR UPDATE before the membership FOR UPDATE: whoever
+		// holds the tenant row first finishes before the other reaches the
+		// membership.
+		if operation.AccountID != "" && !abandon {
+			_, err := q.LockActorMembership(ctx, db.LockActorMembershipParams{TenantID: key.TenantID, AccountID: operation.AccountID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return access.ErrAccessDenied
+			}
+			if err != nil {
+				return err
+			}
+		}
 		// As in CanvasStore.Apply, the replay check runs after the status read:
 		// a rejected tenant still replays an equal retry, and without purging
 		// expired operations, so the replay writes nothing.
@@ -695,7 +714,7 @@ func wrapMedia(action string, err error) error {
 	if err == nil {
 		return nil
 	}
-	for _, domain := range []error{media.ErrNotFound, media.ErrInvalid, media.ErrQuotaExceeded, media.ErrReferenceExists, media.ErrOperationConflict, media.ErrInactive} {
+	for _, domain := range []error{media.ErrNotFound, media.ErrInvalid, media.ErrQuotaExceeded, media.ErrReferenceExists, media.ErrOperationConflict, media.ErrInactive, access.ErrAccessDenied} {
 		if errors.Is(err, domain) {
 			return err
 		}

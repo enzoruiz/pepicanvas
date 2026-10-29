@@ -771,7 +771,8 @@ func (a *api) load(w http.ResponseWriter, r *http.Request, key canvas.Key) (canv
 
 // canvas answers a canvas request. Every denial, including a missing tenant
 // or canvas, returns the same forbidden answer, so no response reveals
-// whether a canvas exists for another tenant.
+// whether a canvas exists for another tenant. The caller is reauthorized
+// after the load and before the canvas is written.
 func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -785,7 +786,29 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, newCanvasBody(loaded))
+	a.deliver(w, r, principal, key, newCanvasBody(loaded))
+}
+
+// deliver reauthorizes the caller's view access to the canvas immediately
+// before writing body, so data read before a revocation is never delivered
+// after its confirmation (US-006 S8). A denial is the route's forbidden
+// answer and writes no part of body.
+func (a *api) deliver(w http.ResponseWriter, r *http.Request, principal access.Principal, key canvas.Key, body any) {
+	var loadErr error
+	err := access.GuardReadDelivery(func() (access.Request, error) {
+		membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
+		loadErr = err
+		return access.CanvasRequest(membership, found, key.TenantID, access.ActionView), err
+	}, func() error {
+		writeJSON(w, http.StatusOK, body)
+		return nil
+	})
+	switch {
+	case loadErr != nil:
+		a.responder.Error(w, r, httpx.ErrInternal, loadErr)
+	case err != nil:
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	}
 }
 
 // authorizeCanvas reads the canvas key from the path and checks the caller
