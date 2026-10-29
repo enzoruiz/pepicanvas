@@ -210,12 +210,14 @@ func (e *env) expectLocks(s signedIn, path, want string) {
 	e.expectBody(e.do(http.MethodGet, path+"/locks", nil, withSession(s.token)), http.StatusOK, want)
 }
 
-func granted(op, object, name string, mine bool, expiresMS int) string {
-	return fmt.Sprintf(`{"operation_id":%q,"outcome":"granted","object_id":%q,"holder":{"name":%q,"mine":%t},"expires_in_ms":%d}`, op, object, name, mine, expiresMS)
+// granted and denied are acquire answers. They carry no time left, so a
+// retried acquire answers byte for byte the same (CTRL-IDEM-01).
+func granted(op, object, name string, mine bool) string {
+	return fmt.Sprintf(`{"operation_id":%q,"outcome":"granted","object_id":%q,"holder":{"name":%q,"mine":%t}}`, op, object, name, mine)
 }
 
-func denied(op, object, name string, expiresMS int) string {
-	return fmt.Sprintf(`{"operation_id":%q,"outcome":"denied","object_id":%q,"holder":{"name":%q,"mine":false},"expires_in_ms":%d}`, op, object, name, expiresMS)
+func denied(op, object, name string) string {
+	return fmt.Sprintf(`{"operation_id":%q,"outcome":"denied","object_id":%q,"holder":{"name":%q,"mine":false}}`, op, object, name)
 }
 
 func released(op, object, reason string) string {
@@ -253,7 +255,7 @@ func TestOneVisibleHolder(t *testing.T) {
 		bobLock := e.openLock(p.bob, path)
 
 		e.expectBody(e.lockAction(p.alice.signedIn, path, aliceLock, "acquire", acquiring("op-lock-s3-000001", "obj-0")),
-			http.StatusOK, granted("op-lock-s3-000001", "obj-0", "alice@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s3-000001", "obj-0", "alice@example.com", true))
 		e.expectLocks(p.alice.signedIn, path, lockList(lockOf("obj-0", "alice@example.com", true)))
 		e.expectLocks(p.bob, path, lockList(lockOf("obj-0", "alice@example.com", false)))
 
@@ -279,7 +281,7 @@ func TestOneVisibleHolder(t *testing.T) {
 			if a.outcome.status != http.StatusOK {
 				t.Fatalf("acquire = %d %s", a.outcome.status, a.outcome.body)
 			}
-			if a.outcome.body == granted(a.op, "obj-1", a.name, true, 5000)+"\n" {
+			if a.outcome.body == granted(a.op, "obj-1", a.name, true)+"\n" {
 				if winner != nil {
 					t.Fatal("two simultaneous acquires were both granted")
 				}
@@ -291,7 +293,7 @@ func TestOneVisibleHolder(t *testing.T) {
 		if winner == nil || loser == nil {
 			t.Fatalf("answers = %s / %s, want one granted and one denied", attempts[0].outcome.body, attempts[1].outcome.body)
 		}
-		if want := denied(loser.op, "obj-1", winner.name, 5000) + "\n"; loser.outcome.body != want {
+		if want := denied(loser.op, "obj-1", winner.name) + "\n"; loser.outcome.body != want {
 			t.Fatalf("denied answer = %s, want %s", loser.outcome.body, want)
 		}
 		e.expectLocks(winner.s, path, lockList(lockOf("obj-0", "alice@example.com", winner == attempts[0]), lockOf("obj-1", winner.name, true)))
@@ -309,15 +311,15 @@ func TestOtherParticipantsLockOtherObjects(t *testing.T) {
 		aliceLock := e.openLock(p.alice.signedIn, path)
 		bobLock := e.openLock(p.bob, path)
 		e.expectBody(e.lockAction(p.alice.signedIn, path, aliceLock, "acquire", acquiring("op-lock-s4-000001", "obj-1")),
-			http.StatusOK, granted("op-lock-s4-000001", "obj-1", "alice@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s4-000001", "obj-1", "alice@example.com", true))
 
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s4-000002", "obj-1")),
-			http.StatusOK, denied("op-lock-s4-000002", "obj-1", "alice@example.com", 5000))
+			http.StatusOK, denied("op-lock-s4-000002", "obj-1", "alice@example.com"))
 		expectError(t, e.lockAction(p.bob, path, bobLock, "release", releasing("op-lock-s4-000003", "obj-1", "finished")), http.StatusConflict, "not_lock_holder")
 		e.expectLocks(p.bob, path, lockList(lockOf("obj-1", "alice@example.com", false)))
 
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s4-000004", "obj-2")),
-			http.StatusOK, granted("op-lock-s4-000004", "obj-2", "bob@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s4-000004", "obj-2", "bob@example.com", true))
 		e.expectLocks(p.alice.signedIn, path, lockList(lockOf("obj-1", "alice@example.com", true), lockOf("obj-2", "bob@example.com", false)))
 	})
 }
@@ -337,12 +339,12 @@ func TestFinishAndCancelReleaseAtOnce(t *testing.T) {
 		e.expectLocks(p.bob, path, lockList())
 
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s5-000003", "obj-1")),
-			http.StatusOK, granted("op-lock-s5-000003", "obj-1", "bob@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s5-000003", "obj-1", "bob@example.com", true))
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "release", releasing("op-lock-s5-000004", "obj-1", "cancelled")),
 			http.StatusOK, released("op-lock-s5-000004", "obj-1", "cancelled"))
 		e.expectLocks(p.alice.signedIn, path, lockList())
 		e.expectBody(e.lockAction(p.alice.signedIn, path, aliceLock, "acquire", acquiring("op-lock-s5-000005", "obj-1")),
-			http.StatusOK, granted("op-lock-s5-000005", "obj-1", "alice@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s5-000005", "obj-1", "alice@example.com", true))
 	})
 }
 
@@ -365,14 +367,14 @@ func TestHeartbeatKeepsTheLockAndSilenceFreesItAtFiveSeconds(t *testing.T) {
 		}
 		time.Sleep(5*time.Second - time.Millisecond)
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s6-000002", "obj-1")),
-			http.StatusOK, denied("op-lock-s6-000002", "obj-1", "alice@example.com", 1))
+			http.StatusOK, denied("op-lock-s6-000002", "obj-1", "alice@example.com"))
 		e.expectLocks(p.bob, path, lockList(lockOf("obj-1", "alice@example.com", false)))
 
 		time.Sleep(time.Millisecond)
 		synctest.Wait()
 		e.expectLocks(p.bob, path, lockList())
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s6-000003", "obj-1")),
-			http.StatusOK, granted("op-lock-s6-000003", "obj-1", "bob@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s6-000003", "obj-1", "bob@example.com", true))
 	})
 }
 
@@ -446,7 +448,7 @@ func TestAccessCutsFreeLocks(t *testing.T) {
 		x.versions.Store(p.alice.tenantID, uint64(2))
 		bobLock = e.openLock(p.bob, path)
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s8-000004", "obj-b")),
-			http.StatusOK, granted("op-lock-s8-000004", "obj-b", "bob@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s8-000004", "obj-b", "bob@example.com", true))
 
 		// The manager's own reauthorization ends a lock on a heartbeat once
 		// the membership is gone.
@@ -515,7 +517,7 @@ func TestTenantsHaveIndependentLocks(t *testing.T) {
 		}
 		e.expectBody(e.lockAction(p.alice.signedIn, a, aliceLock, "heartbeat", nil), http.StatusOK, `{"renewed":[{"object_id":"obj-1","expires_in_ms":5000}],"lost":[]}`)
 		e.expectBody(e.lockAction(carol.signedIn, b, carolLock, "acquire", acquiring("op-lock-s9-000001", "obj-1")),
-			http.StatusOK, granted("op-lock-s9-000001", "obj-1", "carol@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s9-000001", "obj-1", "carol@example.com", true))
 		e.expectLocks(p.alice.signedIn, a, lockList(lockOf("obj-1", "alice@example.com", true)))
 		e.expectLocks(carol.signedIn, b, lockList(lockOf("obj-1", "carol@example.com", true)))
 		e.expectBody(e.lockAction(p.alice.signedIn, a, aliceLock, "release", releasing("op-lock-s9-000006", "obj-1", "finished")),
@@ -601,8 +603,11 @@ func TestLockRetriesHaveOneEffect(t *testing.T) {
 		bobLock := e.openLock(p.bob, path)
 
 		const acquire, release = "op-lock-s12-00001", "op-lock-s12-00002"
-		answer := granted(acquire, "obj-1", "alice@example.com", true, 5000)
+		answer := granted(acquire, "obj-1", "alice@example.com", true)
 		e.expectBody(e.lockAction(p.alice.signedIn, path, first, "acquire", acquiring(acquire, "obj-1")), http.StatusOK, answer)
+		e.expectBody(e.lockAction(p.alice.signedIn, path, first, "acquire", acquiring(acquire, "obj-1")), http.StatusOK, answer)
+		// A retry after time passed still answers byte for byte the same.
+		time.Sleep(2 * time.Second)
 		e.expectBody(e.lockAction(p.alice.signedIn, path, first, "acquire", acquiring(acquire, "obj-1")), http.StatusOK, answer)
 		before := e.effects()
 		expectError(t, e.lockAction(p.alice.signedIn, path, first, "acquire", acquiring(acquire, "obj-2")), http.StatusConflict, "conflict")
@@ -613,7 +618,7 @@ func TestLockRetriesHaveOneEffect(t *testing.T) {
 
 		e.expectBody(e.lockAction(p.alice.signedIn, path, first, "release", releasing(release, "obj-1", "finished")), http.StatusOK, released(release, "obj-1", "finished"))
 		e.expectBody(e.lockAction(p.bob, path, bobLock, "acquire", acquiring("op-lock-s12-00003", "obj-1")),
-			http.StatusOK, granted("op-lock-s12-00003", "obj-1", "bob@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-s12-00003", "obj-1", "bob@example.com", true))
 		// The retried release has no second effect: bob keeps the lock.
 		e.expectBody(e.lockAction(p.alice.signedIn, path, first, "release", releasing(release, "obj-1", "finished")), http.StatusOK, released(release, "obj-1", "finished"))
 		expectError(t, e.lockAction(p.alice.signedIn, path, first, "release", releasing(release, "obj-1", "cancelled")), http.StatusConflict, "conflict")
@@ -630,7 +635,7 @@ func TestLockRetriesHaveOneEffect(t *testing.T) {
 		time.Sleep(time.Minute)
 		third := e.openLock(p.alice.signedIn, path)
 		e.expectBody(e.lockAction(p.alice.signedIn, path, third, "acquire", acquiring(acquire, "obj-2")),
-			http.StatusOK, granted(acquire, "obj-2", "alice@example.com", true, 5000))
+			http.StatusOK, granted(acquire, "obj-2", "alice@example.com", true))
 		e.expectLocks(p.alice.signedIn, path, lockList(lockOf("obj-2", "alice@example.com", true)))
 	})
 }
@@ -766,7 +771,7 @@ func TestMalformedLockRequestsHaveNoEffect(t *testing.T) {
 		}
 		// No rejected operation ID was retained.
 		e.expectBody(e.lockAction(p.alice.signedIn, path, aliceLock, "acquire", acquiring("op-lock-bad-00004", "obj-2")),
-			http.StatusOK, granted("op-lock-bad-00004", "obj-2", "alice@example.com", true, 5000))
+			http.StatusOK, granted("op-lock-bad-00004", "obj-2", "alice@example.com", true))
 		e.expectBody(e.lockAction(p.alice.signedIn, path, aliceLock, "release", releasing("op-lock-bad-00008", "obj-1", "finished")),
 			http.StatusOK, released("op-lock-bad-00008", "obj-1", "finished"))
 	})

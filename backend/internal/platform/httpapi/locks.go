@@ -120,7 +120,6 @@ type acquireResult struct {
 	Outcome     string     `json:"outcome"`
 	ObjectID    string     `json:"object_id"`
 	Holder      lockHolder `json:"holder"`
-	ExpiresInMS int64      `json:"expires_in_ms"`
 }
 
 type releaseBody struct {
@@ -254,7 +253,6 @@ func (a *api) acquireLock(w http.ResponseWriter, r *http.Request) {
 		Outcome:     string(result.Outcome),
 		ObjectID:    result.Lease.Key.ObjectID,
 		Holder:      a.lockHolder(principal, result.Lease.Holder),
-		ExpiresInMS: expiresIn(result.Lease, a.Locks.now()),
 	})
 }
 

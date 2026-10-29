@@ -77,14 +77,12 @@ describe("lock requests", () => {
         outcome: "granted",
         object_id: "obj-1",
         holder: { name: "alice@example.com", mine: true },
-        expires_in_ms: 5000,
       }),
       json(200, {
         operation_id: "op-2",
         outcome: "denied",
         object_id: "obj-1",
         holder: { name: "bob@example.com", mine: false },
-        expires_in_ms: 3000,
       }),
     );
     expect(
