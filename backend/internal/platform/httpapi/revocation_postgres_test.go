@@ -100,6 +100,30 @@ func TestPostgresMemberRevocationAfterTheRouteCheck(t *testing.T) {
 		wantMediaError(t, m.upload(mod, alice.path, "op-rev-05", "ref-up", false, randomBytes(t, 500)), http.StatusForbidden, "forbidden", "")
 		unchanged(t)
 	})
+	// The upload's third membership read is the reauthorization of its
+	// Complete stage: the revocation lands after the bytes are stored and
+	// reserved, so the Complete is denied at its commit, the upload abandons
+	// the asset, deletes its object, and releases the reservation.
+	t.Run("upload revoked between reserve and complete", func(t *testing.T) {
+		hooked(3)
+		defer restore()
+		wantMediaError(t, m.upload(mod, alice.path, "op-rev-06", "ref-mid", false, randomBytes(t, 700)), http.StatusForbidden, "forbidden", "")
+		m.wantUsage(alice, 3000, 0)
+		m.wantBucket()
+		if n := m.count("SELECT count(*) FROM media_assets WHERE tenant_id = $1", alice.tenantID); n != 1 {
+			t.Fatalf("assets = %d, want only the asset uploaded before", n)
+		}
+		if n := m.count("SELECT count(*) FROM media_references WHERE tenant_id = $1 AND reference_id = 'ref-mid'", alice.tenantID); n != 0 {
+			t.Fatalf("references to the revoked upload = %d, want 0", n)
+		}
+		if n := m.count("SELECT count(*) FROM media_operations WHERE tenant_id = $1 AND operation_id LIKE 'op-rev-06%' AND asset_id <> ''", alice.tenantID); n < 1 {
+			t.Fatalf("reserve stage records = %d, want the committed reserve", n)
+		}
+		// The reserve and its abandon are confirmed records, not content:
+		// later checks start from them.
+		operations = m.count("SELECT count(*) FROM media_operations WHERE tenant_id = $1", alice.tenantID)
+		outbox = m.count("SELECT count(*) FROM canvas_outbox WHERE tenant_id = $1", alice.tenantID)
+	})
 	for name, read := range map[string]func() sent{
 		"canvas": func() sent { return getCanvas(mod) },
 		"usage":  func() sent { return m.getUsage(mod, alice.path) },
