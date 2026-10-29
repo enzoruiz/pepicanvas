@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,6 +73,9 @@ type RelayCounters struct {
 	// Unknown counts cuts of a kind this release does not know, once per
 	// cut; they stay pending for a release that knows it.
 	Unknown uint64
+	// Stalled counts passes whose full batch held only unknown cuts, so the
+	// cuts behind them wait for a release that knows the kind.
+	Stalled uint64
 }
 
 // CutRelay applies the pending access cuts of the cut outbox to the live
@@ -85,12 +89,17 @@ type CutRelay struct {
 	// failures counts consecutive failed passes. Only the loop uses it.
 	failures int
 	// unknownLogged holds the pending cuts of an unknown kind already
-	// logged, among those of the last pass, so each is logged once. Only
+	// logged, so each is logged once. A pass that reads its whole batch
+	// keeps only the ones it saw; one that returns early only adds. Only
 	// the loop uses it.
 	unknownLogged map[int64]struct{}
-	wake          chan struct{}
-	stop          chan struct{}
-	done          chan struct{}
+	// stalled reports that the last pass's full batch held only unknown
+	// cuts, so the stall is logged once until a batch delivers again. Only
+	// the loop uses it.
+	stalled bool
+	wake    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
 	// abort cancels the apply in flight when Close runs out of time.
 	abort       context.Context
 	cancelAbort context.CancelFunc
@@ -99,7 +108,7 @@ type CutRelay struct {
 	started bool
 	closed  bool
 
-	applied, exceeded, rejected, retries, storeErrors, unknown atomic.Uint64
+	applied, exceeded, rejected, retries, storeErrors, unknown, stalls atomic.Uint64
 }
 
 // NewCutRelay validates the configuration. Start runs it.
@@ -189,6 +198,7 @@ func (r *CutRelay) Counters() RelayCounters {
 		Retries:     r.retries.Load(),
 		StoreErrors: r.storeErrors.Load(),
 		Unknown:     r.unknown.Load(),
+		Stalled:     r.stalls.Load(),
 	}
 }
 
@@ -251,8 +261,8 @@ func (r *CutRelay) stopping() bool {
 }
 
 // pass applies up to BatchSize pending cuts, oldest first. It returns zero
-// when a full batch settled, so a backlog does not wait for the poll, the
-// backoff when a cut stayed pending, or the poll interval.
+// when a full batch delivered a cut, so a backlog does not wait for the
+// poll, the backoff when a cut stayed pending, or the poll interval.
 func (r *CutRelay) pass() time.Duration {
 	// The pass reads the store after every commit notified so far.
 	select {
@@ -267,8 +277,16 @@ func (r *CutRelay) pass() time.Duration {
 		return r.backoff()
 	}
 	logged := make(map[int64]struct{})
-	defer func() { r.unknownLogged = logged }()
-	skipped := false
+	read := false
+	defer func() {
+		if !read {
+			// The cuts this pass did not reach are still pending and
+			// already logged; keep them.
+			maps.Copy(logged, r.unknownLogged)
+		}
+		r.unknownLogged = logged
+	}()
+	delivered := 0
 	for _, pending := range cuts {
 		if r.stopping() {
 			return 0
@@ -279,18 +297,35 @@ func (r *CutRelay) pass() time.Duration {
 			// and settling it would lose it for a release that knows its
 			// kind. It stays pending and does not hold back later cuts.
 			r.skipUnknown(pending, logged, err)
-			skipped = true
 			continue
 		}
 		if !r.deliver(pending, cut) {
 			return r.backoff()
 		}
+		delivered++
 	}
+	read = true
 	r.failures = 0
-	if len(cuts) == r.config.BatchSize && !skipped {
+	full := len(cuts) == r.config.BatchSize
+	r.reportStall(full && delivered == 0, cuts)
+	if full && delivered > 0 {
 		return 0
 	}
 	return r.config.PollInterval
+}
+
+// reportStall counts every pass whose full batch held only unknown cuts and
+// logs the first of a run of them: the cuts behind that batch wait until a
+// release that knows the kind runs.
+func (r *CutRelay) reportStall(stalled bool, cuts []PendingCut) {
+	if stalled {
+		r.stalls.Add(1)
+		if !r.stalled {
+			r.config.Logger.Warn("access cut batch holds only unknown kinds",
+				slog.Int("batch", len(cuts)), slog.Int64("first_cut_id", cuts[0].ID))
+		}
+	}
+	r.stalled = stalled
 }
 
 // skipUnknown leaves a cut of an unknown kind pending and logs it once, with
