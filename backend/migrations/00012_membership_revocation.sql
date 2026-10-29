@@ -1,6 +1,9 @@
 -- +goose Up
 -- A membership revocation (US-006) cuts one account in one tenant: its
--- access cut names the account. Deactivation cuts (US-003) name none.
+-- access cut names the account. Deactivation cuts (US-003) name none, and
+-- existing rows take the default kind. The relay maps each kind to its
+-- registry target and leaves a kind it does not know pending, so a
+-- revocation cut is never applied to the whole tenant.
 ALTER TABLE access_cuts
     ADD COLUMN kind text NOT NULL DEFAULT 'deactivation' CONSTRAINT access_cuts_kind_check CHECK (kind IN ('deactivation', 'revocation')),
     ADD COLUMN account_id text REFERENCES accounts (account_id) ON DELETE CASCADE,

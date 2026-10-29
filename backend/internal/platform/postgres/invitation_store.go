@@ -393,6 +393,8 @@ func (t *invitationTx) IncrementAccessVersion(ctx context.Context, tenantID stri
 	return uint64(version), t.store.step(ctx, "IncrementAccessVersion")
 }
 
+// RecordCut stores a pending cut of kind revocation naming the account; the
+// cut relay applies it to that account's connections in the tenant only.
 func (t *invitationTx) RecordCut(ctx context.Context, cut invitation.RevocationCut) error {
 	if cut.Version == 0 || cut.Version > math.MaxInt64 {
 		return fmt.Errorf("invalid cut version %d", cut.Version)

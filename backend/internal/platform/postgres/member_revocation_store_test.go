@@ -113,7 +113,8 @@ func testMemberRevocationCommitsEverythingAtOnce(t *testing.T, f invitations) {
 	if members, err := f.svc.Members(ctx, owner); err != nil || len(members) != 0 {
 		t.Fatalf("Members after revocation = %+v, %v; want none", members, err)
 	}
-	// A deactivation cut still has the default kind and no account.
+	// The checks tie the account to the kind: a revocation cut must name
+	// an account, and a cut of the default kind, a deactivation, must not.
 	if err := pgxExecErr(f.pool, "INSERT INTO access_cuts (tenant_id, kind, version, created_at) VALUES ($1, 'revocation', 9, now())", tenant); err == nil {
 		t.Fatal("a revocation cut without an account was accepted")
 	}

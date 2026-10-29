@@ -406,6 +406,11 @@ func (s *Service) RevokeMember(ctx context.Context, request RevokeMemberRequest)
 		// replay it, or reject a different payload.
 		result, err = s.revokeMember(ctx, request, fingerprint)
 		if errors.Is(err, ErrOperationRetained) {
+			// Revocations of one owner serialize on the tenant lock, so the
+			// retry sees any commit of its own tenant. Losing the race again
+			// means another tenant's request claimed the ID between this
+			// retry's read and its insert: an ID claimed by another request
+			// never replays here, and retrying again could race forever.
 			return MemberRevocation{}, ErrOperationConflict
 		}
 	}
