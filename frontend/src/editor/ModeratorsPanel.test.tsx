@@ -305,13 +305,23 @@ describe("ModeratorsPanel", () => {
     },
   );
 
-  it("shows a fixed message when the list is unavailable", async () => {
-    replies.push(json(500, { error: "internal", detail: bob.email }));
-    renderPanel();
+  it.each([
+    ["forbidden", 403, "Only the canvas owner can see its moderators."],
+    ["unauthorized", 401, "Your session has ended. Sign in again."],
+    [
+      "internal",
+      500,
+      "The moderators could not be loaded. Reload the page to try again.",
+    ],
+  ])(
+    "shows a list-specific message when the list fails with %s",
+    async (error, status, message) => {
+      replies.push(json(status, { error, detail: bob.email }));
+      renderPanel();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      unavailableMessage,
-    );
-    expect(document.body.textContent).not.toContain(bob.email);
-  });
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(document.body.textContent).not.toContain("revoke");
+      expect(document.body.textContent).not.toContain(bob.email);
+    },
+  );
 });

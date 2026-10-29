@@ -17,7 +17,8 @@ const unusableText =
   "This invitation link can't be used. Ask the streamer for a new one.";
 const revokedText =
   "Moderator access revoked. Their confirmed changes are kept.";
-const endedText = "Your moderator access to this canvas has ended.";
+const endedText =
+  "Your moderator access to a canvas has ended. It was removed from this list.";
 
 function uniqueEmail(label) {
   return `${label}-${randomBytes(6).toString("hex")}@example.com`;

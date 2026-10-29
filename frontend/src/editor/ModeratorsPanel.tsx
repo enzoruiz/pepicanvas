@@ -9,6 +9,7 @@ import {
 } from "../auth/api";
 
 // Safe, fixed messages: no server text, account ID, or tenant ID is shown.
+// Revocation answers; a failed list read has its own wording below.
 const messages: Record<ApiError, string> = {
   bad_request: "The request was not accepted. Reload the page and try again.",
   unauthorized: "Your session has ended. Sign in again.",
@@ -22,6 +23,21 @@ const messages: Record<ApiError, string> = {
     "Your subscription is inactive. Ask an operator to reactivate it.",
   unavailable: "The service is unavailable. Try again.",
 };
+
+const listUnavailableMessage =
+  "The moderators could not be loaded. Reload the page to try again.";
+
+function listMessage(error: ApiError): string {
+  switch (error) {
+    case "forbidden":
+      return "Only the canvas owner can see its moderators.";
+    case "unauthorized":
+    case "subscription_inactive":
+      return messages[error];
+    default:
+      return listUnavailableMessage;
+  }
+}
 
 const revokedMessage =
   "Moderator access revoked. Their confirmed changes are kept.";
@@ -63,7 +79,7 @@ export function ModeratorsPanel({
     setList(
       result.ok
         ? { kind: "ready", members: result.value }
-        : { kind: "unavailable", message: messages[result.error] },
+        : { kind: "unavailable", message: listMessage(result.error) },
     );
   }, []);
 
