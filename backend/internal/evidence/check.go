@@ -27,7 +27,7 @@ type Report struct {
 }
 
 // inconclusiveProblems never falsify a run; they require repeating it.
-var inconclusiveProblems = []string{"missing_artifact:", "version_mismatch:", "retention_expired", "recorded_inconclusive"}
+var inconclusiveProblems = []string{"no_artifacts", "missing_artifact:", "version_mismatch:", "retention_expired", "recorded_inconclusive"}
 
 // Check classifies runDir against the current pins at now. It reads only the
 // run directory, never the writer's memory. Problems are reported in this
@@ -65,6 +65,9 @@ func Check(runDir string, pins Pins, now time.Time) Report {
 		report.Problems = append(report.Problems, "run_id_mismatch")
 	}
 
+	if len(manifest.Artifacts) == 0 {
+		report.Problems = append(report.Problems, "no_artifacts")
+	}
 	intact := make(map[string][]byte, len(manifest.Artifacts))
 	for _, artifact := range manifest.Artifacts {
 		if data, problems := checkArtifact(runDir, artifact); len(problems) > 0 {
@@ -83,6 +86,11 @@ func Check(runDir string, pins Pins, now time.Time) Report {
 	mismatches := latency.Mismatches(manifest.Versions, pins)
 	for _, field := range mismatches {
 		report.Problems = append(report.Problems, "version_mismatch:"+field)
+	}
+	// A run cannot have completed after it is checked; trusting such an
+	// instant would also push its retention arbitrarily far.
+	if completedAt, _ := time.Parse(time.RFC3339, manifest.CompletedAt); completedAt.After(now) {
+		report.Problems = append(report.Problems, "completed_in_future")
 	}
 	expiresAt, _ := time.Parse(time.RFC3339, manifest.Retention.ExpiresAt)
 	if !now.Before(expiresAt) {

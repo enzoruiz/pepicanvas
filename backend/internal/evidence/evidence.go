@@ -200,7 +200,9 @@ func (w *Writer) Dir() string { return w.dir }
 func (w *Writer) RunID() string { return w.runID }
 
 // Add writes one artifact. name must be a single safe path element and data
-// must be unchanged by secret.Scrub; otherwise nothing is written.
+// must be unchanged by secret.Scrub; otherwise nothing is written and the
+// writer stays usable. A failed durable write closes the writer, so the run
+// keeps its INCOMPLETE marker and can never be completed.
 func (w *Writer) Add(name, kind string, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -219,6 +221,7 @@ func (w *Writer) Add(name, kind string, data []byte) error {
 		return ErrSecret
 	}
 	if err := writeFileAtomic(w.dir, name, data); err != nil {
+		w.closed = true
 		return err
 	}
 	w.artifacts = append(w.artifacts, Artifact{Name: name, Kind: kind, SHA256: sha256Hex(data), Bytes: int64(len(data))})
@@ -226,8 +229,9 @@ func (w *Writer) Add(name, kind string, data []byte) error {
 }
 
 // Complete writes manifest.json and then removes the INCOMPLETE marker. An
-// invalid result or instant is rejected without closing the writer; any later
-// failure closes it and leaves the run visibly incomplete.
+// invalid result or instant, or a run without artifacts, is rejected without
+// closing the writer; any later failure closes it and leaves the run visibly
+// incomplete.
 func (w *Writer) Complete(result string, completedAt time.Time) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -236,7 +240,7 @@ func (w *Writer) Complete(result string, completedAt time.Time) error {
 	}
 	started := w.run.StartedAt.UTC().Truncate(time.Second)
 	completed := completedAt.UTC().Truncate(time.Second)
-	if !validResult(result) || completedAt.IsZero() || completed.Before(started) {
+	if !validResult(result) || completedAt.IsZero() || completed.Before(started) || len(w.artifacts) == 0 {
 		return ErrInvalidRun
 	}
 	w.closed = true

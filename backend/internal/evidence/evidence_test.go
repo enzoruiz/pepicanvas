@@ -112,9 +112,13 @@ type artifact struct {
 	data       []byte
 }
 
-// writeRun completes one run under root and returns its directory.
+// writeRun completes one run under root and returns its directory. A run
+// needs an artifact, so one is added when none is given.
 func writeRun(t *testing.T, root string, run evidence.Run, result string, artifacts ...artifact) string {
 	t.Helper()
+	if len(artifacts) == 0 {
+		artifacts = []artifact{{"data.txt", "log", []byte("ok\n")}}
+	}
 	w, err := evidence.Begin(root, run)
 	if err != nil {
 		t.Fatalf("Begin() error = %v", err)
@@ -333,6 +337,9 @@ func TestCheckIncompleteRuns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := w.Add("data.txt", "log", []byte("ok\n")); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Chmod(w.Dir(), 0o500); err != nil {
 			t.Fatal(err)
 		}
@@ -371,6 +378,9 @@ func TestWriterRejectsWritesAfterComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := w.Add("data.txt", "log", []byte("ok\n")); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.Complete(evidence.ResultPass, completed); err != nil {
 		t.Fatal(err)
 	}
@@ -405,13 +415,16 @@ func TestAddRejectsSecretsBeforePersisting(t *testing.T) {
 			if err := w.Add("leak.txt", "log", []byte(payload)); !errors.Is(err, evidence.ErrSecret) {
 				t.Fatalf("Add() error = %v, want ErrSecret", err)
 			}
+			if err := w.Add("data.txt", "log", []byte("ok\n")); err != nil {
+				t.Fatalf("Add() after a rejected secret error = %v", err)
+			}
 			if err := w.Complete(evidence.ResultPass, completed); err != nil {
 				t.Fatal(err)
 			}
 			entries, _ := os.ReadDir(w.Dir())
 			for _, entry := range entries {
 				data, _ := os.ReadFile(filepath.Join(w.Dir(), entry.Name()))
-				if entry.Name() != "manifest.json" || strings.Contains(string(data), "leak.txt") || strings.Contains(string(data), sentinel) {
+				if (entry.Name() != "manifest.json" && entry.Name() != "data.txt") || strings.Contains(string(data), "leak.txt") || strings.Contains(string(data), sentinel) {
 					t.Fatalf("rejected secret persisted in %s", entry.Name())
 				}
 			}

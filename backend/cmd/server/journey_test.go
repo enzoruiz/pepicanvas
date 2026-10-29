@@ -253,8 +253,9 @@ func TestJourneyCorrelatesAResizeAcrossTheOutboxPerAccount(t *testing.T) {
 }
 
 // persistJourney writes A's spans and log lines as a durable run under
-// PEPICANVAS_EVIDENCE_DIR, or a temp directory, and checks that the
-// independent reader classifies it PASS.
+// PEPICANVAS_EVIDENCE_DIR, or a temp directory, recording FAIL when any
+// earlier check failed, and checks that the independent reader classifies it
+// accordingly.
 func persistJourney(t *testing.T, startedAt time.Time, id correlation.ID, spans []telemetry.SpanData, logLines []string) {
 	t.Helper()
 	repo := filepath.Join("..", "..", "..")
@@ -288,12 +289,16 @@ func persistJourney(t *testing.T, startedAt time.Time, id correlation.ID, spans 
 	if err := writer.Add("logs.jsonl", "log-records", []byte(strings.Join(logLines, "\n")+"\n")); err != nil {
 		t.Fatalf("Add logs: %v", err)
 	}
-	if err := writer.Complete(evidence.ResultPass, time.Now()); err != nil {
+	result, want := evidence.ResultPass, evidence.Pass
+	if t.Failed() {
+		result, want = evidence.ResultFail, evidence.Fail
+	}
+	if err := writer.Complete(result, time.Now()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	report := evidence.Check(writer.Dir(), pins, time.Now())
-	if report.Classification != evidence.Pass || report.Scenario != journeyScenario || report.Recorded != evidence.ResultPass {
-		t.Fatalf("Check(%s) = %+v, want PASS", writer.Dir(), report)
+	if report.Classification != want || report.Scenario != journeyScenario || report.Recorded != result {
+		t.Fatalf("Check(%s) = %+v, want %s", writer.Dir(), report, want)
 	}
 	t.Logf("evidence run %s", writer.Dir())
 }
