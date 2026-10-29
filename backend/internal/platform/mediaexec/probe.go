@@ -21,21 +21,16 @@ const (
 	ErrorUnsupportedMedia       ErrorCode = "unsupported_media"
 	ErrorFrameMetadataRequired  ErrorCode = "frame_metadata_required"
 	ErrorConfiguration          ErrorCode = "configuration_invalid"
-	ErrorInputTooLarge          ErrorCode = "input_too_large"
 	ErrorStagingFailed          ErrorCode = "staging_failed"
 	ErrorCommandFailed          ErrorCode = "command_failed"
 	ErrorTimeout                ErrorCode = "timeout"
 	ErrorOutputOverflow         ErrorCode = "output_overflow"
 	ErrorInvalidFrames          ErrorCode = "invalid_frames"
-	ErrorValidation             ErrorCode = "validation_failed"
 	ErrorCleanupFailed          ErrorCode = "cleanup_failed"
 	ErrorContainmentUnavailable ErrorCode = "containment_unavailable"
 	ErrorContainmentSetup       ErrorCode = "containment_setup_failed"
 	ErrorContainmentCleanup     ErrorCode = "containment_cleanup_failed"
 	ErrorCancelled              ErrorCode = "cancelled"
-	ErrorMemoryLimit            ErrorCode = "memory_limit_exceeded"
-	ErrorTaskLimit              ErrorCode = "task_limit_exceeded"
-	ErrorCPULimit               ErrorCode = "cpu_limit_exceeded"
 	ErrorExecutionFailed        ErrorCode = "execution_failed"
 )
 
@@ -45,21 +40,16 @@ var errorMessages = map[ErrorCode]string{
 	ErrorUnsupportedMedia:       "media format is unsupported",
 	ErrorFrameMetadataRequired:  "GIF frame metadata is required",
 	ErrorConfiguration:          "media inspection configuration is invalid",
-	ErrorInputTooLarge:          "media input exceeds the staging limit",
 	ErrorStagingFailed:          "media input staging failed",
 	ErrorCommandFailed:          "media inspection command failed",
 	ErrorTimeout:                "media inspection timed out",
 	ErrorOutputOverflow:         "media tool output exceeds the allowed size",
 	ErrorInvalidFrames:          "GIF frame metadata is invalid",
-	ErrorValidation:             "media inspection failed validation",
 	ErrorCleanupFailed:          "media inspection cleanup failed",
 	ErrorContainmentUnavailable: "media containment is unavailable",
 	ErrorContainmentSetup:       "media containment setup failed",
 	ErrorContainmentCleanup:     "media containment cleanup failed",
 	ErrorCancelled:              "media inspection was cancelled",
-	ErrorMemoryLimit:            "media inspection exceeded its memory limit",
-	ErrorTaskLimit:              "media inspection exceeded its task limit",
-	ErrorCPULimit:               "media inspection exceeded its CPU limit",
 	ErrorExecutionFailed:        "media inspection execution failed",
 }
 
@@ -103,6 +93,39 @@ type normalizedFormat struct {
 	container  container
 	videoCodec string
 	audioCodec string
+	// declared is the GIF stream size every decoded frame must match.
+	declared media.Dimensions
+}
+
+// mediaType is the content-derived type of the classified container.
+func (format normalizedFormat) mediaType() string {
+	switch format.container {
+	case containerJPEG:
+		return "image/jpeg"
+	case containerPNG:
+		return "image/png"
+	case containerWebP:
+		return "image/webp"
+	case containerGIF:
+		return "image/gif"
+	case containerMP3:
+		return "audio/mpeg"
+	case containerWAV:
+		return "audio/wav"
+	case containerFLAC:
+		return "audio/flac"
+	case containerOgg:
+		return "audio/ogg"
+	case containerISOBaseMedia:
+		if format.videoCodec == "" {
+			return "audio/mp4"
+		}
+		return "video/mp4"
+	case containerWebM:
+		return "video/webm"
+	default:
+		return ""
+	}
 }
 
 type probeDocument struct {
@@ -289,6 +312,7 @@ func classifyGIF(base media.Inspection, videos, audios []probeStream, formatDura
 	base.Kind = media.KindGIF
 	base.Duration = duration
 	base.GIFFrameCount = frames
+	normalized.declared = media.Dimensions{Width: videos[0].Width, Height: videos[0].Height}
 	return base, normalized, ErrorFrameMetadataRequired
 }
 

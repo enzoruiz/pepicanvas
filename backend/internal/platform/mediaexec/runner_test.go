@@ -97,20 +97,24 @@ func TestGuardedExecutionRejectsUseAfterCloseAndDuplicateClose(t *testing.T) {
 func TestInspectMapsEveryExecutionResultAtEveryLifecycleStage(t *testing.T) {
 	t.Parallel()
 
+	// Limits the content exhausts are rejections at every stage; a tool exit
+	// is a rejection only for a command that inspects the content.
 	tests := []struct {
-		name    string
-		failure FailureKind
-		code    ErrorCode
+		name      string
+		failure   FailureKind
+		code      ErrorCode
+		rejection media.RejectionCode
+		runOnly   bool
 	}{
 		{name: "containment unavailable", failure: FailureContainmentUnavailable, code: ErrorContainmentUnavailable},
 		{name: "containment setup", failure: FailureContainmentSetup, code: ErrorContainmentSetup},
 		{name: "containment cleanup", failure: FailureContainmentCleanup, code: ErrorContainmentCleanup},
 		{name: "timeout", failure: FailureTimeout, code: ErrorTimeout},
 		{name: "cancellation", failure: FailureCancelled, code: ErrorCancelled},
-		{name: "memory limit", failure: FailureMemoryLimit, code: ErrorMemoryLimit},
-		{name: "task limit", failure: FailureTaskLimit, code: ErrorTaskLimit},
-		{name: "CPU limit", failure: FailureCPULimit, code: ErrorCPULimit},
-		{name: "tool exit", failure: FailureToolExit, code: ErrorCommandFailed},
+		{name: "memory limit", failure: FailureMemoryLimit, rejection: media.RejectionResourcesExceeded},
+		{name: "task limit", failure: FailureTaskLimit, rejection: media.RejectionResourcesExceeded},
+		{name: "CPU limit", failure: FailureCPULimit, rejection: media.RejectionResourcesExceeded},
+		{name: "tool exit", failure: FailureToolExit, code: ErrorCommandFailed, rejection: media.RejectionUnsupportedKind, runOnly: true},
 		{name: "internal execution", failure: FailureInternal, code: ErrorExecutionFailed},
 	}
 	for _, stage := range []string{"begin", "run", "close"} {
@@ -138,7 +142,12 @@ func TestInspectMapsEveryExecutionResultAtEveryLifecycleStage(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, err = adapter.Inspect(context.Background(), strings.NewReader("x"))
-				assertAdapterError(t, err, tt.code)
+				switch {
+				case tt.rejection != "" && (!tt.runOnly || stage == "run"):
+					assertRejectionCode(t, err, tt.rejection)
+				default:
+					assertAdapterError(t, err, tt.code)
+				}
 			})
 		}
 	}
@@ -259,7 +268,7 @@ func TestInspectClosesExecutionOnEveryPostBeginEarlyExit(t *testing.T) {
 		},
 		{
 			name:      "domain validation failure",
-			configure: func(config *Config) { config.Limits.MaxWidth = 10 },
+			configure: func(config *Config) { config.Limits.MaxImageWidth = 10 },
 			run: func(_ int, _ Command, stdout, _ io.Writer) Result {
 				_, _ = io.WriteString(stdout, strings.Replace(imageProbe(), `"width":10`, `"width":11`, 1))
 				return SuccessfulResult()

@@ -56,6 +56,9 @@ func New(config Config, runner Runner) (*Adapter, error) {
 // Inspect consumes one untrusted byte stream. Context is checked between source
 // reads; a Reader that can block indefinitely must be made cancelable by its
 // owner. One deadline and one output budget cover staging and every command.
+// A failure the content causes is a *media.Rejection naming the broken rule;
+// timeout, cancellation, containment, staging I/O, output overflow, cleanup
+// and execution failures are an *Error.
 func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspection media.Inspection, resultErr error) {
 	ctx, cancel := context.WithTimeout(parent, adapter.config.Limits.InspectionTimeout)
 	defer cancel()
@@ -86,30 +89,39 @@ func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspe
 	}()
 
 	budget := newCaptureBudget(adapter.config.Limits.MaxCapturedOutputBytes)
-	metadata, err := adapter.run(ctx, execution, budget, metadataCommand(adapter.config, dir, input))
+	// ffprobe exits with an error only when no demuxer identifies the content.
+	metadata, _, err := adapter.run(ctx, execution, budget, metadataCommand(adapter.config, dir, input))
 	if err != nil {
-		return media.Inspection{}, err
+		return media.Inspection{}, rejectContent(err, media.RejectionUnsupportedKind)
 	}
-	inspection, _, err = NormalizeProbe(metadata, inputBytes, adapter.config.Limits.MaxCapturedOutputBytes)
+	inspection, format, err := NormalizeProbe(metadata, inputBytes, adapter.config.Limits.MaxCapturedOutputBytes)
 	if err != nil {
 		var adapterError *Error
 		if !errors.As(err, &adapterError) || adapterError.Code() != ErrorFrameMetadataRequired {
-			return media.Inspection{}, safeNormalizationError(err)
+			return media.Inspection{}, rejectContent(safeNormalizationError(err), "")
 		}
-		frames, runErr := adapter.run(ctx, execution, budget, frameCommand(adapter.config, dir, input))
+		// The frame probe decodes every GIF frame.
+		frames, _, runErr := adapter.run(ctx, execution, budget, frameCommand(adapter.config, dir, input))
 		if runErr != nil {
-			return media.Inspection{}, runErr
+			return media.Inspection{}, rejectContent(runErr, media.RejectionDecodeFailed)
 		}
-		inspection, err = mergeGIFFrames(inspection, frames)
+		inspection, err = mergeGIFFrames(inspection, format.declared, frames)
 		if err != nil {
-			return media.Inspection{}, err
+			return media.Inspection{}, rejectContent(err, "")
 		}
 	}
+	inspection.MediaType = format.mediaType()
 	if err := media.Validate(inspection, adapter.config.Limits); err != nil {
-		return media.Inspection{}, newError(ErrorValidation)
-	}
-	if _, err := adapter.run(ctx, execution, budget, decodeCommand(adapter.config, dir, input)); err != nil {
 		return media.Inspection{}, err
+	}
+	_, diagnosed, err := adapter.run(ctx, execution, budget, decodeCommand(adapter.config, dir, input))
+	if err != nil {
+		return media.Inspection{}, rejectContent(err, media.RejectionDecodeFailed)
+	}
+	// The decode logs only errors; ffmpeg logs some of them, such as a
+	// truncated GIF, and still exits 0.
+	if diagnosed {
+		return media.Inspection{}, media.Reject(media.RejectionDecodeFailed)
 	}
 	return inspection, nil
 }
@@ -166,7 +178,7 @@ func copyBounded(ctx context.Context, destination io.Writer, source io.Reader, l
 		}
 		if count > 0 {
 			if int64(count) > remaining {
-				return 0, newError(ErrorInputTooLarge)
+				return 0, media.Reject(media.RejectionInputTooLarge)
 			}
 			outputCount, writeErr := destination.Write(readBuffer[:count])
 			if writeErr != nil || outputCount != count || outputCount < 0 {
@@ -194,9 +206,10 @@ func boundedReadCapacity(limit, written int64, capacity int) int {
 	return int(remaining) + 1
 }
 
-func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *captureBudget, command Command) ([]byte, error) {
+// run returns the command's stdout and whether it wrote to stderr.
+func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *captureBudget, command Command) ([]byte, bool, error) {
 	if ctx.Err() != nil {
-		return nil, newError(ErrorTimeout)
+		return nil, false, newError(ErrorTimeout)
 	}
 	if command.Path == adapter.config.FFprobePath {
 		command.Args = removeArgument(command.Args, "-nostdin")
@@ -204,15 +217,15 @@ func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *ca
 	capture := budget.command()
 	result := execution.Run(command, capture.stdout(), capture.stderr())
 	if budget.overflowed() {
-		return nil, newError(ErrorOutputOverflow)
+		return nil, false, newError(ErrorOutputOverflow)
 	}
 	if err := resultError(result); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if ctx.Err() != nil {
-		return nil, newError(ErrorTimeout)
+		return nil, false, newError(ErrorTimeout)
 	}
-	return capture.output(), nil
+	return capture.output(), capture.diagnosed(), nil
 }
 
 func removeArgument(arguments []string, target string) []string {
@@ -260,12 +273,9 @@ func resultError(result Result) error {
 		return newError(ErrorTimeout)
 	case FailureCancelled:
 		return newError(ErrorCancelled)
-	case FailureMemoryLimit:
-		return newError(ErrorMemoryLimit)
-	case FailureTaskLimit:
-		return newError(ErrorTaskLimit)
-	case FailureCPULimit:
-		return newError(ErrorCPULimit)
+	case FailureMemoryLimit, FailureTaskLimit, FailureCPULimit:
+		// Only a command inspecting the content exhausts its limits.
+		return media.Reject(media.RejectionResourcesExceeded)
 	case FailureToolExit:
 		return newError(ErrorCommandFailed)
 	case FailureInternal:
@@ -273,6 +283,27 @@ func resultError(result Result) error {
 	default:
 		return newError(ErrorExecutionFailed)
 	}
+}
+
+// rejectContent turns an adapter error the content causes into the rejection
+// of the rule it breaks: toolExit for a failing command, when that command
+// inspects the content. Every other failure is returned unchanged.
+func rejectContent(err error, toolExit media.RejectionCode) error {
+	var adapterError *Error
+	if !errors.As(err, &adapterError) {
+		return err
+	}
+	switch adapterError.Code() {
+	case ErrorUnsupportedMedia:
+		return media.Reject(media.RejectionUnsupportedKind)
+	case ErrorInvalidProbe, ErrorInvalidFrames:
+		return media.Reject(media.RejectionInvalidMetadata)
+	case ErrorCommandFailed:
+		if toolExit != "" {
+			return media.Reject(toolExit)
+		}
+	}
+	return err
 }
 
 func safeNormalizationError(err error) error {

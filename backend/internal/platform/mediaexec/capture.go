@@ -9,9 +9,10 @@ type captureBudget struct {
 }
 
 type commandCapture struct {
-	budget *captureBudget
-	mu     sync.Mutex
-	data   []byte
+	budget   *captureBudget
+	mu       sync.Mutex
+	data     []byte
+	reported bool
 }
 
 type captureWriter struct {
@@ -44,9 +45,13 @@ func (writer *captureWriter) Write(data []byte) (int, error) {
 		writer.capture.budget.overflow = true
 	}
 	writer.capture.budget.remaining -= allowed
-	if writer.stdout && allowed > 0 {
+	if len(data) > 0 {
 		writer.capture.mu.Lock()
-		writer.capture.data = append(writer.capture.data, data[:int(allowed)]...)
+		if writer.stdout {
+			writer.capture.data = append(writer.capture.data, data[:int(allowed)]...)
+		} else {
+			writer.capture.reported = true
+		}
 		writer.capture.mu.Unlock()
 	}
 	writer.capture.budget.mu.Unlock()
@@ -57,6 +62,14 @@ func (capture *commandCapture) output() []byte {
 	capture.mu.Lock()
 	defer capture.mu.Unlock()
 	return append([]byte(nil), capture.data...)
+}
+
+// diagnosed reports whether the command wrote anything to stderr; the content
+// itself is never kept.
+func (capture *commandCapture) diagnosed() bool {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return capture.reported
 }
 
 func (budget *captureBudget) overflowed() bool {

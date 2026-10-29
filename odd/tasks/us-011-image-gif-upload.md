@@ -1,0 +1,53 @@
+# US-011 image and GIF upload (issue #24)
+
+Worktree /home/enzo/projects/pepicanvas-us-011, branch feat/us-011-image-gif-upload, base f8615b1 (origin/main).
+Vertical slice over TE-005 (inspection), TE-006/US-016 (quota, uploads, S3, routes) and TE-013 (reconciliation): image limits, safe rejection reasons, a persistent image object created atomically with the upload, authorized serving, and DOM rendering in the shared CanvasSurface. Stage 6, in parallel with US-020 (#20), US-006 (#16) and TE-015 (#43).
+
+## Specs
+
+- **S1 — Formats.** "PNG, JPEG, WebP y GIF; SVG excluido."
+- **S2 — Byte limit.** "Tamaño máximo inclusivo 10 000 000 bytes." / "Archivos válidos exactamente en los límites se aceptan; 10 000 001 bytes o dimensión 4097 se rechazan."
+- **S3 — Dimension limit.** "Cada imagen y cada fotograma de GIF debe ser ≤4096×4096."
+- **S4 — Real content.** "Se inspecciona contenido real, no solo extensión o declaración."
+- **S5 — GIF full decode.** "Un GIF se acepta solo cuando la decodificación completa finaliza sin errores, cada fotograma decodificado mide como máximo 4096×4096 y las propiedades declaradas coinciden con las decodificadas cuando ambas existen."
+- **S6 — Specific safe rejection.** "SVG, tipo real distinto, fallo de decodificación completa o metadatos contradictorios que impidan establecer el tipo o las dimensiones compatibles se rechazan con una razón específica segura." / "Los errores identifican la regla incumplida sin revelar detalles internos."
+- **S7 — Failure leaves nothing.** "Fallo o cancelación libera reserva, no crea objeto y no deja archivo recuperable." / "Ningún archivo fallido es recuperable."
+- **S8 — Persistent object, GIF animation.** "Una carga exitosa crea un objeto persistente; GIF conserva animación en editor y OBS."
+- **S9 — Reconnection.** "Reconexión durante procesamiento muestra resultado confirmado o ausencia limpia, nunca objeto parcial."
+- **S10 — Authorization and isolation.** "Solo actores autorizados cargan u obtienen el archivo; dos tenants no comparten URLs ni bytes." / "Las URLs de medios no permiten acceso cruzado y no incluyen credenciales en registros ni las exponen a terceros."
+- **S11 — Definition of Done.** "Todos los formatos, límites inclusivos, cada fotograma, suplantación de tipo, corrupción, cancelación, reconexión y dos tenants tienen pruebas." / "Ningún archivo fallido es recuperable." / "La cuota final coincide con cargas confirmadas."
+- **S12 — CTRL-CONS-01 (owner TE-012 closed: full).** "CTRL-CONS-01 — prueba de integración de US-011 (#24) confirma dominio y outbox en una transacción, fuerza una caída antes de publicar y verifica entrega posterior sin pérdida ni confirmación WebSocket fantasma."
+- **S13 — CTRL-S3-01 (owner TE-013 closed: full).** "CTRL-S3-01 — pruebas de US-011 (#24) interrumpen cada transición PostgreSQL/S3 y verifican que la reconciliación converge sin servir assets incompletos ni borrar contenido válido."
+- **S14 — CTRL-IDEM-01 (owner closed: full).** "CTRL-IDEM-01 — reintentos de US-011 (#24) antes y después de timeout o reconexión producen un único efecto y la misma respuesta; un payload distinto con el mismo operation ID se rechaza y la retención acotada se prueba en su vencimiento."
+- **S15 — CTRL-WEB-01 (owner TE-014 closed: full).** "CTRL-WEB-01 — pruebas de US-011 (#24) cubren CSRF válido, faltante e inválido y Origin permitido, ausente y hostil, con rechazo antes del dominio, almacenamiento o upgrade WebSocket."
+- **S16 — CTRL-RATE-01 (owner TE-014 closed: full).** "CTRL-RATE-01 — pruebas deterministas de US-011 (#24) alcanzan el límite por cuenta, sesión, streamer o IP aplicable, observan 429 o cierre documentado, verifican recuperación e independencia entre streamers."
+- **S17 — CTRL-MEDIA-01 (owner TE-005 closed: full).** "CTRL-MEDIA-01 — muestras válidas, truncadas, sobredimensionadas, lentas y maliciosas de US-011 (#24) verifican límites de bytes, resolución, duración, streams, CPU, memoria, tiempo, procesos, salida y concurrencia, además de terminación de descendientes y limpieza temporal."
+- **S18 — CTRL-TRACE-01 (owner TE-015 open, in parallel).** "CTRL-TRACE-01 — recorrido instrumentado de US-011 (#24) conserva una correlación consultable desde aceptación por HTTP/WebSocket hasta dominio, PostgreSQL, outbox, actor, S3 o subproceso aplicable, con redacción verificada." Declared `Diferido a TE-015` with the primitive while #43 is open.
+- **S19 — CTRL-RESTORE-01 (owner TE-017 open).** "CTRL-RESTORE-01 — una restauración de copias reales vinculadas a US-011 (#24) en entorno aislado verifica integridad PostgreSQL/assets, reconciliación y RPO/RTO observados sin exponer secretos." Declared `Diferido a TE-017`.
+- **S20 — Parallel stage rules.** "keep changes inside your issue scope, avoid touching shared files unnecessarily, and if you add a database migration warn that its number may collide with a parallel branch." / "Do not push, open a PR or merge until the user asks."
+
+Out of scope (issue): "SVG, recorte, deformación y edición de píxeles." Audio and video limits and objects belong to US-012; the OBS overlay access to US-021; the editor WebSocket to US-017.
+
+## Design
+
+- Limits: `MaxImageBytes` and `MaxGIFBytes` become 10 000 000; new `MaxImageWidth`/`MaxImageHeight` = 4096 apply to images and to every GIF frame (no pixel cap beyond 4096×4096). Video keeps `MaxWidth`/`MaxHeight`/`MaxPixels`.
+- Rejections: `media.Reject(code)` is exported. The mediaexec adapter returns a `*media.Rejection` for content-caused failures: unidentifiable or unsupported format (SVG included) → `unsupported_kind`; contradictory or invalid metadata, including a GIF whose declared stream size differs from a decoded frame → `invalid_metadata`; `media.Validate` failures keep their own code (`input_too_large`, `dimensions_exceeded`, ...); a staging overflow → `input_too_large`; a failed full decode → new `decode_failed`; memory, CPU or task limit → new `resources_exceeded`. Timeout, cancellation, containment and execution failures stay upload failures (`upload_failed`). New code `type_mismatch`.
+- Declared type: `Inspection.MediaType` (`image/png`, `image/jpeg`, `image/webp`, `image/gif`, ...). The upload route accepts `application/octet-stream` (undeclared, previous behavior) or one of the four image types (declared); another `image/*` type (SVG) → `422 media_rejected` reason `unsupported_kind` before reserving; any other type → `400` as before. A declared type that differs from the inspected one → rejection `type_mismatch` (quarantined, reservation released).
+- Object: a non-replacing upload whose kind is image or GIF completes with `Complete.Object = true` and the decoded size. `MediaStore.Apply` for such a Complete locks the canvas row before the quota row (lock order canvas → quota), completes the asset and inserts a `canvas.KindImage` object whose ID is the asset ID and whose content is the reference ID, placed at its natural size scaled down to fit the canvas (aspect ratio kept) and centered, bumps the canvas revision and writes its `create_object` outbox record, all in the media transaction. The fingerprint includes the object flag, not the size (derived from the same bytes). The upload answer adds `object_id`. Audio and video keep the asset-only behavior until US-012.
+- Serving: `GET /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/content` needs `view`; it resolves the reference to its ready asset in this canvas only, streams the bytes with the real `Content-Type`, `Content-Length`, `Cache-Control: private, no-cache`, `ETag` = asset ID (`304` on match). Anything else is the same `404`/`forbidden` as the canvas route. No migration is planned.
+- UI: MediaPanel sends the file's type when supported, shows each rejection reason, and refreshes the canvas; `CanvasSurface` renders image objects as `<img>` whose `src` comes from a resolver prop, so GIFs animate natively in the editor and in the overlay that shares it.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S1-S6, S17 | worker, test-first: limits, exported rejections, adapter rejection mapping, GIF declared vs decoded, `MediaType`, real-tool samples at the boundaries | pending | |
+| T2 | S7-S9, S11-S14 | worker, test-first: declared type check, `Complete.Object`, atomic object creation in `MediaStore`, outbox record, replay | pending | |
+| T3 | S6, S7, S10, S13-S16 | worker, test-first: upload route content types and `object_id`, serving route, two-tenant isolation, HTTP + PostgreSQL/MinIO tests | pending | |
+| T4 | S8, S9 | worker, test-first: MediaPanel declared type and reasons, CanvasSurface `<img>`, canvas refresh, e2e | pending | |
+| T5 | S12-S20 | inline + gentle-ai-verify: docs/stack.md, issue control lines, full checks, review assess | pending | |
+
+## Log
+
+- **L1** (user, 2026-10-28): "Start developing GitHub issue #24 [US-011] Cargar una imagen o GIF válido in this worktree (/home/enzo/projects/pepicanvas-us-011, branch feat/us-011-image-gif-upload, cut from origin/main f8615b1). Read it with gh issue view 24, plus docs/stack.md and docs/roadmap.md (stage 6). Prior groundwork: TE-013 (asset reconciliation, odd/tasks/te-013-asset-reconciliation.md) and US-016 (media storage quota, MediaStore, S3 wiring in cmd/server/media.go) are merged; check Engram for their lessons. Follow ODD: create the feature tracker in odd/tasks/ plus its Engram mirror, implement task by task with test-first and work-unit commits on this branch. Do not push, open a PR or merge until the user asks. Other gentle-shell sessions are developing #43 (TE-015), #24 (US-011), #20 (US-020) and #16 (US-006) in parallel in sibling worktrees: keep changes inside your issue scope, avoid touching shared files unnecessarily, and if you add a database migration warn that its number may collide with a parallel branch. Talk to the user in Spanish."
+- **L2** (evidence, parent exploration): existing pieces: `POST …/media/uploads` (octet-stream, exact Content-Length, 60/h per account, `media_rejected` 422 with reason), `media.Uploads` pipeline, `mediaexec` inspector (ffprobe classify png/jpeg/webp/gif, all-frame GIF probe, `ffmpeg -f null` full decode), defaults 25 MiB and 3840×3840/8.3 MP; the adapter returns its own `*mediaexec.Error`, so every inspection failure reaches the client as `upload_failed` 502. No route serves bytes; `CanvasSurface` renders only text; no HTTP route creates canvas objects. Owners: TE-012, TE-013, TE-014, TE-005, TE-006 closed; TE-015 #43 and TE-017 #45 open.

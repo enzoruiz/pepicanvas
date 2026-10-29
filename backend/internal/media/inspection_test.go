@@ -13,8 +13,11 @@ func TestDefaultLimitsMatchApprovedMVPMatrix(t *testing.T) {
 	limits := DefaultLimits()
 	const mebibyte = int64(1024 * 1024)
 
-	if limits.MaxImageBytes != 25*mebibyte || limits.MaxGIFBytes != 25*mebibyte {
-		t.Fatalf("image/GIF byte limits = %d/%d, want %d", limits.MaxImageBytes, limits.MaxGIFBytes, 25*mebibyte)
+	if limits.MaxImageBytes != 10_000_000 || limits.MaxGIFBytes != 10_000_000 {
+		t.Fatalf("image/GIF byte limits = %d/%d, want 10000000", limits.MaxImageBytes, limits.MaxGIFBytes)
+	}
+	if limits.MaxImageWidth != 4096 || limits.MaxImageHeight != 4096 {
+		t.Fatalf("image/GIF dimension limits = %dx%d, want 4096x4096", limits.MaxImageWidth, limits.MaxImageHeight)
 	}
 	if limits.MaxAudioBytes != 50*mebibyte || limits.MaxVideoBytes != 250*mebibyte {
 		t.Fatalf("audio/video byte limits = %d/%d, want %d/%d", limits.MaxAudioBytes, limits.MaxVideoBytes, 50*mebibyte, 250*mebibyte)
@@ -53,6 +56,8 @@ func TestLimitsValidateRejectsNonPositiveConfiguration(t *testing.T) {
 		{name: "width", mutate: func(l *Limits) { l.MaxWidth = 0 }},
 		{name: "height", mutate: func(l *Limits) { l.MaxHeight = -1 }},
 		{name: "pixels", mutate: func(l *Limits) { l.MaxPixels = 0 }},
+		{name: "image width", mutate: func(l *Limits) { l.MaxImageWidth = 0 }},
+		{name: "image height", mutate: func(l *Limits) { l.MaxImageHeight = -1 }},
 		{name: "GIF duration", mutate: func(l *Limits) { l.MaxGIFDuration = -time.Second }},
 		{name: "audio duration", mutate: func(l *Limits) { l.MaxAudioDuration = 0 }},
 		{name: "video duration", mutate: func(l *Limits) { l.MaxVideoDuration = -time.Second }},
@@ -100,8 +105,9 @@ func TestValidateAcceptsExactBoundariesAndRejectsOneBeyond(t *testing.T) {
 		{name: "video bytes one beyond", inspection: withBytes(validInspection(KindVideo), limits.MaxVideoBytes+1), limits: limits, wantCode: RejectionInputTooLarge},
 		{name: "horizontal dimensions exact", inspection: withDimensions(validInspection(KindImage), 3840, 2160), limits: limits},
 		{name: "vertical dimensions exact", inspection: withDimensions(validInspection(KindVideo), 2160, 3840), limits: limits},
-		{name: "width one beyond", inspection: withDimensions(validInspection(KindImage), limits.MaxWidth+1, 1), limits: limits, wantCode: RejectionDimensionsExceeded},
-		{name: "GIF height one beyond", inspection: withGIFDimensions(validInspection(KindGIF), 1, limits.MaxHeight+1), limits: limits, wantCode: RejectionDimensionsExceeded},
+		{name: "image width one beyond", inspection: withDimensions(validInspection(KindImage), limits.MaxImageWidth+1, 1), limits: limits, wantCode: RejectionDimensionsExceeded},
+		{name: "GIF height one beyond", inspection: withGIFDimensions(validInspection(KindGIF), 1, limits.MaxImageHeight+1), limits: limits, wantCode: RejectionDimensionsExceeded},
+		{name: "video width one beyond", inspection: withDimensions(validInspection(KindVideo), limits.MaxWidth+1, 1), limits: limits, wantCode: RejectionDimensionsExceeded},
 		{name: "pixels exact", inspection: withDimensions(validInspection(KindVideo), 1, 11), limits: withMaxPixels(limits, 11)},
 		{name: "pixels one beyond", inspection: withDimensions(validInspection(KindVideo), 3, 4), limits: withMaxPixels(limits, 11), wantCode: RejectionDimensionsExceeded},
 		{name: "GIF duration exact", inspection: withDuration(validInspection(KindGIF), limits.MaxGIFDuration), limits: limits},
@@ -143,6 +149,8 @@ func TestValidateHonorsCustomLimitsAtExactBoundaryAndOneBeyond(t *testing.T) {
 	byteLimits := DefaultLimits()
 	byteLimits.MaxImageBytes = 7
 	axisLimits := DefaultLimits()
+	axisLimits.MaxImageWidth = 20
+	axisLimits.MaxImageHeight = 20
 	axisLimits.MaxWidth = 20
 	axisLimits.MaxHeight = 20
 	pixelLimits := DefaultLimits()
@@ -200,9 +208,10 @@ func TestValidateRejectsInvalidNonFirstGIFFrame(t *testing.T) {
 		name       string
 		dimensions Dimensions
 	}{
-		{name: "width exceeds limit", dimensions: Dimensions{Width: limits.MaxWidth + 1, Height: 1}},
-		{name: "height exceeds limit", dimensions: Dimensions{Width: 1, Height: limits.MaxHeight + 1}},
-		{name: "pixels exceed limit", dimensions: Dimensions{Width: 3840, Height: 2161}},
+		{name: "width exceeds limit", dimensions: Dimensions{Width: limits.MaxImageWidth + 1, Height: 1}},
+		{name: "height exceeds limit", dimensions: Dimensions{Width: 1, Height: limits.MaxImageHeight + 1}},
+		{name: "width one beyond 4096", dimensions: Dimensions{Width: 4097, Height: 4096}},
+		{name: "height one beyond 4096", dimensions: Dimensions{Width: 4096, Height: 4097}},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +280,9 @@ func TestRejectionsExposeOnlyBoundedSafeStrings(t *testing.T) {
 		{code: RejectionDurationExceeded, message: "media duration exceeds the allowed limit"},
 		{code: RejectionFrameCountExceeded, message: "media frame count exceeds the allowed limit"},
 		{code: RejectionStreamCountExceeded, message: "media stream count exceeds the allowed limit"},
+		{code: RejectionTypeMismatch, message: "media type does not match its content"},
+		{code: RejectionDecodeFailed, message: "media could not be fully decoded"},
+		{code: RejectionResourcesExceeded, message: "media inspection exceeded its resource limits"},
 	}
 	unsafeValues := []string{"/private/uploads/customer.mp4", "stderr", "raw_metadata", "h264", "customer secret"}
 
@@ -278,7 +290,7 @@ func TestRejectionsExposeOnlyBoundedSafeStrings(t *testing.T) {
 		t.Run(string(tt.code), func(t *testing.T) {
 			t.Parallel()
 
-			err := newRejection(tt.code)
+			err := Reject(tt.code)
 			if err.Code() != tt.code {
 				t.Fatalf("Code() = %q, want %q", err.Code(), tt.code)
 			}
@@ -371,4 +383,68 @@ func assertRejection(t *testing.T, err error, wantCode RejectionCode) {
 	if rejection.Code() != wantCode {
 		t.Fatalf("rejection code = %q, want %q", rejection.Code(), wantCode)
 	}
+}
+
+func TestValidateAppliesTheImageLimitsToImagesAndEveryGIFFrame(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	gifFrames := func(width, height int) Inspection {
+		frames := dimensions(3, 1, 1)
+		frames[1] = Dimensions{Width: width, Height: height}
+		return withGIFFrames(validInspection(KindGIF), frames)
+	}
+	tests := []struct {
+		name       string
+		inspection Inspection
+		wantCode   RejectionCode
+	}{
+		{name: "image bytes exactly 10000000", inspection: withBytes(validInspection(KindImage), 10_000_000)},
+		{name: "image bytes 10000001", inspection: withBytes(validInspection(KindImage), 10_000_001), wantCode: RejectionInputTooLarge},
+		{name: "GIF bytes exactly 10000000", inspection: withBytes(validInspection(KindGIF), 10_000_000)},
+		{name: "GIF bytes 10000001", inspection: withBytes(validInspection(KindGIF), 10_000_001), wantCode: RejectionInputTooLarge},
+		{name: "image 4096x4096", inspection: withDimensions(validInspection(KindImage), 4096, 4096)},
+		{name: "image width 4097", inspection: withDimensions(validInspection(KindImage), 4097, 4096), wantCode: RejectionDimensionsExceeded},
+		{name: "image height 4097", inspection: withDimensions(validInspection(KindImage), 4096, 4097), wantCode: RejectionDimensionsExceeded},
+		{name: "GIF frame 4096x4096", inspection: gifFrames(4096, 4096)},
+		{name: "GIF frame width 4097", inspection: gifFrames(4097, 4096), wantCode: RejectionDimensionsExceeded},
+		{name: "GIF frame height 4097", inspection: gifFrames(4096, 4097), wantCode: RejectionDimensionsExceeded},
+		{name: "video keeps 3840x2160", inspection: withDimensions(validInspection(KindVideo), 3840, 2160)},
+		{name: "video keeps width 3841 rejected", inspection: withDimensions(validInspection(KindVideo), 3841, 1), wantCode: RejectionDimensionsExceeded},
+		{name: "video keeps height 3841 rejected", inspection: withDimensions(validInspection(KindVideo), 1, 3841), wantCode: RejectionDimensionsExceeded},
+		{name: "video keeps the pixel cap", inspection: withDimensions(validInspection(KindVideo), 3840, 2161), wantCode: RejectionDimensionsExceeded},
+		{name: "video keeps 250 MiB", inspection: withBytes(validInspection(KindVideo), 250*1024*1024)},
+		{name: "media type does not affect validation", inspection: withMediaType(validInspection(KindImage), "image/svg+xml")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := Validate(tt.inspection, limits)
+			if tt.wantCode == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			assertRejection(t, err, tt.wantCode)
+		})
+	}
+}
+
+func TestRejectPanicsOnAnUnknownCode(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Reject(unknown) did not panic")
+		}
+	}()
+	_ = Reject(RejectionCode("internal detail"))
+}
+
+func withMediaType(inspection Inspection, mediaType string) Inspection {
+	inspection.MediaType = mediaType
+	return inspection
 }

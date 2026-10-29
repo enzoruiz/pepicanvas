@@ -4,11 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"image"
+	"image/color"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,7 +190,7 @@ func TestPinnedRealMediaFixtures(t *testing.T) {
 		if err == nil || execution.lastStage != "complete-decode" {
 			t.Fatalf("complete-decode failure not observed: stage=%q code=%q private=%s", execution.lastStage, adapterErrorCode(err), execution.privateDiagnostic())
 		}
-		assertAdapterError(t, err, ErrorCommandFailed)
+		assertRejectionCode(t, err, media.RejectionDecodeFailed)
 		assertSafeRealToolError(t, err, execution, root, truncated)
 		assertStagingRemoved(t, stagingRoot, execution.commandDirs)
 	})
@@ -411,7 +419,7 @@ func newRealToolAdapter(t *testing.T, stagingRoot string, runner Runner) *Adapte
 func assertManifestInspection(t *testing.T, fixture fixtureManifestEntry, got media.Inspection, metadata []byte) {
 	t.Helper()
 	want := media.Inspection{
-		Kind: fixture.Kind, InputBytes: got.InputBytes, StreamCount: fixture.StreamCount,
+		Kind: fixture.Kind, MediaType: expectedMediaType(fixture), InputBytes: got.InputBytes, StreamCount: fixture.StreamCount,
 		Dimensions: media.Dimensions{Width: fixture.Width, Height: fixture.Height},
 		Duration:   time.Duration(fixture.DurationNS), GIFFrameCount: fixture.FrameCount,
 	}
@@ -452,7 +460,13 @@ func assertStagingRemoved(t *testing.T, stagingRoot string, commandDirs []string
 func assertSafeRealToolError(t *testing.T, err error, execution *directProcessExecution, root string, fixture []byte) {
 	t.Helper()
 	var adapterError *Error
-	if !errors.As(err, &adapterError) || err.Error() != errorMessages[adapterError.Code()] {
+	var rejection *media.Rejection
+	switch {
+	case errors.As(err, &rejection):
+		if err.Error() != media.Reject(rejection.Code()).Error() {
+			t.Fatalf("public error is not a fixed rejection: %q", err)
+		}
+	case !errors.As(err, &adapterError) || err.Error() != errorMessages[adapterError.Code()]:
 		t.Fatalf("public error is not a fixed adapter error: %T %q", err, err)
 	}
 	unsafe := []string{root, strings.Join(execution.lastArgs, " "), execution.stderr, string(execution.metadata), string(fixture)}
@@ -463,10 +477,43 @@ func assertSafeRealToolError(t *testing.T, err error, execution *directProcessEx
 	}
 }
 
-func adapterErrorCode(err error) ErrorCode {
+func adapterErrorCode(err error) string {
 	var adapterError *Error
 	if errors.As(err, &adapterError) {
-		return adapterError.Code()
+		return string(adapterError.Code())
+	}
+	var rejection *media.Rejection
+	if errors.As(err, &rejection) {
+		return string(rejection.Code())
+	}
+	return ""
+}
+
+func expectedMediaType(fixture fixtureManifestEntry) string {
+	switch fixture.Container {
+	case containerJPEG:
+		return "image/jpeg"
+	case containerPNG:
+		return "image/png"
+	case containerWebP:
+		return "image/webp"
+	case containerGIF:
+		return "image/gif"
+	case containerMP3:
+		return "audio/mpeg"
+	case containerWAV:
+		return "audio/wav"
+	case containerFLAC:
+		return "audio/flac"
+	case containerOgg:
+		return "audio/ogg"
+	case containerISOBaseMedia:
+		if fixture.Kind == media.KindAudio {
+			return "audio/mp4"
+		}
+		return "video/mp4"
+	case containerWebM:
+		return "video/webm"
 	}
 	return ""
 }
@@ -498,5 +545,238 @@ func prefix(size int) func([]byte) []byte {
 			return slices.Clone(input)
 		}
 		return slices.Clone(input[:size])
+	}
+}
+
+// TestRealToolsImageLimits inspects generated PNG, JPEG, WebP and GIF samples
+// at the 10 000 000-byte and 4096-pixel boundaries, an SVG, truncated samples
+// and a GIF with one oversized frame, with the real tools inside a delegated
+// cgroup.
+func TestRealToolsImageLimits(t *testing.T) {
+	root := os.Getenv("PEPICANVAS_TEST_CGROUP_ROOT")
+	if root == "" {
+		t.Skip("PEPICANVAS_TEST_CGROUP_ROOT is not set to a disposable delegated cgroup")
+	}
+	runner, result := NewCgroupRunner(root)
+	if !result.succeeded() {
+		t.Fatalf("NewCgroupRunner() = %#v", result)
+	}
+	samples := t.TempDir()
+	staging := t.TempDir()
+	adapter := newRealToolAdapter(t, staging, runner)
+
+	type accepted struct {
+		mediaType string
+		size      media.Dimensions
+		frames    int
+	}
+	tests := []struct {
+		name   string
+		sample func(*testing.T) []byte
+		want   accepted
+		reject media.RejectionCode
+	}{
+		{name: "PNG 4096x4096", sample: pngSample(4096, 4096), want: accepted{mediaType: "image/png", size: media.Dimensions{Width: 4096, Height: 4096}}},
+		{name: "PNG width 4097", sample: pngSample(4097, 4096), reject: media.RejectionDimensionsExceeded},
+		{name: "PNG height 4097", sample: pngSample(4096, 4097), reject: media.RejectionDimensionsExceeded},
+		{name: "JPEG 4096x4096", sample: jpegSample(4096, 4096), want: accepted{mediaType: "image/jpeg", size: media.Dimensions{Width: 4096, Height: 4096}}},
+		{name: "JPEG width 4097", sample: jpegSample(4097, 4096), reject: media.RejectionDimensionsExceeded},
+		{name: "WebP 4096x4096", sample: webpSample(samples, 4096, 4096), want: accepted{mediaType: "image/webp", size: media.Dimensions{Width: 4096, Height: 4096}}},
+		{name: "WebP width 4097", sample: webpSample(samples, 4097, 4096), reject: media.RejectionDimensionsExceeded},
+		{name: "WebP height 4097", sample: webpSample(samples, 4096, 4097), reject: media.RejectionDimensionsExceeded},
+		{name: "GIF 4096x4096", sample: gifSample(4096, 4096, 2), want: accepted{mediaType: "image/gif", size: media.Dimensions{Width: 4096, Height: 4096}, frames: 2}},
+		{name: "GIF width 4097", sample: gifSample(4097, 4096, 2), reject: media.RejectionDimensionsExceeded},
+		{name: "GIF with one frame wider than 4096", sample: gifOneWideFrame(4097), reject: media.RejectionDimensionsExceeded},
+		{name: "PNG of exactly 10000000 bytes", sample: paddedPNG(10_000_000), want: accepted{mediaType: "image/png", size: media.Dimensions{Width: 64, Height: 48}}},
+		{name: "PNG of 10000001 bytes", sample: paddedPNG(10_000_001), reject: media.RejectionInputTooLarge},
+		{name: "SVG", sample: func(*testing.T) []byte { return []byte(svgSample) }, reject: media.RejectionUnsupportedKind},
+		// The PNG header and IHDR survive, so ffprobe reports a valid image and
+		// only the complete decode finds the missing image data.
+		{name: "truncated PNG", sample: truncated(noisePNG(512, 512)), reject: media.RejectionDecodeFailed},
+		// ffprobe counts the frames present, the partial one included, so the
+		// counts agree; ffmpeg logs "LZW decode failed" yet exits 0, and only
+		// that error output reveals the failed decode.
+		{name: "truncated GIF", sample: truncated(noiseGIF(256, 256, 3)), reject: media.RejectionDecodeFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contents := tt.sample(t)
+			inspection, err := adapter.Inspect(context.Background(), bytes.NewReader(contents))
+			assertStagingRemoved(t, staging, nil)
+			if tt.reject != "" {
+				assertRejectionCode(t, err, tt.reject)
+				if err.Error() != media.Reject(tt.reject).Error() {
+					t.Fatalf("public error = %q, want the fixed rejection message", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Inspect() error = %v (%s), want nil", err, adapterErrorCode(err))
+			}
+			if inspection.MediaType != tt.want.mediaType || inspection.InputBytes != int64(len(contents)) {
+				t.Fatalf("inspection = %s/%d bytes, want %s/%d bytes", inspection.MediaType, inspection.InputBytes, tt.want.mediaType, len(contents))
+			}
+			if tt.want.frames == 0 {
+				if inspection.Kind != media.KindImage || inspection.Dimensions != tt.want.size {
+					t.Fatalf("inspection = %s %+v, want image %+v", inspection.Kind, inspection.Dimensions, tt.want.size)
+				}
+				return
+			}
+			if inspection.Kind != media.KindGIF || inspection.GIFFrameCount != tt.want.frames || len(inspection.GIFFrameDimensions) != tt.want.frames {
+				t.Fatalf("inspection = %s with %d frames, want GIF with %d frames", inspection.Kind, inspection.GIFFrameCount, tt.want.frames)
+			}
+			for _, frame := range inspection.GIFFrameDimensions {
+				if frame != tt.want.size {
+					t.Fatalf("GIF frame = %+v, want %+v", frame, tt.want.size)
+				}
+			}
+		})
+	}
+}
+
+const svgSample = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48"><rect width="64" height="48" fill="red"/></svg>`
+
+func pngSample(width, height int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		return encodePNG(t, image.NewGray(image.Rect(0, 0, width, height)))
+	}
+}
+
+func noisePNG(width, height int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		img := image.NewGray(image.Rect(0, 0, width, height))
+		random := rand.New(rand.NewPCG(1, 2))
+		for index := range img.Pix {
+			img.Pix[index] = uint8(random.Uint32())
+		}
+		return encodePNG(t, img)
+	}
+}
+
+func encodePNG(t *testing.T, img image.Image) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatalf("encode PNG sample: %v", err)
+	}
+	return encoded.Bytes()
+}
+
+// paddedPNG grows a valid 64x48 PNG to exactly size bytes with a private
+// ancillary chunk before IEND, which decoders skip.
+func paddedPNG(size int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		valid := encodePNG(t, image.NewGray(image.Rect(0, 0, 64, 48)))
+		const iendLength = 12
+		const chunkOverhead = 12
+		padding := size - len(valid) - chunkOverhead
+		if padding < 0 {
+			t.Fatalf("PNG sample of %d bytes exceeds %d", len(valid), size)
+		}
+		chunk := make([]byte, chunkOverhead+padding)
+		binary.BigEndian.PutUint32(chunk, uint32(padding))
+		copy(chunk[4:], "prIv")
+		binary.BigEndian.PutUint32(chunk[8+padding:], crc32.ChecksumIEEE(chunk[4:8+padding]))
+		end := len(valid) - iendLength
+		padded := append(append(append([]byte(nil), valid[:end]...), chunk...), valid[end:]...)
+		if len(padded) != size {
+			t.Fatalf("padded PNG = %d bytes, want %d", len(padded), size)
+		}
+		return padded
+	}
+}
+
+func jpegSample(width, height int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		var encoded bytes.Buffer
+		if err := jpeg.Encode(&encoded, image.NewGray(image.Rect(0, 0, width, height)), nil); err != nil {
+			t.Fatalf("encode JPEG sample: %v", err)
+		}
+		return encoded.Bytes()
+	}
+}
+
+// webpSample encodes a Go PNG with ffmpeg: its lavfi color source renders a
+// 4097-pixel axis as 4096.
+func webpSample(dir string, width, height int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		input := filepath.Join(dir, fmt.Sprintf("sample-%dx%d.png", width, height))
+		if err := os.WriteFile(input, pngSample(width, height)(t), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output := filepath.Join(dir, fmt.Sprintf("sample-%dx%d.webp", width, height))
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		command := exec.CommandContext(ctx, realFFmpegPath, "-hide_banner", "-v", "error", "-nostdin", "-y",
+			"-i", input, "-frames:v", "1", "-c:v", "libwebp", output)
+		command.Env = []string{"HOME=" + dir, "LANG=C", "LC_ALL=C", "TMPDIR=" + dir}
+		if out, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("generate WebP sample: %v: %s", err, out)
+		}
+		contents, err := os.ReadFile(output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contents
+	}
+}
+
+var gifPalette = color.Palette{color.Black, color.White}
+
+func gifSample(width, height, frames int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		animation := &gif.GIF{}
+		for range frames {
+			animation.Image = append(animation.Image, image.NewPaletted(image.Rect(0, 0, width, height), gifPalette))
+			animation.Delay = append(animation.Delay, 10)
+		}
+		return encodeGIF(t, animation)
+	}
+}
+
+// gifOneWideFrame is a two-frame GIF whose second frame is width pixels wide
+// while the first one is 16x16.
+func gifOneWideFrame(width int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		return encodeGIF(t, &gif.GIF{
+			Image: []*image.Paletted{
+				image.NewPaletted(image.Rect(0, 0, 16, 16), gifPalette),
+				image.NewPaletted(image.Rect(0, 0, width, 16), gifPalette),
+			},
+			Delay:  []int{10, 10},
+			Config: image.Config{ColorModel: gifPalette, Width: width, Height: 16},
+		})
+	}
+}
+
+func noiseGIF(width, height, frames int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		random := rand.New(rand.NewPCG(3, 4))
+		animation := &gif.GIF{}
+		for range frames {
+			frame := image.NewPaletted(image.Rect(0, 0, width, height), gifPalette)
+			for index := range frame.Pix {
+				frame.Pix[index] = uint8(random.IntN(2))
+			}
+			animation.Image = append(animation.Image, frame)
+			animation.Delay = append(animation.Delay, 10)
+		}
+		return encodeGIF(t, animation)
+	}
+}
+
+func encodeGIF(t *testing.T, animation *gif.GIF) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	if err := gif.EncodeAll(&encoded, animation); err != nil {
+		t.Fatalf("encode GIF sample: %v", err)
+	}
+	return encoded.Bytes()
+}
+
+func truncated(sample func(*testing.T) []byte) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		valid := sample(t)
+		return valid[:len(valid)/2]
 	}
 }

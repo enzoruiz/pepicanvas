@@ -11,12 +11,15 @@ func TestMergeGIFFramesRequiresExactlyOnePositiveDimensionPerDeclaredFrame(t *te
 	t.Parallel()
 
 	base := media.Inspection{Kind: media.KindGIF, GIFFrameCount: 2}
+	declared := media.Dimensions{Width: 10, Height: 20}
 	tests := []struct {
 		name string
 		json string
 		want []media.Dimensions
 	}{
-		{name: "all frames", json: `{"frames":[{"width":10,"height":20},{"width":30,"height":40}]}`, want: []media.Dimensions{{Width: 10, Height: 20}, {Width: 30, Height: 40}}},
+		{name: "all frames", json: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, want: []media.Dimensions{{Width: 10, Height: 20}, {Width: 10, Height: 20}}},
+		{name: "first frame differs from the declared size", json: `{"frames":[{"width":30,"height":40},{"width":10,"height":20}]}`},
+		{name: "later frame differs from the declared size", json: `{"frames":[{"width":10,"height":20},{"width":10,"height":19}]}`},
 		{name: "count mismatch", json: `{"frames":[{"width":10,"height":20}]}`},
 		{name: "zero width", json: `{"frames":[{"width":0,"height":20},{"width":30,"height":40}]}`},
 		{name: "missing height", json: `{"frames":[{"width":10},{"width":30,"height":40}]}`},
@@ -27,7 +30,7 @@ func TestMergeGIFFramesRequiresExactlyOnePositiveDimensionPerDeclaredFrame(t *te
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := mergeGIFFrames(base, []byte(tt.json))
+			got, err := mergeGIFFrames(base, declared, []byte(tt.json))
 			if tt.want == nil {
 				assertAdapterError(t, err, ErrorInvalidFrames)
 				return
@@ -44,7 +47,7 @@ func TestMergeGIFFramesRequiresExactlyOnePositiveDimensionPerDeclaredFrame(t *te
 	}
 
 	var adapterError *Error
-	if _, err := mergeGIFFrames(base, []byte(`{"frames":[]}`)); !errors.As(err, &adapterError) {
+	if _, err := mergeGIFFrames(base, declared, []byte(`{"frames":[]}`)); !errors.As(err, &adapterError) {
 		t.Fatalf("error type = %T, want *Error", err)
 	}
 }
