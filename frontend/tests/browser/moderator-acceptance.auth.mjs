@@ -15,6 +15,10 @@ const invitedText = "You were invited to moderate a streamer's canvas.";
 const acceptedText = "You are now a moderator of this canvas.";
 const unusableText =
   "This invitation link can't be used. Ask the streamer for a new one.";
+const revokedText =
+  "Moderator access revoked. Their confirmed changes are kept.";
+const endedText =
+  "Your moderator access to a canvas has ended. It was removed from this list.";
 
 function uniqueEmail(label) {
   return `${label}-${randomBytes(6).toString("hex")}@example.com`;
@@ -98,7 +102,7 @@ function canvasReads(requests) {
   });
 }
 
-test("an invited account signs in, accepts once, and moderates the canvas read-only", async ({
+test("an invited account accepts once, moderates read-only, and loses access when revoked", async ({
   browser,
   page,
 }) => {
@@ -250,6 +254,64 @@ test("an invited account signs in, accepts once, and moderates the canvas read-o
   // The owner sees the invitation gone from the pending list.
   await a.page.reload();
   await expect(invitations.getByText("No pending invitations.")).toBeVisible();
+
+  // US-006 S16/S1: the owner recognizes the moderator by email and revokes
+  // it after an explicit confirmation.
+  const moderators = a.page.getByRole("region", { name: "Moderators" });
+  const bobRow = moderators.getByRole("listitem").filter({ hasText: bob });
+  await expect(bobRow).toHaveCount(1);
+  await expect(bobRow).toContainText("Accepted");
+  await bobRow.getByRole("button", { name: "Revoke" }).click();
+  await expect(moderators.getByRole("status")).toHaveCount(0);
+  await bobRow.getByRole("button", { name: "Confirm revoke" }).click();
+  await expect(moderators.getByRole("status")).toHaveText(revokedText);
+  await expect(moderators.getByText("No moderators yet.")).toBeVisible();
+
+  // S3/S4: the moderator's open tab still shows the old canvas until its
+  // next canvas request, which is refused: the data goes and only a safe
+  // reason remains.
+  const stale = moderatedRegion(invited);
+  await expect(stale.locator("[data-canvas-surface]")).toHaveCount(1);
+  await stale.getByRole("button", { name: "Refresh canvas" }).click();
+  await expect(stale.getByRole("alert")).toHaveText(endedText);
+  await expect(stale.locator("[data-canvas-surface]")).toHaveCount(0);
+  await expect(
+    stale.getByText(`${aliceCanvas.width} × ${aliceCanvas.height}`),
+  ).toHaveCount(0);
+  const shown = await invited.locator("body").innerText();
+  for (const secret of [aliceCanvas.tenant_id, aliceCanvas.canvas_id, alice]) {
+    expect(shown).not.toContain(secret);
+  }
+
+  // A retried read stays refused and carries no canvas field.
+  const refused = await invited.request.get(
+    `/api/tenants/${aliceCanvas.tenant_id}/canvases/${aliceCanvas.canvas_id}`,
+  );
+  expect(refused.status()).toBe(403);
+  const refusedText = await refused.text();
+  expect(JSON.parse(refusedText)).toMatchObject({ error: "forbidden" });
+  for (const field of ["canvas_id", "width", "height", "objects"]) {
+    expect(refusedText).not.toContain(`"${field}"`);
+  }
+  for (const secret of [aliceCanvas.tenant_id, aliceCanvas.canvas_id, alice]) {
+    expect(refusedText).not.toContain(secret);
+  }
+  expect(await (await invited.request.get("/api/memberships")).json()).toEqual({
+    memberships: [],
+  });
+
+  // A reload shows no moderated canvas: nothing was cached.
+  await invited.reload();
+  await expect(
+    invited.getByRole("region", { name: "Your canvas" }).getByText(inactive),
+  ).toBeVisible();
+  await expect(moderatedRegion(invited)).toHaveCount(0);
+  await expect(invited.locator("[data-canvas-surface]")).toHaveCount(0);
+
+  // S5: the owner's canvas is unchanged.
+  expect(await (await a.page.request.get("/api/canvas")).json()).toEqual(
+    aliceCanvas,
+  );
 
   // S10: the token never reached the server in a URL or a Referer header.
   expect(sent.length).toBeGreaterThan(0);

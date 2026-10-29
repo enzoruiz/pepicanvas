@@ -66,8 +66,10 @@ type detachResult struct {
 
 // guardedMedia reauthorizes the caller's edit access immediately before each
 // media command commits, so access lost after the route check is denied at
-// the commit (US-016 S9). Abandon is never guarded: a failed upload always
-// releases its reservation.
+// the commit (US-016 S9), and names the caller as the command's actor, so the
+// store rechecks the membership inside the commit and a revocation confirmed
+// after the reauthorization still rejects it (US-006 S2). Abandon is never
+// guarded: a failed upload always releases its reservation.
 type guardedMedia struct {
 	media.Store
 	memberships access.MembershipStore
@@ -88,6 +90,7 @@ func (g guardedMedia) Apply(ctx context.Context, key media.CanvasKey, operation 
 		return access.CanvasRequest(membership, found, key.TenantID, access.ActionEdit), err
 	}, func() error {
 		var err error
+		operation.AccountID = string(g.account)
 		result, err = g.Store.Apply(ctx, key, operation, command)
 		return err
 	})
@@ -112,7 +115,8 @@ func correlationOf(r *http.Request) string {
 
 // mediaUsage answers the aggregate storage accounting of a canvas the caller
 // may view. Every denial, including a missing canvas, is the forbidden answer
-// of the canvas route.
+// of the canvas route. The caller is reauthorized after the read and before
+// the answer is written.
 func (a *api) mediaUsage(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -129,7 +133,7 @@ func (a *api) mediaUsage(w http.ResponseWriter, r *http.Request) {
 	usage, err := a.Media.Usage(r.Context(), mediaKey(key))
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, newUsageBody(usage))
+		a.deliver(w, r, principal, key, newUsageBody(usage))
 	case errors.Is(err, media.ErrNotFound), errors.Is(err, media.ErrInvalid):
 		a.responder.Error(w, r, httpx.ErrForbidden, access.ErrAccessDenied)
 	default:

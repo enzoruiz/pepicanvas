@@ -73,7 +73,7 @@ func TestDeactivationCutsAnActiveTenantInOneCommit(t *testing.T) {
 	if tenant.Status != access.SubscriptionInactive || tenant.Version != 2 || tenant.CanvasID != a.CanvasID {
 		t.Fatalf("tenant = %+v, want inactive at version 2 with its canvas", tenant)
 	}
-	wantCuts := []subscription.PendingCut{{ID: 1, AccessCut: subscription.AccessCut{
+	wantCuts := []subscription.PendingCut{{ID: 1, Kind: subscription.CutDeactivation, AccessCut: subscription.AccessCut{
 		TenantID: a.TenantID, Version: 2, CorrelationID: "corr-" + deactivateOp, CreatedAt: c.now(),
 	}}}
 	if cuts := store.Cuts(); !reflect.DeepEqual(cuts, wantCuts) {

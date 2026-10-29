@@ -422,7 +422,7 @@ func (t *memoryTx) RecordCut(_ context.Context, cut subscription.AccessCut) erro
 		}
 	}
 	t.nextCut++
-	t.state.cuts = append(t.state.cuts, memoryCut{PendingCut: subscription.PendingCut{ID: t.nextCut, AccessCut: cut}})
+	t.state.cuts = append(t.state.cuts, memoryCut{PendingCut: subscription.PendingCut{ID: t.nextCut, Kind: subscription.CutDeactivation, AccessCut: cut}})
 	return nil
 }
 

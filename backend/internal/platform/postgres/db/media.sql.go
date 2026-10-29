@@ -451,6 +451,27 @@ func (q *Queries) ListGarbage(ctx context.Context, maxAssets int32) ([]ListGarba
 	return items, nil
 }
 
+const lockActorMembership = `-- name: LockActorMembership :one
+SELECT role FROM memberships
+WHERE tenant_id = $1 AND account_id = $2
+FOR SHARE
+`
+
+type LockActorMembershipParams struct {
+	TenantID  string
+	AccountID string
+}
+
+// Read after the tenant lock and held until commit, so a membership
+// revocation commits either before this read, and the command is rejected,
+// or after this commit.
+func (q *Queries) LockActorMembership(ctx context.Context, arg LockActorMembershipParams) (string, error) {
+	row := q.db.QueryRow(ctx, lockActorMembership, arg.TenantID, arg.AccountID)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
 const lockAsset = `-- name: LockAsset :one
 SELECT state, kind, declared_bytes, storage_key, replaces_reference
 FROM media_assets

@@ -1,9 +1,10 @@
 // Package httpapi serves the account, session, and canvas-request HTTP API
 // (US-001), the manual streamer activation and own-canvas read (US-002), the
 // operator deactivation (US-003), the owner's moderator invitations (US-004),
-// their acceptance and the moderated-canvas list (US-005), the owner-only
-// canvas resize (US-007), and the canvas storage quota with its media
-// uploads and references (US-016). Every response is private and
+// their acceptance and the moderated-canvas list (US-005), the owner's
+// moderator list and revocation (US-006), the owner-only canvas resize
+// (US-007), and the canvas storage quota with its media uploads and
+// references (US-016). Every response is private and
 // correlated, and every route is guarded by the ingress (TE-014): unsafe
 // methods need the exact Origin, session mutations need the session's CSRF
 // token before the session is read, and the abuse limits answer 429
@@ -109,6 +110,8 @@ type Invitations interface {
 	Revoke(ctx context.Context, request invitation.RevokeRequest) (invitation.Revocation, error)
 	Accept(ctx context.Context, request invitation.AcceptRequest) (invitation.Acceptance, error)
 	Moderations(ctx context.Context, account access.AccountID) ([]invitation.Moderation, error)
+	Members(ctx context.Context, owner access.AccountID) ([]invitation.Member, error)
+	RevokeMember(ctx context.Context, request invitation.RevokeMemberRequest) (invitation.MemberRevocation, error)
 }
 
 // Config wires the API.
@@ -196,6 +199,8 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/invitations/{invitationID}/revoke", in.Route(ingress.Session, http.HandlerFunc(a.revokeInvitation)))
 	mux.Handle("POST /api/invitations/accept", in.Route(ingress.Session, http.HandlerFunc(a.acceptInvitation)))
 	mux.HandleFunc("GET /api/memberships", a.listMemberships)
+	mux.HandleFunc("GET /api/members", a.listMembers)
+	mux.Handle("POST /api/members/{accountID}/revoke", in.Route(ingress.Session, http.HandlerFunc(a.revokeMember)))
 	return httpx.Recover(config.Logger, httpx.Correlate(httpx.Private(in.Protect(mux)))), nil
 }
 
@@ -652,6 +657,75 @@ func (a *api) listMemberships(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+type memberResult struct {
+	AccountID string `json:"account_id"`
+	Email     string `json:"email"`
+	// AcceptedAt is null for a moderator no accepted invitation records.
+	AcceptedAt *string `json:"accepted_at"`
+}
+
+type memberList struct {
+	Members []memberResult `json:"members"`
+}
+
+type memberRevocationResult struct {
+	TenantID  string `json:"tenant_id"`
+	AccountID string `json:"account_id"`
+}
+
+// listMembers answers the moderators of the session owner's tenant with
+// their email (US-006 L2), only to the owner of an active tenant.
+func (a *api) listMembers(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	members, err := a.Invitations.Members(r.Context(), principal.AccountID)
+	if err != nil {
+		a.invitationError(w, r, err)
+		return
+	}
+	body := memberList{Members: make([]memberResult, 0, len(members))}
+	for _, m := range members {
+		item := memberResult{AccountID: string(m.AccountID), Email: m.Email}
+		if !m.AcceptedAt.IsZero() {
+			acceptedAt := m.AcceptedAt.UTC().Format(time.RFC3339Nano)
+			item.AcceptedAt = &acceptedAt
+		}
+		body.Members = append(body.Members, item)
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// revokeMember removes a moderator from the session owner's tenant. The
+// ingress has already checked the Origin and the CSRF token. The cut is
+// effective when the answer is sent; unknown, foreign, and owner accounts
+// share the one not-found answer.
+func (a *api) revokeMember(w http.ResponseWriter, r *http.Request) {
+	_, principal, ok := a.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var body revocationBody
+	if err := decodeJSON(w, r, &body); err != nil {
+		a.responder.Error(w, r, httpx.ErrBadRequest, err)
+		return
+	}
+	correlationID, _ := correlation.FromContext(r.Context())
+	revoked, err := a.Invitations.RevokeMember(r.Context(), invitation.RevokeMemberRequest{
+		OwnerID:       principal.AccountID,
+		OperationID:   body.OperationID,
+		AccountID:     access.AccountID(r.PathValue("accountID")),
+		CorrelationID: correlationID.String(),
+	})
+	if err != nil {
+		a.invitationError(w, r, err)
+		return
+	}
+	a.Logger.InfoContext(r.Context(), "moderator revoked", slog.String("tenant_id", revoked.TenantID))
+	writeJSON(w, http.StatusOK, memberRevocationResult{TenantID: revoked.TenantID, AccountID: string(revoked.AccountID)})
+}
+
 // signOut ends the session. The ingress has already checked the CSRF token
 // of a presented cookie, so only the session's own page can end it.
 func (a *api) signOut(w http.ResponseWriter, r *http.Request) {
@@ -771,7 +845,8 @@ func (a *api) load(w http.ResponseWriter, r *http.Request, key canvas.Key) (canv
 
 // canvas answers a canvas request. Every denial, including a missing tenant
 // or canvas, returns the same forbidden answer, so no response reveals
-// whether a canvas exists for another tenant.
+// whether a canvas exists for another tenant. The caller is reauthorized
+// after the load and before the canvas is written.
 func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -785,7 +860,29 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, newCanvasBody(loaded))
+	a.deliver(w, r, principal, key, newCanvasBody(loaded))
+}
+
+// deliver reauthorizes the caller's view access to the canvas immediately
+// before writing body, so data read before a revocation is never delivered
+// after its confirmation (US-006 S8). A denial is the route's forbidden
+// answer and writes no part of body.
+func (a *api) deliver(w http.ResponseWriter, r *http.Request, principal access.Principal, key canvas.Key, body any) {
+	var loadErr error
+	err := access.GuardReadDelivery(func() (access.Request, error) {
+		membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
+		loadErr = err
+		return access.CanvasRequest(membership, found, key.TenantID, access.ActionView), err
+	}, func() error {
+		writeJSON(w, http.StatusOK, body)
+		return nil
+	})
+	switch {
+	case loadErr != nil:
+		a.responder.Error(w, r, httpx.ErrInternal, loadErr)
+	case err != nil:
+		a.responder.Error(w, r, httpx.ErrForbidden, err)
+	}
 }
 
 // authorizeCanvas reads the canvas key from the path and checks the caller

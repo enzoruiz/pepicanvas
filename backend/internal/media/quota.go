@@ -76,10 +76,13 @@ type CanvasKey struct {
 }
 
 // Operation identifies one client intent. Retrying the same command with the
-// same ID returns the original result without a second effect.
+// same ID returns the original result without a second effect. AccountID is
+// the acting account, whose membership the store rechecks at the commit; it
+// is empty for system work and is not part of the intent's fingerprint.
 type Operation struct {
 	ID            string
 	CorrelationID string
+	AccountID     string
 }
 
 // Usage is the committed accounting of one canvas. UsedBytes counts ready

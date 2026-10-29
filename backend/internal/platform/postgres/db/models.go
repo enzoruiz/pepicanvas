@@ -15,6 +15,8 @@ type AccessCut struct {
 	CorrelationID pgtype.Text
 	CreatedAt     pgtype.Timestamptz
 	AppliedAt     pgtype.Timestamptz
+	Kind          string
+	AccountID     pgtype.Text
 }
 
 type Account struct {
@@ -162,6 +164,17 @@ type Membership struct {
 	TenantID  string
 	AccountID string
 	Role      string
+}
+
+type MembershipRevocation struct {
+	OperationID    string
+	Fingerprint    []byte
+	OwnerAccountID string
+	TenantID       string
+	AccountID      string
+	Version        int64
+	CorrelationID  pgtype.Text
+	AcceptedAt     pgtype.Timestamptz
 }
 
 type Operator struct {

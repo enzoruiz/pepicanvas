@@ -110,7 +110,8 @@ func (s *SubscriptionStore) GrantOperator(ctx context.Context, email string) (ac
 	return account, nil
 }
 
-// PendingCuts returns up to limit access cuts not yet applied, oldest first.
+// PendingCuts returns up to limit access cuts not yet applied, oldest first,
+// deactivations and revocations alike.
 func (s *SubscriptionStore) PendingCuts(ctx context.Context, limit int) ([]subscription.PendingCut, error) {
 	if limit <= 0 || limit > math.MaxInt32 {
 		return nil, fmt.Errorf("postgres: pending cuts: invalid limit %d", limit)
@@ -121,7 +122,7 @@ func (s *SubscriptionStore) PendingCuts(ctx context.Context, limit int) ([]subsc
 	}
 	cuts := make([]subscription.PendingCut, 0, len(rows))
 	for _, row := range rows {
-		cuts = append(cuts, subscription.PendingCut{ID: row.ID, AccessCut: subscription.AccessCut{
+		cuts = append(cuts, subscription.PendingCut{ID: row.ID, Kind: subscription.CutKind(row.Kind), AccountID: access.AccountID(row.AccountID.String), AccessCut: subscription.AccessCut{
 			TenantID:      row.TenantID,
 			Version:       uint64(row.Version),
 			CorrelationID: row.CorrelationID.String,

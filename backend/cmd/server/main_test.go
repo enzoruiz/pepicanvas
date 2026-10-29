@@ -280,6 +280,15 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 	for name, c := range invalidMedia {
 		cases[name] = append([]string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin}, c.env...)
 	}
+	// US-006: the cut relay poll is a positive Go duration or the default.
+	invalidPolls := map[string]string{
+		"cut relay poll without a unit": "1000",
+		"zero cut relay poll":           "0s",
+		"negative cut relay poll":       "-1s",
+	}
+	for name, value := range invalidPolls {
+		cases[name] = []string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin, "PEPICANVAS_CUT_RELAY_POLL_INTERVAL=" + value}
+	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command(bin)
@@ -298,6 +307,10 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 			if _, invalid := invalidOrigins[name]; invalid &&
 				(!strings.Contains(string(out), "allowed origin must be exactly scheme://host[:port]") || strings.Contains(string(out), "127.0.0.1:1")) {
 				t.Fatalf("the origin was not rejected before the database was opened:\n%s", out)
+			}
+			if _, invalid := invalidPolls[name]; invalid &&
+				(!strings.Contains(string(out), "PEPICANVAS_CUT_RELAY_POLL_INTERVAL must be a positive duration") || strings.Contains(string(out), "127.0.0.1:1")) {
+				t.Fatalf("the poll interval was not rejected before the database was opened:\n%s", out)
 			}
 			if c, invalid := invalidMedia[name]; invalid {
 				for _, want := range c.want {
@@ -1184,6 +1197,169 @@ func TestModeratorAcceptsAnInvitationAcrossRestart(t *testing.T) {
 		"session token":    strings.TrimPrefix(bob.cookie, "__Host-pcs="),
 		"CSRF token":       bob.csrf,
 		"moderator email":  "bob@example.com",
+	} {
+		if strings.Contains(logs, s) {
+			t.Errorf("process logs contain the %s", name)
+		}
+	}
+}
+
+// US-006 S1, S4, S6, S12, S14, S16: the owner lists and revokes a moderator
+// over the real server; the revocation is effective at the answer, the
+// commit wakes the cut relay, and the retry replays the same body. The relay
+// polls once a minute here, so a cut applied within seconds was applied by
+// the commit's wake, not by a poll.
+func TestOwnerRevokesAModeratorOverTheServer(t *testing.T) {
+	db := pgtest.Start(t)
+	bin := buildServer(t)
+	dsn := db.DSN(t)
+	server := start(t, bin,
+		"PEPICANVAS_DATABASE_URL="+dsn,
+		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
+		"PEPICANVAS_ALLOWED_ORIGIN="+origin,
+		"PEPICANVAS_CUT_RELAY_POLL_INTERVAL=1m",
+	)
+	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
+	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
+	bob := registerAndSignIn(t, server, "op-process-bob-001", "bob@example.com")
+	if code, out := grantOperator(t, bin, []string{"PEPICANVAS_DATABASE_URL=" + dsn}, "operator@example.com"); code != 0 {
+		t.Fatalf("grant-operator = %d\n%s", code, out)
+	}
+	operator := signIn(t, server, "operator@example.com")
+	res, activation := activate(t, server, operator, "op-process-act-a01", "alice@example.com")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("activate alice = %d", res.StatusCode)
+	}
+	tenantID, canvasID := activation["tenant_id"].(string), activation["canvas_id"].(string)
+	canvasPath := "/api/tenants/" + tenantID + "/canvases/" + canvasID
+	bobID, _ := decodeBody(t, request(t, server, http.MethodGet, "/api/session", "", bob.cookie))["account_id"].(string)
+
+	const token = "pci_EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations", `{"operation_id":"op-process-inv-c01","token":"`+token+`"}`, alice.cookie, alice.csrf); res.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d", res.StatusCode)
+	}
+	if res := requestWith(t, server, http.MethodPost, "/api/invitations/accept", `{"operation_id":"op-process-acc-a01","token":"`+token+`"}`, bob.cookie, bob.csrf); res.StatusCode != http.StatusOK {
+		t.Fatalf("accept = %d", res.StatusCode)
+	}
+	read := func(s session, path string) (int, string) {
+		t.Helper()
+		res := request(t, server, http.MethodGet, path, "", s.cookie)
+		body, _ := io.ReadAll(res.Body)
+		if res.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("GET %s Cache-Control = %q", path, res.Header.Get("Cache-Control"))
+		}
+		return res.StatusCode, string(body)
+	}
+
+	// S16: the owner sees the moderator's email.
+	status, listed := read(alice, "/api/members")
+	var members struct {
+		Members []map[string]any `json:"members"`
+	}
+	if err := json.Unmarshal([]byte(listed), &members); status != http.StatusOK || err != nil || len(members.Members) != 1 {
+		t.Fatalf("members = %d %s", status, listed)
+	}
+	if m := members.Members[0]; m["account_id"] != bobID || m["email"] != "bob@example.com" || len(m) != 3 {
+		t.Fatalf("member = %v", m)
+	} else if at, err := time.Parse(time.RFC3339Nano, m["accepted_at"].(string)); err != nil || at.Location() != time.UTC {
+		t.Fatalf("accepted_at = %v", m["accepted_at"])
+	}
+	if status, _ := read(bob, "/api/members"); status != http.StatusForbidden {
+		t.Fatalf("moderator members = %d, want 403", status)
+	}
+	if status, body := read(bob, canvasPath); status != http.StatusOK {
+		t.Fatalf("moderated canvas = %d %s", status, body)
+	}
+	if status, body := read(bob, canvasPath+"/media/usage"); status != http.StatusOK {
+		t.Fatalf("moderated media usage = %d %s", status, body)
+	}
+	if status, body := read(bob, "/api/memberships"); status != http.StatusOK || !strings.Contains(body, tenantID) {
+		t.Fatalf("memberships = %d %s", status, body)
+	}
+	_, ownerCanvas := read(alice, canvasPath)
+
+	// S6: the moderator cannot revoke, and without the CSRF token the owner
+	// cannot either; nothing changes.
+	revoke := func(s session, op, account string) (*http.Response, string) {
+		t.Helper()
+		res := requestWith(t, server, http.MethodPost, "/api/members/"+account+"/revoke", `{"operation_id":"`+op+`"}`, s.cookie, s.csrf)
+		body, _ := io.ReadAll(res.Body)
+		return res, string(body)
+	}
+	if res, body := revoke(bob, "op-process-rev-d01", bobID); res.StatusCode != http.StatusForbidden || !strings.Contains(body, `"error":"forbidden"`) {
+		t.Fatalf("moderator revoke = %d %s", res.StatusCode, body)
+	}
+	if res, body := revoke(session{cookie: alice.cookie}, "op-process-rev-d02", bobID); res.StatusCode != http.StatusForbidden || !strings.Contains(body, `"error":"forbidden"`) {
+		t.Fatalf("revoke without CSRF = %d %s", res.StatusCode, body)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM memberships WHERE tenant_id = $1 AND account_id = $2 AND role = 'moderator'", tenantID, bobID); n != 1 {
+		t.Fatalf("moderator memberships after refusals = %d, want 1", n)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM access_cuts") + count(t, dsn, "SELECT count(*) FROM membership_revocations"); n != 0 {
+		t.Fatalf("cuts and revocation records after refusals = %d, want 0", n)
+	}
+
+	// S1: the cut is effective at the answer.
+	res, first := revoke(alice, "op-process-rev-r01", bobID)
+	if want := `{"tenant_id":"` + tenantID + `","account_id":"` + bobID + `"}` + "\n"; res.StatusCode != http.StatusOK || first != want {
+		t.Fatalf("revoke = %d %s, want %s", res.StatusCode, first, want)
+	}
+	correlationID := res.Header.Get("X-Correlation-ID")
+	for _, path := range []string{canvasPath, canvasPath + "/media/usage"} {
+		if status, body := read(bob, path); status != http.StatusForbidden || !strings.Contains(body, `"error":"forbidden"`) {
+			t.Fatalf("GET %s after revocation = %d %s", path, status, body)
+		}
+	}
+	if status, body := read(bob, "/api/memberships"); status != http.StatusOK || body != `{"memberships":[]}`+"\n" {
+		t.Fatalf("memberships after revocation = %d %s", status, body)
+	}
+	if status, body := read(alice, "/api/members"); status != http.StatusOK || body != `{"members":[]}`+"\n" {
+		t.Fatalf("members after revocation = %d %s", status, body)
+	}
+
+	// S14: the record and the cut keep the request correlation, and the
+	// commit wakes the relay, which applies the cut long before its poll.
+	if n := count(t, dsn, "SELECT count(*) FROM membership_revocations WHERE operation_id = 'op-process-rev-r01' AND account_id = $1 AND correlation_id = $2", bobID, correlationID); n != 1 {
+		t.Fatalf("revocation records with the correlation = %d", n)
+	}
+	const applied = "SELECT count(*) FROM access_cuts WHERE kind = 'revocation' AND tenant_id = $1 AND account_id = $2 AND correlation_id = $3 AND applied_at IS NOT NULL"
+	deadline := time.Now().Add(10 * time.Second)
+	for count(t, dsn, applied, tenantID, bobID, correlationID) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the revocation cut was not applied before the one-minute poll: the commit did not wake the relay\n%s", server.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// S12: the retry returns the identical body and writes nothing.
+	if res, again := revoke(alice, "op-process-rev-r01", bobID); res.StatusCode != http.StatusOK || again != first {
+		t.Fatalf("replay = %d %s, want %s", res.StatusCode, again, first)
+	}
+	if n := count(t, dsn, "SELECT count(*) FROM access_cuts"); n != 1 {
+		t.Fatalf("cuts after the replay = %d, want 1", n)
+	}
+	// S5: the owner's canvas is unchanged.
+	if status, body := read(alice, canvasPath); status != http.StatusOK || body != ownerCanvas {
+		t.Fatalf("owner canvas = %d %s, want %s", status, body, ownerCanvas)
+	}
+	server.stop(t)
+	logs := server.logs.String()
+
+	for _, msg := range []string{"moderator revoked", "access cut applied"} {
+		if record := logLine(logs, msg, correlationID); record == nil || record["tenant_id"] != tenantID {
+			t.Fatalf("%s log = %v\n%s", msg, record, logs)
+		}
+	}
+	for name, s := range map[string]string{
+		"invitation token": "pci_",
+		"password":         "correct horse battery",
+		"owner email":      "alice@example.com",
+		"moderator email":  "bob@example.com",
+		"operator email":   "operator@example.com",
+		"session token":    strings.TrimPrefix(alice.cookie, "__Host-pcs="),
+		"CSRF token":       alice.csrf,
+		"moderator token":  strings.TrimPrefix(bob.cookie, "__Host-pcs="),
+		"moderator CSRF":   bob.csrf,
 	} {
 		if strings.Contains(logs, s) {
 			t.Errorf("process logs contain the %s", name)

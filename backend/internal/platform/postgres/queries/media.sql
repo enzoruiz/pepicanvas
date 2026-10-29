@@ -143,3 +143,11 @@ WHERE state = 'ready'
     AND (tenant_id, canvas_id, asset_id) > (sqlc.arg(after_tenant)::text, sqlc.arg(after_canvas)::text, sqlc.arg(after_asset)::text)
 ORDER BY tenant_id, canvas_id, asset_id
 LIMIT sqlc.arg(max_assets);
+
+-- name: LockActorMembership :one
+-- Read after the tenant lock and held until commit, so a membership
+-- revocation commits either before this read, and the command is rejected,
+-- or after this commit.
+SELECT role FROM memberships
+WHERE tenant_id = $1 AND account_id = $2
+FOR SHARE;

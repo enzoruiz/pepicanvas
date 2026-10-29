@@ -111,6 +111,9 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 	e.register("op-http-web-alice1", "alice@example.com")
 	leaver := e.signIn("alice@example.com")
 	carol := e.streamer(op, "carol1", "carol@example.com")
+	dave := e.owner("op-http-web-dave01", "dave@example.com", "tenant-w", access.SubscriptionActive)
+	moderator := e.register("op-http-web-mod001", "moderator@example.com")
+	e.invs.AddMember("tenant-w", moderator, access.RoleModerator)
 
 	type route struct {
 		name, method, path string
@@ -126,6 +129,7 @@ func TestEveryUnsafeRouteChecksOriginAndCSRFBeforeTheDomain(t *testing.T) {
 		{"deactivation", http.MethodPost, "/api/deactivations", activation("op-http-web-dea001", "alice@example.com"), &op, http.StatusOK, "Deactivate"},
 		{"sign-out", http.MethodDelete, "/api/session", nil, &leaver, http.StatusNoContent, "SignOut"},
 		{"resize", http.MethodPut, carol.path + "/dimensions", dimensions("op-http-web-dim001", 1280, 720), &carol.signedIn, http.StatusOK, "Apply"},
+		{"member revocation", http.MethodPost, memberRevokePath(string(moderator)), revocation("op-http-web-rev001"), &dave, http.StatusOK, "RevokeMember"},
 	}
 	origins := map[string]option{
 		"absent Origin":       withoutOrigin(),

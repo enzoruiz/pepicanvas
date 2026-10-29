@@ -93,9 +93,24 @@ type AccessCut struct {
 	CreatedAt     time.Time
 }
 
+// CutKind names the confirmed change an access cut applies.
+type CutKind string
+
+const (
+	// CutDeactivation cuts every connection of a tenant (US-003).
+	CutDeactivation CutKind = "deactivation"
+	// CutRevocation cuts the connections of one account in a tenant whose
+	// membership was revoked (US-006).
+	CutRevocation CutKind = "revocation"
+)
+
 // PendingCut is an access cut not yet applied to the live connections.
+// AccountID names the revoked account of a revocation cut and is empty
+// otherwise.
 type PendingCut struct {
-	ID int64
+	ID        int64
+	Kind      CutKind
+	AccountID access.AccountID
 	AccessCut
 }
 

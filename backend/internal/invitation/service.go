@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/access"
+	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/secret"
 )
 
@@ -24,8 +25,9 @@ var (
 
 // Service creates, lists, revokes, and accepts invitations.
 type Service struct {
-	store Store
-	now   func() time.Time
+	store     Store
+	now       func() time.Time
+	committed func()
 }
 
 // Option configures a Service.
@@ -34,6 +36,13 @@ type Option func(*Service)
 // WithClock sets the time source used for expiry and operation retention.
 func WithClock(now func() time.Time) Option {
 	return func(s *Service) { s.now = now }
+}
+
+// WithCommitted sets a hook that runs after each commit that wrote an access
+// cut, such as CutRelay.Notify. It must not block: the revocation answers
+// once the hook returns.
+func WithCommitted(hook func()) Option {
+	return func(s *Service) { s.committed = hook }
 }
 
 // NewService builds the service.
@@ -349,6 +358,177 @@ func (s *Service) Moderations(ctx context.Context, account access.AccountID) ([]
 	}
 	slices.SortFunc(result, func(a, b Moderation) int { return strings.Compare(a.TenantID, b.TenantID) })
 	return result, nil
+}
+
+// Members lists the moderators of the owner's tenant with their email and
+// latest acceptance (US-006 L2). Only the owner of an active tenant sees them.
+func (s *Service) Members(ctx context.Context, owner access.AccountID) ([]Member, error) {
+	var result []Member
+	err := s.store.InTx(ctx, func(tx Tx) error {
+		tenant, found, err := tx.LockOwnedTenant(ctx, owner)
+		if err != nil {
+			return fmt.Errorf("invitation: lock tenant: %w", err)
+		}
+		if err := access.Check(membershipRequest(found, tenant, access.ActionView, "")); err != nil {
+			return err
+		}
+		if result, err = tx.Members(ctx, tenant.ID); err != nil {
+			return fmt.Errorf("invitation: list members: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []Member{}
+	}
+	return result, nil
+}
+
+// RevokeMember removes the moderator membership of request.AccountID from
+// the owner's tenant. In one transaction it increments the tenant's access
+// version and stores one pending revocation cut, so the cut is effective at
+// the commit; live connections are cut by the relay the WithCommitted hook
+// wakes. Content is never touched. An unknown account, a non-member, and the
+// owner are ErrNotFound. A retry under the same operation ID returns the
+// first answer while it is retained.
+func (s *Service) RevokeMember(ctx context.Context, request RevokeMemberRequest) (MemberRevocation, error) {
+	if !idPattern.MatchString(string(request.AccountID)) || !access.ValidOperationID(request.OperationID) ||
+		len(request.CorrelationID) > MaxCorrelationBytes {
+		return MemberRevocation{}, ErrInvalid
+	}
+	fingerprint := operationFingerprint(OperationRevokeMember, request.OwnerID, []byte(request.AccountID))
+
+	result, err := s.revokeMember(ctx, request, fingerprint)
+	if errors.Is(err, ErrOperationRetained) {
+		// A concurrent revocation committed the same operation ID first:
+		// replay it, or reject a different payload.
+		result, err = s.revokeMember(ctx, request, fingerprint)
+		if errors.Is(err, ErrOperationRetained) {
+			// Revocations of one owner serialize on the tenant lock, so the
+			// retry sees any commit of its own tenant. Losing the race again
+			// means another tenant's request claimed the ID between this
+			// retry's read and its insert: an ID claimed by another request
+			// never replays here, and retrying again could race forever.
+			return MemberRevocation{}, ErrOperationConflict
+		}
+	}
+	return result, err
+}
+
+func (s *Service) revokeMember(ctx context.Context, request RevokeMemberRequest, fingerprint [32]byte) (MemberRevocation, error) {
+	now := s.now()
+	notBefore := now.Add(-OperationRetention)
+
+	var result MemberRevocation
+	wroteCut := false
+	err := s.store.InTx(ctx, func(tx Tx) error {
+		wroteCut = false
+		// The tenant row lock conflicts with the share lock of every
+		// mutation of the tenant, so a mutation commits wholly before or
+		// wholly after the revocation.
+		tenant, found, err := tx.LockOwnedTenantForUpdate(ctx, request.OwnerID)
+		if err != nil {
+			return fmt.Errorf("invitation: lock tenant: %w", err)
+		}
+		if err := access.Check(membershipRequest(found, tenant, access.ActionAdminister, access.RoleModerator)); err != nil {
+			return err
+		}
+		record, retained, err := tx.MemberRevocation(ctx, request.OperationID, notBefore)
+		if err != nil {
+			return fmt.Errorf("invitation: find revocation: %w", err)
+		}
+		if retained {
+			if subtle.ConstantTimeCompare(record.Fingerprint[:], fingerprint[:]) != 1 {
+				return ErrOperationConflict
+			}
+			result = record.Result
+			return nil
+		}
+
+		role, found, err := tx.LockMembership(ctx, tenant.ID, request.AccountID)
+		if err != nil {
+			return fmt.Errorf("invitation: lock membership: %w", err)
+		}
+		if !found || role != access.RoleModerator {
+			return ErrNotFound
+		}
+		if err := tx.RemoveModerator(ctx, tenant.ID, request.AccountID); err != nil {
+			return fmt.Errorf("invitation: remove moderator: %w", err)
+		}
+		version, err := tx.IncrementAccessVersion(ctx, tenant.ID)
+		if err != nil {
+			return fmt.Errorf("invitation: increment access version: %w", err)
+		}
+		cut := RevocationCut{TenantID: tenant.ID, AccountID: request.AccountID, Version: version, CorrelationID: request.CorrelationID, CreatedAt: now}
+		if err := tx.RecordCut(ctx, cut); err != nil {
+			return fmt.Errorf("invitation: record cut: %w", err)
+		}
+		wroteCut = true
+
+		result = MemberRevocation{TenantID: tenant.ID, AccountID: request.AccountID}
+		err = tx.RecordMemberRevocation(ctx, MemberRevocationRecord{
+			OperationID:   request.OperationID,
+			OwnerID:       request.OwnerID,
+			Fingerprint:   fingerprint,
+			Result:        result,
+			Version:       version,
+			CorrelationID: request.CorrelationID,
+			AcceptedAt:    now,
+		}, notBefore)
+		if err != nil && !errors.Is(err, ErrOperationRetained) {
+			return fmt.Errorf("invitation: record revocation: %w", err)
+		}
+		return err
+	})
+	if err != nil {
+		return MemberRevocation{}, err
+	}
+	if wroteCut && s.committed != nil {
+		s.committed()
+	}
+	return result, nil
+}
+
+// EditorGrant returns the access facts an editor connection of the account's
+// session to the tenant's canvas is authorized with: its membership, owner or
+// moderator, read with the tenant's access version. A non-member, a revoked
+// moderator, and a member of an inactive tenant get the TE-001 denial.
+func (s *Service) EditorGrant(ctx context.Context, account access.AccountID, sessionID, tenantID string) (revocation.Grant, error) {
+	var member MemberAccess
+	var found bool
+	err := s.store.InTx(ctx, func(tx Tx) error {
+		var err error
+		if member, found, err = tx.MemberAccess(ctx, tenantID, account); err != nil {
+			return fmt.Errorf("invitation: read member access: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return revocation.Grant{}, err
+	}
+	if err := access.Check(access.CanvasRequest(member.Membership, found, tenantID, access.ActionView)); err != nil {
+		return revocation.Grant{}, err
+	}
+	return revocation.Grant{
+		TenantID:  tenantID,
+		AccountID: string(account),
+		SessionID: sessionID,
+		Client:    revocation.ClientEditor,
+		Version:   member.Version,
+	}, nil
+}
+
+// membershipRequest builds the TE-001 request for an account acting on the
+// memberships of the tenant it owns, toward members of target role. Like
+// invitations, only the owner acts on them, so a non-owner has no actor
+// tenant and is denied like any other stranger.
+func membershipRequest(owner bool, tenant Tenant, action access.Action, target access.Role) access.Request {
+	request := access.InvitationRequest(owner, tenant.ID, tenant.Status, action)
+	request.Resource = access.ResourceMembership
+	request.TargetRole = target
+	return request
 }
 
 // lockAdministeredTenant locks the tenant the account owns and checks TE-001

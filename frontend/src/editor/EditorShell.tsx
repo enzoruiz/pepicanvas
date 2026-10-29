@@ -8,6 +8,7 @@ import { InvitationsPanel } from "./InvitationsPanel";
 import { MediaPanel } from "./MediaPanel";
 import { readInvitationToken } from "./invitationLink";
 import { ModeratedCanvases } from "./ModeratedCanvases";
+import { ModeratorsPanel } from "./ModeratorsPanel";
 import { OperatorPanel } from "./OperatorPanel";
 
 const invitationNote =
@@ -20,7 +21,7 @@ interface SignedInEditorProps {
 }
 
 // Only an owner with an active subscription loads its own canvas, so the
-// invitations and storage panels wait for it; moderators and inactive or
+// invitations, moderators, and storage panels wait for it; moderators and inactive or
 // operator-only accounts never see them. Moderated canvases are read-only.
 function SignedInEditor({
   session,
@@ -49,6 +50,7 @@ function SignedInEditor({
         hideWhenNotOwner={moderates}
       />
       {ownCanvas && <InvitationsPanel session={session} />}
+      {ownCanvas && <ModeratorsPanel session={session} />}
       {ownCanvas && (
         <MediaPanel
           session={session}
