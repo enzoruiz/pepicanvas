@@ -561,3 +561,158 @@ func waitStarted(t *testing.T, started <-chan struct{}) {
 		t.Fatal("timed out waiting for a storage call to start")
 	}
 }
+
+// passMark is the context key the test Correlate hook stores a pass's
+// correlation ID under.
+type passMark struct{}
+
+// markRecorder records, per store or storage method, the correlation ID each
+// call's context carried under passMark ("" when none).
+type markRecorder struct {
+	mu    sync.Mutex
+	calls map[string][]string
+}
+
+func (m *markRecorder) record(ctx context.Context, method string) {
+	mark, _ := ctx.Value(passMark{}).(string)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.calls == nil {
+		m.calls = map[string][]string{}
+	}
+	m.calls[method] = append(m.calls[method], mark)
+}
+
+// take returns the recorded calls and forgets them.
+func (m *markRecorder) take() map[string][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	calls := m.calls
+	m.calls = nil
+	return calls
+}
+
+// markedStore records the contexts of the store calls a reconciler makes.
+type markedStore struct {
+	media.Store
+	marks *markRecorder
+}
+
+func (s markedStore) Collect(ctx context.Context, limit int) ([]media.Garbage, error) {
+	s.marks.record(ctx, "Store.Collect")
+	return s.Store.Collect(ctx, limit)
+}
+
+func (s markedStore) Purge(ctx context.Context, key media.CanvasKey, assetID string) error {
+	s.marks.record(ctx, "Store.Purge")
+	return s.Store.Purge(ctx, key, assetID)
+}
+
+func (s markedStore) HeldKeys(ctx context.Context, storageKeys []string) (map[string]bool, error) {
+	s.marks.record(ctx, "Store.HeldKeys")
+	return s.Store.HeldKeys(ctx, storageKeys)
+}
+
+func (s markedStore) AssetExists(ctx context.Context, owner media.Owner) (bool, error) {
+	s.marks.record(ctx, "Store.AssetExists")
+	return s.Store.AssetExists(ctx, owner)
+}
+
+func (s markedStore) ReadyPage(ctx context.Context, after media.Owner, limit int) ([]media.StoredAsset, error) {
+	s.marks.record(ctx, "Store.ReadyPage")
+	return s.Store.ReadyPage(ctx, after, limit)
+}
+
+// markedStorage records the contexts of the storage calls a reconciler makes.
+type markedStorage struct {
+	media.ObjectStore
+	marks *markRecorder
+}
+
+func (s markedStorage) Delete(ctx context.Context, key string) error {
+	s.marks.record(ctx, "Storage.Delete")
+	return s.ObjectStore.Delete(ctx, key)
+}
+
+func (s markedStorage) Stat(ctx context.Context, key string) (media.Object, error) {
+	s.marks.record(ctx, "Storage.Stat")
+	return s.ObjectStore.Stat(ctx, key)
+}
+
+func (s markedStorage) List(ctx context.Context, after string, limit int) ([]media.Object, error) {
+	s.marks.record(ctx, "Storage.List")
+	return s.ObjectStore.List(ctx, after, limit)
+}
+
+// wantMarked fails unless every reconciler store and storage method was
+// called, each time with a context carrying want.
+func wantMarked(t *testing.T, calls map[string][]string, want string) {
+	t.Helper()
+	for _, method := range []string{
+		"Store.Collect", "Store.Purge", "Store.HeldKeys", "Store.AssetExists", "Store.ReadyPage",
+		"Storage.Delete", "Storage.Stat", "Storage.List",
+	} {
+		marks := calls[method]
+		if len(marks) == 0 {
+			t.Errorf("%s not called by the pass", method)
+		}
+		for i, mark := range marks {
+			if mark != want {
+				t.Errorf("%s call %d carried correlation %q, want the pass's %q", method, i, mark, want)
+			}
+		}
+	}
+}
+
+// TE-015 S1, S5, L12: every store and storage call of a pass, whether Run or
+// periodic, gets a context derived from Correlate with the pass's
+// correlation ID.
+func TestReconcilerCorrelatesEveryCallOfAPass(t *testing.T) {
+	f := startServer(t).fixture(t)
+	ready := f.mustUpload(t, f.request("hello", "ref-ready"))
+	marks := &markRecorder{}
+	var hooked []string
+	var hookedMu sync.Mutex
+	r := newReconciler(t, media.ReconcilerConfig{
+		Store:    markedStore{Store: f.store, marks: marks},
+		Storage:  markedStorage{ObjectStore: f.storage, marks: marks},
+		Interval: time.Hour,
+		Correlate: func(ctx context.Context, correlationID string) context.Context {
+			hookedMu.Lock()
+			hooked = append(hooked, correlationID)
+			hookedMu.Unlock()
+			return context.WithValue(ctx, passMark{}, correlationID)
+		},
+	})
+	// Garbage, a proven orphan, and a ready asset make the pass call every
+	// store and storage method.
+	stage := func(n int) {
+		f.isolate(t, false, fmt.Sprintf("ref-garbage-%d", n))
+		f.storage.plant(fmt.Sprintf("orphan-%d", n), &media.Owner{Key: f.key, AssetID: fmt.Sprintf("gone-%d", n)},
+			time.Now().Add(-media.DefaultOrphanGrace-time.Minute))
+		marks.take()
+	}
+
+	stage(1)
+	report, err := r.Run(context.Background(), runCorrelation)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantReport(t, report, media.Report{Purged: 1, OrphansDeleted: 1, Complete: true})
+	wantMarked(t, marks.take(), runCorrelation)
+
+	stage(2)
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the periodic pass", func() bool { last, ok := r.Last(); return ok && last.CorrelationID != runCorrelation })
+	last, _ := r.Last()
+	wantReport(t, last, media.Report{Purged: 1, OrphansDeleted: 1, Complete: true})
+	wantMarked(t, marks.take(), last.CorrelationID)
+	hookedMu.Lock()
+	defer hookedMu.Unlock()
+	if fmt.Sprint(hooked) != fmt.Sprint([]string{runCorrelation, last.CorrelationID}) {
+		t.Fatalf("Correlate called with %v, want once per pass with its correlation ID", hooked)
+	}
+	f.wantServed(t, ready.AssetID, "hello")
+}

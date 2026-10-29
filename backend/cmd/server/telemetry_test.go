@@ -285,6 +285,21 @@ func TestServerExportsTheSpansOfARequestByCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The reconciliation pass at startup exports its storage calls under
+	// its own correlation, not the upload's.
+	listed := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var span telemetry.SpanData
+		if err := json.Unmarshal([]byte(line), &span); err != nil {
+			t.Fatalf("trace line %q: %v", line, err)
+		}
+		if span.Name == string(telemetry.SpanS3) && span.Attributes["operation"] == "list" && span.TraceID != id.String() {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("no s3 list span of the reconciliation pass in the trace file")
+	}
 	for name, s := range map[string]string{"S3 secret key": s3test.SecretKey, "session cookie": cookie, "CSRF token": signedIn.CSRF, "media temp dir": os.TempDir() + "/"} {
 		if strings.Contains(string(data), s) {
 			t.Errorf("trace file contains the %s", name)

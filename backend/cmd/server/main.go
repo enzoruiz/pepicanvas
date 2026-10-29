@@ -74,6 +74,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/tracing"
 	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
@@ -233,7 +234,10 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 			return fmt.Errorf("media storage: %w", err)
 		}
 		storage = objects
-		if reconciler, err = media.NewReconciler(media.ReconcilerConfig{Store: mediaStore, Storage: objects}); err != nil {
+		if reconciler, err = media.NewReconciler(media.ReconcilerConfig{Store: mediaStore, Storage: objects, Correlate: func(ctx context.Context, id string) context.Context {
+			// Passes run outside requests, so they also need the tracer to export.
+			return telemetry.WithTracer(correlate(ctx, id), tracer)
+		}}); err != nil {
 			return err
 		}
 	}
@@ -364,8 +368,8 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 }
 
 // correlate carries a stored cut's correlation ID into the registry's context,
-// so its logs relate to the deactivation request. A missing or malformed ID
-// is dropped.
+// so its logs relate to the deactivation request, and a reconciliation pass's
+// into its store and storage calls. A missing or malformed ID is dropped.
 func correlate(ctx context.Context, id string) context.Context {
 	parsed, err := correlation.Parse(id)
 	if err != nil {
