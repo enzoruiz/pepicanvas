@@ -147,6 +147,84 @@ describe("EditorShell", () => {
     });
   });
 
+  it("reloads the own canvas after a confirmed upload and draws the image", async () => {
+    const tenant = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const canvas = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const usage = {
+      quota_bytes: 1_000_000_000,
+      used_bytes: 0,
+      reserved_bytes: 0,
+      available_bytes: 1_000_000_000,
+    };
+    replies.push(
+      session(false),
+      ownCanvas,
+      noMemberships,
+      json(200, { invitations: [] }),
+      json(200, { members: [] }),
+      json(200, usage),
+    );
+    render(<EditorShell />);
+    await screen.findByText("Used 0 of 1,000,000,000 bytes");
+
+    const file = new File(["GIF89a"], "party.gif", { type: "image/gif" });
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [file] },
+    });
+    replies.push(
+      json(201, {
+        asset_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        kind: "gif",
+        object_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        usage: { ...usage, used_bytes: 6, available_bytes: 999_999_994 },
+      }),
+      json(200, {
+        tenant_id: tenant,
+        canvas_id: canvas,
+        width: 1920,
+        height: 1080,
+        revision: 1,
+        objects: [
+          {
+            id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            kind: "image",
+            content: "reference-1",
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+            rotation: 0,
+            z: 0,
+          },
+        ],
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await screen.findByText("File uploaded.");
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-canvas-surface] img"),
+      ).toHaveAttribute(
+        "src",
+        `/api/tenants/${tenant}/canvases/${canvas}/media/references/reference-1/content`,
+      ),
+    );
+    expect(calls.slice(6).map((call) => [call.method, call.path])).toEqual([
+      [
+        "POST",
+        expect.stringContaining(
+          `/api/tenants/${tenant}/canvases/${canvas}/media/uploads?`,
+        ),
+      ],
+      ["GET", "/api/canvas"],
+    ]);
+    // The usage panel keeps the confirmed answer and is not reloaded.
+    expect(
+      screen.getByText("Used 6 of 1,000,000,000 bytes"),
+    ).toBeInTheDocument();
+  });
+
   it.each([
     ["an inactive account or moderator", false, 403],
     ["an operator-only account", true, 403],

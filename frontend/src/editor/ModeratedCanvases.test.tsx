@@ -415,6 +415,38 @@ describe("ModeratedCanvases", () => {
     expect(screen.getByText("1920 × 1080")).toBeInTheDocument();
     expect(screen.queryByText("640 × 360")).not.toBeInTheDocument();
   });
+
+  it("draws an image object from the moderated canvas content route", async () => {
+    replies.push(
+      memberships(first),
+      json(200, {
+        canvas_id: first.canvas,
+        width: 1280,
+        height: 720,
+        revision: 1,
+        objects: [
+          {
+            id: "obj-1",
+            kind: "image",
+            content: "reference-1",
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            rotation: 0,
+            z: 0,
+          },
+        ],
+      }),
+    );
+    render(<ModeratedCanvases />);
+
+    await screen.findByText("1280 × 720");
+    expect(document.querySelector("[data-canvas-surface] img")).toHaveAttribute(
+      "src",
+      `${canvasPath(first)}/media/references/reference-1/content`,
+    );
+  });
 });
 
 // deferNextFetch makes the next request wait until the test answers it,

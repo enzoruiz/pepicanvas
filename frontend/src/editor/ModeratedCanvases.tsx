@@ -4,6 +4,7 @@ import {
   type Canvas,
   getTenantCanvas,
   listMemberships,
+  mediaContentUrl,
   type Membership,
   type Result,
 } from "../auth/api";
@@ -185,6 +186,13 @@ export function ModeratedCanvases({
                       width={canvas.value.width}
                       height={canvas.value.height}
                       objects={canvas.value.objects}
+                      mediaSource={(content) =>
+                        mediaContentUrl(
+                          membership.tenantId,
+                          membership.canvasId,
+                          content,
+                        )
+                      }
                     />
                   </div>
                   <LockOwners
