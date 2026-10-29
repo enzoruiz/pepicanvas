@@ -481,3 +481,115 @@ func TestInvitationAcceptanceMigrationRollsBackAndReapplies(t *testing.T) {
 	}
 	exec(t, pool, insert, "op-migration-accept", "accept", legacyAccount, "fedcba9876543210fedcba9876543210", nil, nil, "accepted", "invited-canvas")
 }
+
+// revocationSchema reports what 00012 adds and the rows it would lose.
+type revocationSchema struct {
+	version       int64
+	recordsTable  bool
+	kindColumn    bool
+	accountColumn bool
+	records       int
+	cuts          string
+}
+
+func readRevocationSchema(t *testing.T, pool *pgxpool.Pool) revocationSchema {
+	t.Helper()
+	s := revocationSchema{version: schemaVersion(t, pool)}
+	err := pool.QueryRow(context.Background(), `SELECT to_regclass('membership_revocations') IS NOT NULL,
+		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'access_cuts' AND column_name = 'kind'),
+		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'access_cuts' AND column_name = 'account_id')`).
+		Scan(&s.recordsTable, &s.kindColumn, &s.accountColumn)
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	if s.recordsTable {
+		s.records = count(t, pool, "SELECT count(*) FROM membership_revocations")
+	}
+	cuts := "SELECT coalesce(string_agg(tenant_id || ':' || version, ',' ORDER BY version), '') FROM access_cuts"
+	if s.kindColumn {
+		cuts = "SELECT coalesce(string_agg(tenant_id || ':' || version || ':' || kind || ':' || coalesce(account_id, '-'), ',' ORDER BY version), '') FROM access_cuts"
+	}
+	if err := pool.QueryRow(context.Background(), cuts).Scan(&s.cuts); err != nil {
+		t.Fatalf("read cuts: %v", err)
+	}
+	return s
+}
+
+func TestMembershipRevocationRollbackRefusesToLoseRecordsAndCuts(t *testing.T) {
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, pgtest.Start(t).DSN(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	provider := migrationProvider(t, pool)
+	// The test exercises 00012 as the latest applied migration.
+	if _, err := provider.DownTo(ctx, 12); err != nil {
+		t.Fatalf("DownTo(12): %v", err)
+	}
+
+	for _, account := range []string{streamerAccount, legacyAccount} {
+		exec(t, pool, "INSERT INTO accounts (account_id, email, password_hash, created_at) VALUES ($1, $1 || '@example.com', 'stub', now())", account)
+	}
+	exec(t, pool, "INSERT INTO tenants (tenant_id, subscription_status, owner_account_id, canvas_id, access_version) VALUES ('revoked-tenant', 'active', $1, 'revoked-canvas', 3)", streamerAccount)
+	// A deactivation cut written by 00008's statement keeps the default kind.
+	exec(t, pool, "INSERT INTO access_cuts (tenant_id, version, created_at) VALUES ('revoked-tenant', 1, now())")
+	for _, bad := range []string{
+		"INSERT INTO access_cuts (tenant_id, kind, version, created_at) VALUES ('revoked-tenant', 'revocation', 4, now())",
+		"INSERT INTO access_cuts (tenant_id, kind, account_id, version, created_at) VALUES ('revoked-tenant', 'deactivation', '" + legacyAccount + "', 4, now())",
+		"INSERT INTO access_cuts (tenant_id, kind, account_id, version, created_at) VALUES ('revoked-tenant', 'expel', '" + legacyAccount + "', 4, now())",
+		"INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, accepted_at) VALUES ('short', decode(repeat('ab', 32), 'hex'), '" + streamerAccount + "', 'revoked-tenant', '" + legacyAccount + "', 2, now())",
+		"INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, accepted_at) VALUES ('op-migration-revoke-bad', decode(repeat('ab', 31), 'hex'), '" + streamerAccount + "', 'revoked-tenant', '" + legacyAccount + "', 2, now())",
+		"INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, accepted_at) VALUES ('op-migration-revoke-bad', decode(repeat('ab', 32), 'hex'), '" + streamerAccount + "', 'revoked-tenant', '" + legacyAccount + "', 0, now())",
+	} {
+		if _, err := pool.Exec(ctx, bad); err == nil || !strings.Contains(err.Error(), "23514") {
+			t.Fatalf("%s: error = %v, want check_violation", bad, err)
+		}
+	}
+
+	refuse := func(name, message string, want revocationSchema) {
+		t.Helper()
+		_, err := provider.DownTo(ctx, 11)
+		if err == nil || !strings.Contains(err.Error(), message) {
+			t.Fatalf("%s: rollback error = %v, want %q", name, err, message)
+		}
+		if got := readRevocationSchema(t, pool); got != want {
+			t.Fatalf("%s: after the refused rollback %+v, want %+v", name, got, want)
+		}
+	}
+	intact := revocationSchema{version: 12, recordsTable: true, kindColumn: true, accountColumn: true, cuts: "revoked-tenant:1:deactivation:-"}
+
+	exec(t, pool, `INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, accepted_at)
+		VALUES ('op-migration-revoke-member', decode(repeat('ab', 32), 'hex'), $1, 'revoked-tenant', $2, 2, now())`, streamerAccount, legacyAccount)
+	withRecord := intact
+	withRecord.records = 1
+	refuse("revocation record", "00012_membership_revocation down refused: 1 revocation record(s)", withRecord)
+
+	exec(t, pool, "INSERT INTO access_cuts (tenant_id, kind, account_id, version, created_at) VALUES ('revoked-tenant', 'revocation', $1, 2, now())", legacyAccount)
+	withBoth := withRecord
+	withBoth.cuts += ",revoked-tenant:2:revocation:" + legacyAccount
+	refuse("record and cut", "00012_membership_revocation down refused: 1 revocation record(s)", withBoth)
+	exec(t, pool, "DELETE FROM membership_revocations")
+	withCut := withBoth
+	withCut.records = 0
+	refuse("revocation cut", "00012_membership_revocation down refused: 1 revocation cut(s)", withCut)
+
+	// Without records and revocation cuts the rollback runs and keeps the
+	// deactivation cut.
+	exec(t, pool, "DELETE FROM access_cuts WHERE kind = 'revocation'")
+	if _, err := provider.DownTo(ctx, 11); err != nil {
+		t.Fatalf("rollback without records and revocation cuts: %v", err)
+	}
+	if got, want := readRevocationSchema(t, pool), (revocationSchema{version: 11, cuts: "revoked-tenant:1"}); got != want {
+		t.Fatalf("after the rollback %+v, want %+v", got, want)
+	}
+	if _, err := provider.UpTo(ctx, 12); err != nil {
+		t.Fatalf("UpTo(12) after the rollback: %v", err)
+	}
+	if got := readRevocationSchema(t, pool); got != intact {
+		t.Fatalf("after re-applying %+v, want %+v", got, intact)
+	}
+}

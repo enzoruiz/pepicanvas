@@ -76,3 +76,66 @@ FROM memberships m
 JOIN tenants t ON t.tenant_id = m.tenant_id
 WHERE m.account_id = $1 AND m.role = 'moderator' AND t.canvas_id IS NOT NULL
 ORDER BY t.tenant_id;
+
+-- name: LockOwnedTenantUpdate :one
+-- The row lock conflicts with the FOR SHARE read of every mutation of the
+-- tenant, so mutations and membership revocations commit one at a time.
+SELECT tenant_id, subscription_status
+FROM tenants
+WHERE owner_account_id = $1
+FOR UPDATE;
+
+-- name: ListTenantModerators :many
+-- Each moderator with its email and the latest acceptance by the account of
+-- an invitation of the tenant; NULL when none records one.
+SELECT m.account_id, a.email, i.accepted_at
+FROM memberships m
+JOIN accounts a ON a.account_id = m.account_id
+LEFT JOIN LATERAL (
+    SELECT inv.accepted_at FROM invitations inv
+    WHERE inv.tenant_id = m.tenant_id AND inv.accepted_by = m.account_id
+    ORDER BY inv.accepted_at DESC
+    LIMIT 1
+) i ON true
+WHERE m.tenant_id = $1 AND m.role = 'moderator'
+ORDER BY i.accepted_at NULLS FIRST, m.account_id;
+
+-- name: GetMembershipRevocation :one
+SELECT owner_account_id, fingerprint, tenant_id, account_id, version, correlation_id, accepted_at
+FROM membership_revocations
+WHERE operation_id = $1 AND accepted_at > sqlc.arg(not_before);
+
+-- name: LockMembership :one
+SELECT role FROM memberships
+WHERE tenant_id = $1 AND account_id = $2
+FOR UPDATE;
+
+-- name: DeleteModeratorMembership :execrows
+DELETE FROM memberships
+WHERE tenant_id = $1 AND account_id = $2 AND role = 'moderator';
+
+-- name: IncrementAccessVersion :one
+UPDATE tenants SET access_version = access_version + 1
+WHERE tenant_id = $1
+RETURNING access_version;
+
+-- name: InsertRevocationCut :exec
+INSERT INTO access_cuts (tenant_id, kind, account_id, version, correlation_id, created_at)
+VALUES ($1, 'revocation', $2, $3, $4, $5);
+
+-- name: DeleteExpiredMembershipRevocation :exec
+DELETE FROM membership_revocations
+WHERE operation_id = $1 AND accepted_at <= sqlc.arg(expired_at);
+
+-- name: PurgeExpiredMembershipRevocations :exec
+-- Rows locked by a concurrent purge are left for the next one.
+DELETE FROM membership_revocations
+WHERE operation_id IN (
+    SELECT r.operation_id FROM membership_revocations r
+    WHERE r.accepted_at <= sqlc.arg(expired_at)
+    FOR UPDATE SKIP LOCKED
+);
+
+-- name: InsertMembershipRevocation :exec
+INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, correlation_id, accepted_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);

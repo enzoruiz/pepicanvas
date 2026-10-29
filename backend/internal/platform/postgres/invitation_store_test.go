@@ -101,6 +101,13 @@ func TestInvitationStore(t *testing.T) {
 		{"OneAccountAcceptingTwoLinksOfOneTenantGetsOneMembership", testOneAccountAcceptingTwoLinksOfOneTenantGetsOneMembership},
 		{"AcceptancesOfTwoTenantsNeverCross", testInvitationAcceptancesOfTwoTenantsNeverCross},
 		{"StoreReportsTakenMemberships", testInvitationStoreReportsTakenMemberships},
+		{"MemberRevocationCommitsEverythingAtOnce", testMemberRevocationCommitsEverythingAtOnce},
+		{"FailedMemberRevocationLeavesNothing", testFailedMemberRevocationLeavesNothing},
+		{"MemberRevocationReplaysConflictsAndExpires", testMemberRevocationReplaysConflictsAndExpires},
+		{"MemberRevocationRejectionsWriteNothing", testMemberRevocationRejectionsWriteNothing},
+		{"MemberRevocationOfTwoTenantsNeverCross", testMemberRevocationOfTwoTenantsNeverCross},
+		{"ConcurrentMemberRevocationsGiveOneEffect", testConcurrentMemberRevocationsGiveOneEffect},
+		{"MemberRevocationWaitsForASharedTenantLock", testMemberRevocationWaitsForASharedTenantLock},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, f) })
 	}

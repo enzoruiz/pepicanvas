@@ -3,6 +3,7 @@
 package invitationtest
 
 import (
+	"cmp"
 	"context"
 	"maps"
 	"slices"
@@ -19,6 +20,16 @@ type state struct {
 	memberships map[[2]string]access.Role
 	invitations map[string]invitation.Stored
 	records     map[string]invitation.Record
+	emails      map[access.AccountID]string
+	versions    map[string]uint64
+	cuts        map[cutKey]invitation.RevocationCut
+	revocations map[string]invitation.MemberRevocationRecord
+}
+
+// cutKey is the unique key of an access cut: its tenant and version.
+type cutKey struct {
+	tenantID string
+	version  uint64
 }
 
 // merge applies the changes tx made to base onto s, keeping what concurrent
@@ -28,6 +39,10 @@ func (s state) merge(base, tx state) {
 	mergeMap(s.memberships, base.memberships, tx.memberships)
 	mergeMap(s.invitations, base.invitations, tx.invitations)
 	mergeMap(s.records, base.records, tx.records)
+	mergeMap(s.emails, base.emails, tx.emails)
+	mergeMap(s.versions, base.versions, tx.versions)
+	mergeMap(s.cuts, base.cuts, tx.cuts)
+	mergeMap(s.revocations, base.revocations, tx.revocations)
 }
 
 func mergeMap[K, V comparable](dst, base, tx map[K]V) {
@@ -49,6 +64,10 @@ func (s state) clone() state {
 		memberships: maps.Clone(s.memberships),
 		invitations: maps.Clone(s.invitations),
 		records:     maps.Clone(s.records),
+		emails:      maps.Clone(s.emails),
+		versions:    maps.Clone(s.versions),
+		cuts:        maps.Clone(s.cuts),
+		revocations: maps.Clone(s.revocations),
 	}
 }
 
@@ -77,6 +96,10 @@ func NewMemoryStore() *MemoryStore {
 			memberships: map[[2]string]access.Role{},
 			invitations: map[string]invitation.Stored{},
 			records:     map[string]invitation.Record{},
+			emails:      map[access.AccountID]string{},
+			versions:    map[string]uint64{},
+			cuts:        map[cutKey]invitation.RevocationCut{},
+			revocations: map[string]invitation.MemberRevocationRecord{},
 		},
 		failures: map[string]error{},
 		before:   map[string]func(){},
@@ -88,13 +111,22 @@ func CanvasID(tenantID string) string {
 	return "canvas-" + tenantID
 }
 
-// AddTenant seeds a tenant with the canvas CanvasID(tenantID) and its owner
-// membership.
+// AddTenant seeds a tenant with the canvas CanvasID(tenantID), its owner
+// membership, and access version 1.
 func (m *MemoryStore) AddTenant(tenantID string, owner access.AccountID, status access.SubscriptionStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.tenants[tenantID] = invitation.Tenant{ID: tenantID, Owner: owner, CanvasID: CanvasID(tenantID), Status: status}
 	m.state.memberships[[2]string{tenantID, string(owner)}] = access.RoleOwner
+	m.state.versions[tenantID] = 1
+}
+
+// AddAccount seeds the email of an account. Members lists only moderators
+// with an email, as the accounts join does.
+func (m *MemoryStore) AddAccount(account access.AccountID, email string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.emails[account] = email
 }
 
 // SetStatus changes a tenant's subscription status.
@@ -149,6 +181,35 @@ func (m *MemoryStore) Memberships() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.state.memberships)
+}
+
+// AccessVersion returns the committed access version of a tenant.
+func (m *MemoryStore) AccessVersion(tenantID string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.versions[tenantID]
+}
+
+// Cuts returns the committed revocation cuts by tenant and version.
+func (m *MemoryStore) Cuts() []invitation.RevocationCut {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cuts := slices.Collect(maps.Values(m.state.cuts))
+	slices.SortFunc(cuts, func(a, b invitation.RevocationCut) int {
+		if c := strings.Compare(a.TenantID, b.TenantID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Version, b.Version)
+	})
+	return cuts
+}
+
+// MemberRevocations returns the committed membership revocation records by
+// operation ID.
+func (m *MemoryStore) MemberRevocations() map[string]invitation.MemberRevocationRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.state.revocations)
 }
 
 // Records returns the committed operation records by operation ID.
@@ -429,4 +490,119 @@ func (t *memoryTx) ModeratedCanvases(_ context.Context, account access.AccountID
 		return strings.Compare(a.Membership.TenantID, b.Membership.TenantID)
 	})
 	return moderated, nil
+}
+
+func (t *memoryTx) LockOwnedTenantForUpdate(_ context.Context, owner access.AccountID) (invitation.Tenant, bool, error) {
+	if err := t.store.step("LockOwnedTenantForUpdate"); err != nil {
+		return invitation.Tenant{}, false, err
+	}
+	for id, tenant := range t.store.state.tenants {
+		if tenant.Owner == owner {
+			t.state.tenants[id] = tenant
+			t.state.versions[id] = t.store.state.versions[id]
+			return tenant, true, nil
+		}
+	}
+	return invitation.Tenant{}, false, nil
+}
+
+func (t *memoryTx) Members(_ context.Context, tenantID string) ([]invitation.Member, error) {
+	if err := t.store.step("Members"); err != nil {
+		return nil, err
+	}
+	var members []invitation.Member
+	for key, role := range t.state.memberships {
+		email, ok := t.state.emails[access.AccountID(key[1])]
+		if key[0] != tenantID || role != access.RoleModerator || !ok {
+			continue
+		}
+		member := invitation.Member{AccountID: access.AccountID(key[1]), Email: email}
+		for _, stored := range t.state.invitations {
+			if stored.TenantID == tenantID && stored.AcceptedBy == member.AccountID && stored.AcceptedAt.After(member.AcceptedAt) {
+				member.AcceptedAt = stored.AcceptedAt
+			}
+		}
+		members = append(members, member)
+	}
+	slices.SortFunc(members, func(a, b invitation.Member) int {
+		if c := a.AcceptedAt.Compare(b.AcceptedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.AccountID), string(b.AccountID))
+	})
+	return members, nil
+}
+
+func (t *memoryTx) MemberRevocation(_ context.Context, operationID string, notBefore time.Time) (invitation.MemberRevocationRecord, bool, error) {
+	t.store.operationLookups++
+	if err := t.store.step("MemberRevocation"); err != nil {
+		return invitation.MemberRevocationRecord{}, false, err
+	}
+	if committed, ok := t.store.state.revocations[operationID]; ok {
+		t.state.revocations[operationID] = committed
+	}
+	record, ok := t.state.revocations[operationID]
+	if !ok || !record.AcceptedAt.After(notBefore) {
+		return invitation.MemberRevocationRecord{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (t *memoryTx) LockMembership(_ context.Context, tenantID string, account access.AccountID) (access.Role, bool, error) {
+	if err := t.store.step("LockMembership"); err != nil {
+		return "", false, err
+	}
+	key := [2]string{tenantID, string(account)}
+	if role, ok := t.store.state.memberships[key]; ok {
+		t.state.memberships[key] = role
+	} else {
+		delete(t.state.memberships, key)
+	}
+	role, ok := t.state.memberships[key]
+	return role, ok, nil
+}
+
+func (t *memoryTx) RemoveModerator(_ context.Context, tenantID string, account access.AccountID) error {
+	if err := t.store.step("RemoveModerator"); err != nil {
+		return err
+	}
+	delete(t.state.memberships, [2]string{tenantID, string(account)})
+	return nil
+}
+
+func (t *memoryTx) IncrementAccessVersion(_ context.Context, tenantID string) (uint64, error) {
+	if err := t.store.step("IncrementAccessVersion"); err != nil {
+		return 0, err
+	}
+	t.state.versions[tenantID]++
+	return t.state.versions[tenantID], nil
+}
+
+func (t *memoryTx) RecordCut(_ context.Context, cut invitation.RevocationCut) error {
+	if err := t.store.step("RecordCut"); err != nil {
+		return err
+	}
+	t.state.cuts[cutKey{cut.TenantID, cut.Version}] = cut
+	return nil
+}
+
+func (t *memoryTx) RecordMemberRevocation(_ context.Context, record invitation.MemberRevocationRecord, purgeBefore time.Time) error {
+	t.store.operationLookups++
+	if err := t.store.step("RecordMemberRevocation"); err != nil {
+		return err
+	}
+	for id, r := range t.state.revocations {
+		if !r.AcceptedAt.After(purgeBefore) {
+			delete(t.state.revocations, id)
+		}
+	}
+	// The primary key also sees rows other transactions committed meanwhile.
+	if r, ok := t.store.state.revocations[record.OperationID]; ok && r.AcceptedAt.After(purgeBefore) {
+		return invitation.ErrOperationRetained
+	}
+	if _, ok := t.state.revocations[record.OperationID]; ok {
+		return invitation.ErrOperationRetained
+	}
+	t.state.revocations[record.OperationID] = record
+	return nil
 }
