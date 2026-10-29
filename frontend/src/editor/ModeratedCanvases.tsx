@@ -8,6 +8,7 @@ import {
   type Result,
 } from "../auth/api";
 import { CanvasSurface } from "../canvas/CanvasSurface";
+import { LockOwners } from "../locks/LockOwners";
 
 // Safe, fixed messages: no server text, tenant, or canvas ID is shown.
 const listUnavailableMessage =
@@ -186,6 +187,10 @@ export function ModeratedCanvases({
                       objects={canvas.value.objects}
                     />
                   </div>
+                  <LockOwners
+                    tenantId={canvas.value.tenantId}
+                    canvasId={canvas.value.canvasId}
+                  />
                 </>
               ) : (
                 <p role="alert">{canvasUnavailableMessage}</p>

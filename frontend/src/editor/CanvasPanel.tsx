@@ -8,6 +8,7 @@ import {
   setDimensions,
 } from "../auth/api";
 import { CanvasSurface } from "../canvas/CanvasSurface";
+import { LockOwners } from "../locks/LockOwners";
 
 // Safe, fixed messages: the panel shows only the signed-in account's canvas.
 const inactiveMessage =
@@ -183,6 +184,10 @@ export function CanvasPanel({
               objects={state.canvas.objects}
             />
           </div>
+          <LockOwners
+            tenantId={state.canvas.tenantId}
+            canvasId={state.canvas.canvasId}
+          />
           <form
             aria-labelledby="canvas-size-heading"
             onSubmit={(event) => void submit(event, state.canvas)}

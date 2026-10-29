@@ -11,6 +11,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import { ModeratedCanvases } from "./ModeratedCanvases";
 
+// The lock holders poll their own route; their behavior is tested in
+// locks/LockOwners.test.tsx.
+vi.mock("../locks/LockOwners", () => ({
+  LockOwners: ({
+    tenantId,
+    canvasId,
+  }: {
+    tenantId: string;
+    canvasId: string;
+  }) => <p data-lock-owners={`${tenantId}/${canvasId}`} />,
+}));
+
 let calls: Call[];
 let replies: Reply[];
 
@@ -156,6 +168,24 @@ describe("ModeratedCanvases", () => {
     expectReadOnly();
     expect(document.body.textContent).not.toContain(first.tenant);
     expect(document.body.textContent).not.toContain(first.canvas);
+  });
+
+  it("shows who holds each lock of every moderated canvas", async () => {
+    replies.push(
+      memberships(first, second),
+      canvas(first.canvas, 1280, 720),
+      canvas(second.canvas, 800, 600),
+    );
+    render(<ModeratedCanvases />);
+    await screen.findByText("800 × 600");
+    expect(
+      [...document.querySelectorAll("[data-lock-owners]")].map((element) =>
+        element.getAttribute("data-lock-owners"),
+      ),
+    ).toEqual([
+      `${first.tenant}/${first.canvas}`,
+      `${second.tenant}/${second.canvas}`,
+    ]);
   });
 
   it("shows a fixed message for a canvas that cannot be loaded", async () => {
