@@ -15,6 +15,21 @@ const TraceparentHeader = "traceparent"
 // unmatchedRoute names requests that no registered pattern served.
 const unmatchedRoute = "unmatched"
 
+// otherMethod names any request method outside the standard set.
+const otherMethod = "other"
+
+// method returns m when it is a standard method, otherwise otherMethod, so a
+// client-chosen method never reaches a span.
+func method(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+		return m
+	default:
+		return otherMethod
+	}
+}
+
 // errPanic marks a span whose handler panicked; its value is never exported.
 var (
 	errPanic  = errors.New("handler panic")
@@ -25,13 +40,13 @@ var (
 // through tracer; a nil tracer still starts spans without exporting them. It
 // must run inside Correlate, so the trace ID is the request's correlation ID.
 // Inbound traceparent headers are ignored: traces are server-issued
-// (CTRL-TRACE-01). The span records the method, the registered ServeMux
-// pattern or "unmatched", and the written status.
+// (CTRL-TRACE-01). The span records the standard method or "other", the
+// registered ServeMux pattern or "unmatched", and the written status.
 func Trace(tracer *telemetry.Tracer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx, span := telemetry.Start(telemetry.WithTracer(r.Context(), tracer), telemetry.SpanHTTPRequest,
-				telemetry.Attr("method", r.Method))
+				telemetry.Attr("method", method(r.Method)))
 			if sc, ok := telemetry.SpanContextFrom(ctx); ok {
 				w.Header().Set(TraceparentHeader, sc.Traceparent())
 			}

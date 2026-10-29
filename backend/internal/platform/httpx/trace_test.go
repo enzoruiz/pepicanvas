@@ -199,3 +199,24 @@ func TestTraceKeepsPrivateHeadersAcrossFlush(t *testing.T) {
 		t.Fatal("flush did not reach the underlying writer")
 	}
 }
+
+// S2, S11: the method attribute comes from a closed set, so a client-chosen
+// method never reaches the trace file.
+func TestTraceExportsOnlyKnownMethods(t *testing.T) {
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	for method, want := range map[string]string{
+		http.MethodGet: "GET", http.MethodHead: "HEAD", http.MethodPost: "POST", http.MethodPut: "PUT",
+		http.MethodPatch: "PATCH", http.MethodDelete: "DELETE", http.MethodOptions: "OPTIONS",
+		http.MethodConnect: "CONNECT", http.MethodTrace: "TRACE",
+		"ALICE-PRIVATE-NOTE-42": "other", "get": "other", "PROPFIND": "other",
+	} {
+		_, spans := tracedServe(t, ok, httptest.NewRequest(method, "/", nil))
+		if len(spans) != 1 || spans[0].Attributes["method"] != want {
+			t.Errorf("method %q: spans = %+v, want one span with method %q", method, spans, want)
+		}
+		raw, _ := json.Marshal(spans)
+		if want == "other" && strings.Contains(string(raw), method) {
+			t.Errorf("exported spans contain the method %q: %s", method, raw)
+		}
+	}
+}
