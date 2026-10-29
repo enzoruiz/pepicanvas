@@ -97,12 +97,13 @@ describe("EditorShell", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows an active owner the invitations and storage panels", async () => {
+  it("shows an active owner the invitations, moderators, and storage panels", async () => {
     replies.push(
       session(false),
       ownCanvas,
       noMemberships,
       json(200, { invitations: [] }),
+      json(200, { members: [] }),
       json(200, {
         quota_bytes: 1_000_000_000,
         used_bytes: 0,
@@ -121,9 +122,14 @@ describe("EditorShell", () => {
     expect(
       screen.getByRole("region", { name: "Canvas storage" }),
     ).toBeInTheDocument();
-    await waitFor(() => expect(calls).toHaveLength(5));
+    expect(
+      screen.getByRole("region", { name: "Moderators" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("No moderators yet.")).toBeInTheDocument();
+    await waitFor(() => expect(calls).toHaveLength(6));
     expect(calls[3]).toMatchObject({ method: "GET", path: "/api/invitations" });
-    expect(calls[4]).toMatchObject({
+    expect(calls[4]).toMatchObject({ method: "GET", path: "/api/members" });
+    expect(calls[5]).toMatchObject({
       method: "GET",
       path: "/api/tenants/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/canvases/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/media/usage",
     });
@@ -158,6 +164,9 @@ describe("EditorShell", () => {
       ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("region", { name: "Canvas storage" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "Moderators" }),
       ).not.toBeInTheDocument();
       await waitFor(() => expect(calls).toHaveLength(3));
       expect(calls[2]).toMatchObject({

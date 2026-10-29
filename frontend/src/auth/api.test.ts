@@ -12,8 +12,10 @@ import {
   getSession,
   getTenantCanvas,
   listInvitations,
+  listMembers,
   listMemberships,
   revokeInvitation,
+  revokeMember,
   setDimensions,
   uploadMedia,
 } from "./api";
@@ -694,6 +696,187 @@ describe("listMemberships", () => {
     expect(await listMemberships()).toEqual({
       ok: false,
       error: "unauthorized",
+    });
+  });
+});
+
+describe("listMembers", () => {
+  const otherAccount = "fedcba9876543210fedcba9876543210";
+
+  it("reads the moderators with their email and acceptance date", async () => {
+    replies.push(
+      json(200, {
+        members: [
+          {
+            account_id: accountId,
+            email: "bob@example.com",
+            accepted_at: "2026-10-28T10:00:00Z",
+          },
+          {
+            account_id: otherAccount,
+            email: "carol@example.com",
+            accepted_at: null,
+          },
+        ],
+      }),
+    );
+
+    expect(await listMembers()).toEqual({
+      ok: true,
+      value: [
+        {
+          accountId,
+          email: "bob@example.com",
+          acceptedAt: new Date("2026-10-28T10:00:00Z"),
+        },
+        {
+          accountId: otherAccount,
+          email: "carol@example.com",
+          acceptedAt: null,
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      { method: "GET", path: "/api/members", headers: {}, body: undefined },
+    ]);
+  });
+
+  it("reads an empty list", async () => {
+    replies.push(json(200, { members: [] }));
+
+    expect(await listMembers()).toEqual({ ok: true, value: [] });
+  });
+
+  const member = {
+    account_id: accountId,
+    email: "bob@example.com",
+    accepted_at: "2026-10-28T10:00:00Z",
+  };
+
+  it.each([
+    ["no list", {}],
+    ["a list that is not an array", { members: {} }],
+    ["a null entry", { members: [null] }],
+    ["a short account", { members: [{ ...member, account_id: "abc" }] }],
+    [
+      "an uppercase account",
+      { members: [{ ...member, account_id: accountId.toUpperCase() }] },
+    ],
+    ["a path account", { members: [{ ...member, account_id: "../members" }] }],
+    ["a missing email", { members: [{ ...member, email: undefined }] }],
+    ["a numeric email", { members: [{ ...member, email: 7 }] }],
+    ["a missing date", { members: [{ ...member, accepted_at: undefined }] }],
+    [
+      "a date-only value",
+      { members: [{ ...member, accepted_at: "2026-10-28" }] },
+    ],
+    ["a non-date", { members: [{ ...member, accepted_at: "yesterday" }] }],
+    ["a numeric date", { members: [{ ...member, accepted_at: 1761645600 }] }],
+    [
+      "an impossible date",
+      { members: [{ ...member, accepted_at: "2026-13-40T10:00:00Z" }] },
+    ],
+  ])("rejects an answer with %s", async (_, body) => {
+    replies.push(json(200, body));
+
+    expect(await listMembers()).toEqual({ ok: false, error: "unavailable" });
+  });
+
+  it("accepts a fractional second and an offset", async () => {
+    replies.push(
+      json(200, {
+        members: [{ ...member, accepted_at: "2026-10-28T12:00:00.5+02:00" }],
+      }),
+    );
+
+    expect(await listMembers()).toEqual({
+      ok: true,
+      value: [
+        {
+          accountId,
+          email: "bob@example.com",
+          acceptedAt: new Date("2026-10-28T10:00:00.5Z"),
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ["forbidden", 403],
+    ["unauthorized", 401],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code }));
+
+    expect(await listMembers()).toEqual({ ok: false, error: code });
+  });
+});
+
+describe("revokeMember", () => {
+  it("sends the operation with the CSRF token to the member's route", async () => {
+    replies.push(json(200, { tenant_id: tenantId, account_id: accountId }));
+
+    expect(await revokeMember("csrf", "operation-id-0001", accountId)).toEqual({
+      ok: true,
+      value: { tenantId, accountId },
+    });
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: `/api/members/${accountId}/revoke`,
+        headers: { "X-CSRF-Token": "csrf", "Content-Type": "application/json" },
+        body: { operation_id: "operation-id-0001" },
+      },
+    ]);
+  });
+
+  it("refuses a malformed account before any request", async () => {
+    expect(
+      await revokeMember("csrf", "operation-id-0001", "../invitations"),
+    ).toEqual({ ok: false, error: "bad_request" });
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ["no body", undefined],
+    ["no tenant", { account_id: accountId }],
+    ["a malformed tenant", { tenant_id: "a/b", account_id: accountId }],
+    [
+      "another account",
+      { tenant_id: tenantId, account_id: "fedcba9876543210fedcba9876543210" },
+    ],
+  ])("rejects an answer with %s", async (_, body) => {
+    replies.push(json(200, body));
+
+    expect(await revokeMember("csrf", "operation-id-0001", accountId)).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([
+    ["bad_request", 400],
+    ["unauthorized", 401],
+    ["forbidden", 403],
+    ["not_found", 404],
+    ["conflict", 409],
+  ])("knows %s", async (code, status) => {
+    replies.push(json(status, { error: code, detail: "secret" }));
+
+    expect(await revokeMember("csrf", "operation-id-0001", accountId)).toEqual({
+      ok: false,
+      error: code,
+    });
+  });
+
+  it.each([
+    ["a network failure", "network-error" as const],
+    ["an internal error", json(500, { error: "internal" })],
+  ])("reports %s as unavailable", async (_, reply) => {
+    replies.push(reply);
+
+    expect(await revokeMember("csrf", "operation-id-0001", accountId)).toEqual({
+      ok: false,
+      error: "unavailable",
     });
   });
 });
