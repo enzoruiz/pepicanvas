@@ -33,8 +33,8 @@ Scope (L2): HTTP lock API (open lock session, heartbeat, acquire, release, list 
 | T1 | S1–S4, S9, S16 | worker (context backstop), test-first: `locking` canvas listing, commit gate with in-flight fence, mutation classification | done | `bff16a5` |
 | T2 | S6–S8, S10, S11, S16 | worker (context backstop), test-first: lock-session directory bound to TE-002 leases, idle disconnect, per-account bound | done | `1083707` |
 | T3 | S3–S10, S12–S15 | worker (context backstop), test-first: member grant read, HTTP lock routes, `cmd/server` composition | done | `cc47c78` |
-| T4 | S3, S5–S7 | inline (subagent tool unavailable), test-first: frontend lock client and visible owner | done | |
-| T5 | all | docs, independent verify, RDD assess | pending | |
+| T4 | S3, S5–S7 | inline (subagent tool unavailable), test-first: frontend lock client and visible owner | done | `904aa8f` | |
+| T5 | all | docs, self-verify (subagent tool unavailable), RDD assess | in progress | |
 
 ## Log
 
