@@ -153,6 +153,16 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
+	// How long a pending access cut waits without a commit's wake; zero
+	// keeps the relay's default.
+	var cutPoll time.Duration
+	if value := getenv("PEPICANVAS_CUT_RELAY_POLL_INTERVAL"); value != "" {
+		poll, err := time.ParseDuration(value)
+		if err != nil || poll <= 0 {
+			return errors.New("PEPICANVAS_CUT_RELAY_POLL_INTERVAL must be a positive duration")
+		}
+		cutPoll = poll
+	}
 	// An origin that would weaken the ingress controls stops the process
 	// before any dependency is opened or any request is accepted.
 	in, err := ingress.New(ingress.Config{AllowedOrigins: []string{origin}, Limits: ingress.DefaultLimits, Logger: logger})
@@ -228,10 +238,11 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		}
 	}
 	relay, err := subscription.NewCutRelay(subscription.RelayConfig{
-		Store:     subscriptions,
-		Cutter:    registry,
-		Logger:    logger,
-		Correlate: correlate,
+		Store:        subscriptions,
+		Cutter:       registry,
+		Logger:       logger,
+		Correlate:    correlate,
+		PollInterval: cutPoll,
 	})
 	if err != nil {
 		return err

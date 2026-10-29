@@ -280,6 +280,15 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 	for name, c := range invalidMedia {
 		cases[name] = append([]string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin}, c.env...)
 	}
+	// US-006: the cut relay poll is a positive Go duration or the default.
+	invalidPolls := map[string]string{
+		"cut relay poll without a unit": "1000",
+		"zero cut relay poll":           "0s",
+		"negative cut relay poll":       "-1s",
+	}
+	for name, value := range invalidPolls {
+		cases[name] = []string{unreachable, "PEPICANVAS_ALLOWED_ORIGIN=" + origin, "PEPICANVAS_CUT_RELAY_POLL_INTERVAL=" + value}
+	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command(bin)
@@ -298,6 +307,10 @@ func TestServerRefusesToStartWithInvalidConfiguration(t *testing.T) {
 			if _, invalid := invalidOrigins[name]; invalid &&
 				(!strings.Contains(string(out), "allowed origin must be exactly scheme://host[:port]") || strings.Contains(string(out), "127.0.0.1:1")) {
 				t.Fatalf("the origin was not rejected before the database was opened:\n%s", out)
+			}
+			if _, invalid := invalidPolls[name]; invalid &&
+				(!strings.Contains(string(out), "PEPICANVAS_CUT_RELAY_POLL_INTERVAL must be a positive duration") || strings.Contains(string(out), "127.0.0.1:1")) {
+				t.Fatalf("the poll interval was not rejected before the database was opened:\n%s", out)
 			}
 			if c, invalid := invalidMedia[name]; invalid {
 				for _, want := range c.want {
@@ -1193,7 +1206,9 @@ func TestModeratorAcceptsAnInvitationAcrossRestart(t *testing.T) {
 
 // US-006 S1, S4, S6, S12, S14, S16: the owner lists and revokes a moderator
 // over the real server; the revocation is effective at the answer, the
-// commit wakes the cut relay, and the retry replays the same body.
+// commit wakes the cut relay, and the retry replays the same body. The relay
+// polls once a minute here, so a cut applied within seconds was applied by
+// the commit's wake, not by a poll.
 func TestOwnerRevokesAModeratorOverTheServer(t *testing.T) {
 	db := pgtest.Start(t)
 	bin := buildServer(t)
@@ -1202,6 +1217,7 @@ func TestOwnerRevokesAModeratorOverTheServer(t *testing.T) {
 		"PEPICANVAS_DATABASE_URL="+dsn,
 		"PEPICANVAS_LISTEN_ADDR=127.0.0.1:0",
 		"PEPICANVAS_ALLOWED_ORIGIN="+origin,
+		"PEPICANVAS_CUT_RELAY_POLL_INTERVAL=1m",
 	)
 	registerAndSignIn(t, server, "op-process-oper-01", "operator@example.com")
 	alice := registerAndSignIn(t, server, "op-process-alice-1", "alice@example.com")
@@ -1302,20 +1318,17 @@ func TestOwnerRevokesAModeratorOverTheServer(t *testing.T) {
 	}
 
 	// S14: the record and the cut keep the request correlation, and the
-	// commit wakes the relay, which applies the cut well before its poll.
+	// commit wakes the relay, which applies the cut long before its poll.
 	if n := count(t, dsn, "SELECT count(*) FROM membership_revocations WHERE operation_id = 'op-process-rev-r01' AND account_id = $1 AND correlation_id = $2", bobID, correlationID); n != 1 {
 		t.Fatalf("revocation records with the correlation = %d", n)
 	}
 	const applied = "SELECT count(*) FROM access_cuts WHERE kind = 'revocation' AND tenant_id = $1 AND account_id = $2 AND correlation_id = $3 AND applied_at IS NOT NULL"
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for count(t, dsn, applied, tenantID, bobID, correlationID) != 1 {
 		if time.Now().After(deadline) {
-			t.Fatalf("the revocation cut was not applied\n%s", server.logs)
+			t.Fatalf("the revocation cut was not applied before the one-minute poll: the commit did not wake the relay\n%s", server.logs)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if n := count(t, dsn, applied+" AND applied_at - created_at < interval '400 milliseconds'", tenantID, bobID, correlationID); n != 1 {
-		t.Fatal("the revocation cut waited for the relay poll: the commit did not wake the relay")
 	}
 
 	// S12: the retry returns the identical body and writes nothing.
