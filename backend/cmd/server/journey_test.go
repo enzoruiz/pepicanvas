@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,15 +104,42 @@ func traceOf(t *testing.T, path string, id correlation.ID) []telemetry.SpanData 
 	return spans
 }
 
+// deliveredIn reports whether the trace file holds the outbox.deliver span of
+// id. The exporter may be appending while the file is read, so a last line
+// without its newline is left for a later read; every complete line must be
+// a well-formed span.
+func deliveredIn(path string, id correlation.ID) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	complete := data[:bytes.LastIndexByte(data, '\n')+1]
+	spans, malformed, err := telemetry.Query(bytes.NewReader(complete), id)
+	if err != nil {
+		return false, err
+	}
+	if malformed != 0 {
+		return false, fmt.Errorf("%d malformed complete lines", malformed)
+	}
+	for _, span := range spans {
+		if span.Name == string(telemetry.SpanOutboxDeliver) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // awaitDelivery waits until the trace file holds the outbox.deliver span of id.
 func awaitDelivery(t *testing.T, path string, id correlation.ID) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		for _, span := range traceOf(t, path, id) {
-			if span.Name == string(telemetry.SpanOutboxDeliver) {
-				return
-			}
+		delivered, err := deliveredIn(path, id)
+		if err != nil {
+			t.Fatalf("trace file of %s: %v", id, err)
+		}
+		if delivered {
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no outbox.deliver span of %s in the trace file", id)
@@ -252,10 +283,18 @@ func TestJourneyCorrelatesAResizeAcrossTheOutboxPerAccount(t *testing.T) {
 	persistJourney(t, startedAt, aliceID, aliceSpans, aliceLogs)
 }
 
+// runtimeGo is the Go release this test runs with, in the pins' format
+// ("1.27.2", without the "go" prefix or experiment suffixes).
+func runtimeGo() string {
+	version, _, _ := strings.Cut(runtime.Version(), " ")
+	return strings.TrimPrefix(version, "go")
+}
+
 // persistJourney writes A's spans and log lines as a durable run under
 // PEPICANVAS_EVIDENCE_DIR, or a temp directory, recording FAIL when any
 // earlier check failed, and checks that the independent reader classifies it
-// accordingly.
+// accordingly: INCONCLUSIVE with version_mismatch:go when the test runs on a
+// Go release other than the pinned one.
 func persistJourney(t *testing.T, startedAt time.Time, id correlation.ID, spans []telemetry.SpanData, logLines []string) {
 	t.Helper()
 	repo := filepath.Join("..", "..", "..")
@@ -268,9 +307,13 @@ func persistJourney(t *testing.T, startedAt time.Time, id correlation.ID, spans 
 	if root == "" {
 		root = t.TempDir()
 	}
+	// The run records the Go release it observed; the other versions cannot
+	// be observed here and come from the pins.
+	versions := pins
+	versions.Go = runtimeGo()
 	writer, err := evidence.Begin(root, evidence.Run{
 		Scenario: journeyScenario, StartedAt: startedAt, CorrelationID: id,
-		Versions: pins, Role: "evidence-reader", RetentionDays: 30,
+		Versions: versions, Role: "evidence-reader", RetentionDays: 30,
 	})
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
@@ -290,15 +333,69 @@ func persistJourney(t *testing.T, startedAt time.Time, id correlation.ID, spans 
 		t.Fatalf("Add logs: %v", err)
 	}
 	result, want := evidence.ResultPass, evidence.Pass
+	var problems []string
+	if goRelease := runtimeGo(); goRelease != pins.Go {
+		// CTRL-VERS-01: a run on another toolchain must be repeated.
+		want, problems = evidence.Inconclusive, []string{"version_mismatch:go"}
+		t.Logf("Go %s differs from the pinned %s: the run is INCONCLUSIVE", goRelease, pins.Go)
+	}
 	if t.Failed() {
-		result, want = evidence.ResultFail, evidence.Fail
+		result, want, problems = evidence.ResultFail, evidence.Fail, append(problems, "recorded_fail")
 	}
 	if err := writer.Complete(result, time.Now()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	report := evidence.Check(writer.Dir(), pins, time.Now())
-	if report.Classification != want || report.Scenario != journeyScenario || report.Recorded != result {
-		t.Fatalf("Check(%s) = %+v, want %s", writer.Dir(), report, want)
+	if report.Classification != want || report.Scenario != journeyScenario || report.Recorded != result ||
+		!slices.Equal(report.Problems, problems) {
+		t.Fatalf("Check(%s) = %+v, want %s %v", writer.Dir(), report, want, problems)
 	}
 	t.Logf("evidence run %s", writer.Dir())
+}
+
+// tornSpanLine is one exported span line of trace id.
+func tornSpanLine(t *testing.T, id correlation.ID, name telemetry.SpanName, spanID string) []byte {
+	t.Helper()
+	line, err := json.Marshal(telemetry.SpanData{
+		TraceID: id.String(), SpanID: spanID, Name: string(name),
+		Start: time.Unix(1, 0).UTC(), End: time.Unix(2, 0).UTC(), Status: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(line, '\n')
+}
+
+// R3-journey-live-trace-read: the exporter may still be appending while the journey waits, so a
+// torn last line is read again later instead of failing the wait; a complete
+// malformed line still fails it.
+func TestAwaitDeliveryRereadsATornLastLine(t *testing.T) {
+	const id = correlation.ID("0123456789abcdef0123456789abcdef")
+	path := filepath.Join(t.TempDir(), "spans.jsonl")
+	request := tornSpanLine(t, id, telemetry.SpanHTTPRequest, "0000000000000001")
+	deliver := tornSpanLine(t, id, telemetry.SpanOutboxDeliver, "0000000000000002")
+	if err := os.WriteFile(path, append(request, deliver[:len(deliver)/2]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appended := make(chan error, 1)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err == nil {
+			_, err = file.Write(deliver[len(deliver)/2:])
+			err = errors.Join(err, file.Close())
+		}
+		appended <- err
+	}()
+	awaitDelivery(t, path, id)
+	if err := <-appended; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, append(append(request, "{\"name\":\"torn\"\n"...), deliver...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if delivered, err := deliveredIn(path, id); delivered || err == nil || err.Error() != "1 malformed complete lines" {
+		t.Fatalf("deliveredIn with a complete malformed line = %v, %v; want the malformed line reported", delivered, err)
+	}
 }
