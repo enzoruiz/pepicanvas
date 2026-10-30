@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/correlation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/tracing/tracingtest"
@@ -37,7 +38,7 @@ func TestInspectRecordsInspectAndSubprocessSpans(t *testing.T) {
 		{
 			name:        "failed decode",
 			failDecode:  true,
-			wantInspect: map[string]string{"outcome": string(ErrorCommandFailed)},
+			wantInspect: map[string]string{"outcome": string(media.RejectionDecodeFailed)},
 			wantStatus:  "error",
 			wantRuns:    []map[string]string{{"operation": "ffprobe", "outcome": "ok"}, {"operation": "ffmpeg", "outcome": string(ErrorCommandFailed)}},
 			wantRunStat: []string{"ok", "error"},

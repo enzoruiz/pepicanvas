@@ -273,8 +273,13 @@ func endSpan(span *telemetry.Span, err error) {
 	if err != nil {
 		outcome = "error"
 		var adapterError *Error
-		if errors.As(err, &adapterError) {
+		var rejection *media.Rejection
+		switch {
+		case errors.As(err, &adapterError):
 			outcome = string(adapterError.Code())
+		case errors.As(err, &rejection):
+			// A content rejection names its closed rule, never tool output.
+			outcome = string(rejection.Code())
 		}
 	}
 	span.SetAttr("outcome", outcome)
