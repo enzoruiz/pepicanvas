@@ -21,6 +21,9 @@ type FileExporter struct {
 	mu     sync.Mutex
 	file   *os.File
 	closed bool
+	// torn reports a failed write whose partial line could not be removed;
+	// the next write starts a new line so it is not glued to that one.
+	torn bool
 }
 
 // OpenFile creates path with mode 0600 or opens it for appending. An existing
@@ -43,7 +46,8 @@ func OpenFile(path string) (*FileExporter, error) {
 }
 
 // Export writes spans, one JSON line each, in a single write and syncs the
-// file before returning.
+// file before returning. A failed write is cut back to the previous end of
+// the file, so a partial line never joins the next span's line.
 func (e *FileExporter) Export(ctx context.Context, spans []SpanData) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -60,9 +64,21 @@ func (e *FileExporter) Export(ctx context.Context, spans []SpanData) error {
 	if e.closed {
 		return os.ErrClosed
 	}
-	if _, err := e.file.Write(buf.Bytes()); err != nil {
+	info, err := e.file.Stat()
+	if err != nil {
+		return fmt.Errorf("telemetry: stat span file: %w", err)
+	}
+	data := buf.Bytes()
+	if e.torn {
+		data = append([]byte{'\n'}, data...)
+	}
+	if n, err := e.file.Write(data); err != nil {
+		if n > 0 && e.file.Truncate(info.Size()) != nil {
+			e.torn = true
+		}
 		return fmt.Errorf("telemetry: write span file: %w", err)
 	}
+	e.torn = false
 	if err := e.file.Sync(); err != nil {
 		return fmt.Errorf("telemetry: sync span file: %w", err)
 	}
