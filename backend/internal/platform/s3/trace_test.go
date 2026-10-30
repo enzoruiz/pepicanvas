@@ -3,6 +3,7 @@ package s3_test
 import (
 	"context"
 	"errors"
+	"io"
 	"maps"
 	"strings"
 	"testing"
@@ -70,5 +71,44 @@ func TestStorageCallsRecordS3Spans(t *testing.T) {
 		if attrs := map[string]string{"operation": want[i].operation, "outcome": want[i].outcome}; !maps.Equal(span.Attributes, attrs) {
 			t.Fatalf("span %d attributes = %v, want %v", i, span.Attributes, attrs)
 		}
+	}
+}
+
+// L9: the open span covers the Open call only: it ends, with the call's
+// outcome, when Open returns, so it is exported before the caller reads or
+// closes the body, and a missing key ends it not_found.
+func TestOpenSpanEndsWhenOpenReturns(t *testing.T) {
+	server := s3test.Start(t)
+	storage := server.Storage(t)
+	const key = "tenant-a/canvas-1/open-span-decoy"
+	if err := storage.Put(context.Background(), key, owner, strings.NewReader("bytes"), 5); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	h := tracingtest.Start(t)
+	ctx := h.Context(context.Background())
+
+	if _, err := storage.Open(ctx, key+"-missing"); !errors.Is(err, media.ErrNotFound) {
+		t.Fatalf("Open of a missing key = %v, want ErrNotFound", err)
+	}
+	body, err := storage.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	spans := tracingtest.Named(h.Spans(t), telemetry.SpanS3)
+	want := []struct{ outcome, status string }{{"not_found", "error"}, {"ok", "ok"}}
+	if len(spans) != len(want) {
+		t.Fatalf("s3 spans before reading the body = %+v, want %d", spans, len(want))
+	}
+	for i, span := range spans {
+		if attrs := map[string]string{"operation": "open", "outcome": want[i].outcome}; span.Status != want[i].status || !maps.Equal(span.Attributes, attrs) {
+			t.Fatalf("span %d = %+v, want status %s attributes %v", i, span, want[i].status, attrs)
+		}
+	}
+	data, err := io.ReadAll(body)
+	if err != nil || string(data) != "bytes" {
+		t.Fatalf("body = %q, %v; want the stored bytes", data, err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
