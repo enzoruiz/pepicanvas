@@ -581,12 +581,18 @@ func TestRealToolsImageLimits(t *testing.T) {
 		{name: "PNG height 4097", sample: pngSample(4096, 4097), reject: media.RejectionDimensionsExceeded},
 		{name: "JPEG 4096x4096", sample: jpegSample(4096, 4096), want: accepted{mediaType: "image/jpeg", size: media.Dimensions{Width: 4096, Height: 4096}}},
 		{name: "JPEG width 4097", sample: jpegSample(4097, 4096), reject: media.RejectionDimensionsExceeded},
+		{name: "JPEG height 4097", sample: jpegSample(4096, 4097), reject: media.RejectionDimensionsExceeded},
 		{name: "WebP 4096x4096", sample: webpSample(samples, 4096, 4096), want: accepted{mediaType: "image/webp", size: media.Dimensions{Width: 4096, Height: 4096}}},
 		{name: "WebP width 4097", sample: webpSample(samples, 4097, 4096), reject: media.RejectionDimensionsExceeded},
 		{name: "WebP height 4097", sample: webpSample(samples, 4096, 4097), reject: media.RejectionDimensionsExceeded},
 		{name: "GIF 4096x4096", sample: gifSample(4096, 4096, 2), want: accepted{mediaType: "image/gif", size: media.Dimensions{Width: 4096, Height: 4096}, frames: 2}},
 		{name: "GIF width 4097", sample: gifSample(4097, 4096, 2), reject: media.RejectionDimensionsExceeded},
+		{name: "GIF height 4097", sample: gifSample(16, 4097, 2), reject: media.RejectionDimensionsExceeded},
 		{name: "GIF with one frame wider than 4096", sample: gifOneWideFrame(4097), reject: media.RejectionDimensionsExceeded},
+		// ffmpeg clips the frame to the 16x16 screen and only warns.
+		{name: "GIF frame declared wider than its screen", sample: gifPatchedFrame(1, frameDescriptor{width: 5000, height: 16}), reject: media.RejectionInvalidMetadata},
+		{name: "GIF of exactly 10000000 bytes", sample: paddedGIF(10_000_000), want: accepted{mediaType: "image/gif", size: media.Dimensions{Width: 16, Height: 16}, frames: 2}},
+		{name: "GIF of 10000001 bytes", sample: paddedGIF(10_000_001), reject: media.RejectionInputTooLarge},
 		{name: "PNG of exactly 10000000 bytes", sample: paddedPNG(10_000_000), want: accepted{mediaType: "image/png", size: media.Dimensions{Width: 64, Height: 48}}},
 		{name: "PNG of 10000001 bytes", sample: paddedPNG(10_000_001), reject: media.RejectionInputTooLarge},
 		{name: "SVG", sample: func(*testing.T) []byte { return []byte(svgSample) }, reject: media.RejectionUnsupportedKind},
@@ -681,6 +687,31 @@ func paddedPNG(size int) func(*testing.T) []byte {
 		padded := append(append(append([]byte(nil), valid[:end]...), chunk...), valid[end:]...)
 		if len(padded) != size {
 			t.Fatalf("padded PNG = %d bytes, want %d", len(padded), size)
+		}
+		return padded
+	}
+}
+
+// paddedGIF grows a valid 16x16 two-frame GIF to exactly size bytes with a
+// comment extension before the trailer, which decoders skip.
+func paddedGIF(size int) func(*testing.T) []byte {
+	return func(t *testing.T) []byte {
+		valid := gifSample(16, 16, 2)(t)
+		need := size - len(valid) - 3
+		extension := []byte{0x21, 0xFE}
+		for need > 0 {
+			length := min(255, need-1)
+			if length <= 0 {
+				t.Fatalf("cannot pad a GIF to %d bytes", size)
+			}
+			extension = append(extension, byte(length))
+			extension = append(extension, bytes.Repeat([]byte{'x'}, length)...)
+			need -= length + 1
+		}
+		extension = append(extension, 0x00)
+		padded := append(append(append([]byte(nil), valid[:len(valid)-1]...), extension...), 0x3B)
+		if len(padded) != size {
+			t.Fatalf("padded GIF = %d bytes, want %d", len(padded), size)
 		}
 		return padded
 	}

@@ -1,9 +1,12 @@
 package mediaexec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/gif"
 	"io"
 	"math"
 	"os"
@@ -293,10 +296,16 @@ func TestInspectRejectsReaderFailureAndCleansStaging(t *testing.T) {
 func TestInspectOrchestratesApprovedKindsAndCompleteDecode(t *testing.T) {
 	t.Parallel()
 
+	validGIF := encodeGIF(t, &gif.GIF{
+		Image:  []*image.Paletted{image.NewPaletted(image.Rect(0, 0, 10, 20), gifPalette), image.NewPaletted(image.Rect(0, 0, 10, 20), gifPalette)},
+		Delay:  []int{10, 10},
+		Config: image.Config{ColorModel: gifPalette, Width: 10, Height: 20},
+	})
 	tests := []struct {
 		name      string
 		metadata  string
 		frames    string
+		input     []byte
 		want      media.Inspection
 		wantCalls int
 	}{
@@ -305,7 +314,7 @@ func TestInspectOrchestratesApprovedKindsAndCompleteDecode(t *testing.T) {
 		{name: "WebP", metadata: `{"format":{"format_name":"webp_pipe"},"streams":[{"codec_type":"video","codec_name":"webp","width":10,"height":20}]}`, want: media.Inspection{Kind: media.KindImage, MediaType: "image/webp", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}}, wantCalls: 2},
 		{name: "audio", metadata: audioProbe(), want: media.Inspection{Kind: media.KindAudio, MediaType: "audio/mpeg", InputBytes: 1, StreamCount: 1, Duration: time.Second}, wantCalls: 2},
 		{name: "video", metadata: videoProbeJSON(), want: media.Inspection{Kind: media.KindVideo, MediaType: "video/webm", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}, Duration: time.Second}, wantCalls: 2},
-		{name: "GIF all frames", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, want: media.Inspection{Kind: media.KindGIF, MediaType: "image/gif", InputBytes: 1, StreamCount: 1, Duration: time.Second, GIFFrameCount: 2, GIFFrameDimensions: []media.Dimensions{{Width: 10, Height: 20}, {Width: 10, Height: 20}}}, wantCalls: 3},
+		{name: "GIF all frames", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, input: validGIF, want: media.Inspection{Kind: media.KindGIF, MediaType: "image/gif", InputBytes: int64(len(validGIF)), StreamCount: 1, Duration: time.Second, GIFFrameCount: 2, GIFFrameDimensions: []media.Dimensions{{Width: 10, Height: 20}, {Width: 10, Height: 20}}}, wantCalls: 3},
 	}
 
 	for _, tt := range tests {
@@ -329,7 +338,11 @@ func TestInspectOrchestratesApprovedKindsAndCompleteDecode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := adapter.Inspect(context.Background(), strings.NewReader("x"))
+			input := tt.input
+			if input == nil {
+				input = []byte("x")
+			}
+			got, err := adapter.Inspect(context.Background(), bytes.NewReader(input))
 			if err != nil || !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Inspect() = %#v, %v, want %#v, nil", got, err, tt.want)
 			}
@@ -642,6 +655,9 @@ func TestInspectRejectsContentCausedFailuresWithTheirRule(t *testing.T) {
 		{name: "image bytes over the image limit", metadata: imageProbe(), input: "xx", limits: func(l *media.Limits) { l.MaxImageBytes = 1 }, want: media.RejectionInputTooLarge, calls: 1},
 		{name: "GIF frame count over the limit", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, limits: func(l *media.Limits) { l.MaxGIFFrames = 1 }, want: media.RejectionFrameCountExceeded, calls: 2},
 		{name: "full decode fails", metadata: imageProbe(), fail: map[string]Result{stageDecode: FailedResult(FailureToolExit)}, want: media.RejectionDecodeFailed, calls: 2},
+		// ffmpeg clips a frame that overflows the logical screen and only warns,
+		// so only the image descriptor reveals the contradiction.
+		{name: "GIF frame declared outside its screen", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, input: string(gifPatchedFrame(1, frameDescriptor{width: 5000, height: 16})(t)), want: media.RejectionInvalidMetadata, calls: 3},
 		// ffmpeg logs some decode errors, such as a truncated GIF, and exits 0.
 		{name: "full decode reports an error", metadata: imageProbe(), stderr: map[string]string{stageDecode: "LZW decode failed"}, want: media.RejectionDecodeFailed, calls: 2},
 		{name: "probe memory limit", fail: map[string]Result{stageMetadata: FailedResult(FailureMemoryLimit)}, want: media.RejectionResourcesExceeded, calls: 1},

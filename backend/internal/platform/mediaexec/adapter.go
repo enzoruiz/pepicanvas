@@ -123,7 +123,23 @@ func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspe
 	if diagnosed {
 		return media.Inspection{}, media.Reject(media.RejectionDecodeFailed)
 	}
+	if inspection.Kind == media.KindGIF {
+		if err := checkStagedGIF(input); err != nil {
+			return media.Inspection{}, rejectContent(err, "")
+		}
+	}
 	return inspection, nil
+}
+
+// checkStagedGIF requires every frame the staged GIF declares to fit its
+// logical screen.
+func checkStagedGIF(input string) error {
+	file, err := os.Open(input)
+	if err != nil {
+		return newError(ErrorStagingFailed)
+	}
+	defer file.Close()
+	return gifFramesFitScreen(file)
 }
 
 func (adapter *Adapter) stage(ctx context.Context, source io.Reader) (dir, input string, inputBytes int64, resultErr error) {
