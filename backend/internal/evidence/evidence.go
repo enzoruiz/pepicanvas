@@ -38,7 +38,10 @@ const (
 	ManifestName = "manifest.json"
 	MarkerName   = "INCOMPLETE"
 	// KindLatencyEvidence is the artifact kind recalculated for latency.Scenario.
-	KindLatencyEvidence = "latency-evidence"
+	// A run holds at most one, of at most MaxLatencyEvidenceBytes, because the
+	// reader holds it in memory to recalculate it.
+	KindLatencyEvidence     = "latency-evidence"
+	MaxLatencyEvidenceBytes = 8 << 20
 	// AccessPolicy is the only access policy: the run belongs to its file owner.
 	AccessPolicy = "owner-only"
 	// MaxRetentionDays bounds retention; evidence is never kept indefinitely.
@@ -199,21 +202,24 @@ func (w *Writer) Dir() string { return w.dir }
 // RunID returns the run identifier.
 func (w *Writer) RunID() string { return w.runID }
 
-// Add writes one artifact. name must be a single safe path element and data
-// must be unchanged by secret.Scrub; otherwise nothing is written and the
-// writer stays usable. A failed durable write closes the writer, so the run
-// keeps its INCOMPLETE marker and can never be completed.
+// Add writes one artifact. name must be a single safe path element, a run
+// holds at most one latency evidence artifact of at most
+// MaxLatencyEvidenceBytes, and data must be unchanged by secret.Scrub;
+// otherwise nothing is written and the writer stays usable. A failed durable
+// write closes the writer, so the run keeps its INCOMPLETE marker and can
+// never be completed.
 func (w *Writer) Add(name, kind string, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return ErrClosed
 	}
-	if !validArtifactName(name) || !kindPattern.MatchString(kind) {
+	if !validArtifactName(name) || !kindPattern.MatchString(kind) ||
+		(kind == KindLatencyEvidence && len(data) > MaxLatencyEvidenceBytes) {
 		return ErrInvalidArtifact
 	}
 	for _, existing := range w.artifacts {
-		if existing.Name == name {
+		if existing.Name == name || (kind == KindLatencyEvidence && existing.Kind == KindLatencyEvidence) {
 			return ErrInvalidArtifact
 		}
 	}
@@ -229,7 +235,8 @@ func (w *Writer) Add(name, kind string, data []byte) error {
 }
 
 // Complete writes manifest.json and then removes the INCOMPLETE marker. An
-// invalid result or instant, or a run without artifacts, is rejected without
+// invalid result, an instant before the start or after now (the reader would
+// report completed_in_future), or a run without artifacts, is rejected without
 // closing the writer; any later failure closes it and leaves the run visibly
 // incomplete.
 func (w *Writer) Complete(result string, completedAt time.Time) error {
@@ -240,7 +247,8 @@ func (w *Writer) Complete(result string, completedAt time.Time) error {
 	}
 	started := w.run.StartedAt.UTC().Truncate(time.Second)
 	completed := completedAt.UTC().Truncate(time.Second)
-	if !validResult(result) || completedAt.IsZero() || completed.Before(started) || len(w.artifacts) == 0 {
+	if !validResult(result) || completedAt.IsZero() || completed.Before(started) || completed.After(time.Now()) ||
+		len(w.artifacts) == 0 {
 		return ErrInvalidRun
 	}
 	w.closed = true

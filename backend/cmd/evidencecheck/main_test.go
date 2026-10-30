@@ -168,3 +168,36 @@ func TestRunErrors(t *testing.T) {
 		})
 	}
 }
+
+// S4: a run dir given as "." or with a trailing slash names the same run.
+func TestRunAcceptsDotAndTrailingSlashRunDirs(t *testing.T) {
+	r := writeRepo(t)
+	dir := completeRun(t, r, evidence.ResultPass)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := run(r.args(".", dir+"/"), &stdout, &stderr)
+	suffix := " run=" + filepath.Base(dir) + " scenario=release-smoke recorded=PASS classification=PASS problems=-\n"
+	want := "." + suffix + dir + "/" + suffix
+	if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("run() = %d stdout=%q stderr=%q, want 0 and %q", code, stdout.String(), stderr.String(), want)
+	}
+}
+
+// S6: a symlinked run dir is not trusted evidence and fails explicitly.
+func TestRunFailsASymlinkedRunDir(t *testing.T) {
+	r := writeRepo(t)
+	dir := completeRun(t, r, evidence.ResultPass)
+	link := filepath.Join(t.TempDir(), filepath.Base(dir))
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(r.args(link, link+"/"), &stdout, &stderr)
+	suffix := " run=- scenario=- recorded=- classification=FAIL problems=irregular_file:run\n"
+	want := link + suffix + link + "/" + suffix
+	if code != 1 || stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("run() = %d stdout=%q stderr=%q, want 1 and %q", code, stdout.String(), stderr.String(), want)
+	}
+}

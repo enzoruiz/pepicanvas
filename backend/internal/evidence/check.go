@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -35,7 +36,18 @@ var inconclusiveProblems = []string{"no_artifacts", "missing_artifact:", "versio
 // order, manifest permissions, unlisted files, versions, retention, the
 // recalculated result and the recorded result.
 func Check(runDir string, pins Pins, now time.Time) Report {
+	// The run id is the directory's own name, so "." and relative forms are
+	// resolved first; this also drops a trailing slash, through which Lstat
+	// would follow a symlinked run directory.
+	runDir, err := filepath.Abs(runDir)
+	if err != nil {
+		return Report{Classification: Incomplete, Problems: []string{"missing_manifest"}}
+	}
 	info, err := os.Lstat(runDir)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		// A symlink is not trusted evidence, like a symlinked artifact.
+		return Report{Classification: Fail, Problems: []string{"irregular_file:run"}}
+	}
 	if err != nil || !info.IsDir() {
 		return Report{Classification: Incomplete, Problems: []string{"missing_manifest"}}
 	}
@@ -61,18 +73,19 @@ func Check(runDir string, pins Pins, now time.Time) Report {
 		return report.classify()
 	}
 	report.RunID, report.Scenario, report.Recorded = manifest.RunID, manifest.Scenario, manifest.Result
-	if manifest.RunID != filepath.Base(filepath.Clean(runDir)) {
+	if manifest.RunID != filepath.Base(runDir) {
 		report.Problems = append(report.Problems, "run_id_mismatch")
 	}
 
 	if len(manifest.Artifacts) == 0 {
 		report.Problems = append(report.Problems, "no_artifacts")
 	}
-	intact := make(map[string][]byte, len(manifest.Artifacts))
+	// Only the latency evidence is kept in memory, for its recalculation.
+	intact := make(map[string][]byte, 1)
 	for _, artifact := range manifest.Artifacts {
 		if data, problems := checkArtifact(runDir, artifact); len(problems) > 0 {
 			report.Problems = append(report.Problems, problems...)
-		} else {
+		} else if artifact.Kind == KindLatencyEvidence {
 			intact[artifact.Name] = data
 		}
 	}
@@ -132,7 +145,10 @@ func isInconclusive(problem string) bool {
 	return false
 }
 
-// checkArtifact returns the content of an intact artifact, or its problems.
+// checkArtifact streams an artifact through SHA-256 and returns its problems.
+// It returns the content of a latency evidence artifact only, whose size is
+// bounded by MaxLatencyEvidenceBytes, so a run's other artifacts are never
+// held in memory.
 func checkArtifact(runDir string, artifact Artifact) ([]byte, []string) {
 	path := filepath.Join(runDir, artifact.Name)
 	info, err := os.Lstat(path)
@@ -146,16 +162,33 @@ func checkArtifact(runDir string, artifact Artifact) ([]byte, []string) {
 	if info.Mode().Perm()&0o077 != 0 {
 		problems = append(problems, "loose_permissions:"+artifact.Name)
 	}
-	data, err := os.ReadFile(path)
+	keep := artifact.Kind == KindLatencyEvidence
+	if keep && artifact.Bytes > MaxLatencyEvidenceBytes {
+		problems = append(problems, "artifact_too_large:"+artifact.Name)
+		keep = false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, append(problems, "irregular_file:"+artifact.Name)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	var content bytes.Buffer
+	var sink io.Writer = hash
+	if keep {
+		sink = io.MultiWriter(hash, &content)
+	}
+	// One byte past the recorded size is enough to detect a size mismatch.
+	n, err := io.Copy(sink, io.LimitReader(file, artifact.Bytes+1))
 	switch {
 	case err != nil:
 		problems = append(problems, "irregular_file:"+artifact.Name)
-	case int64(len(data)) != artifact.Bytes:
+	case n != artifact.Bytes:
 		problems = append(problems, "size_mismatch:"+artifact.Name)
-	case sha256Hex(data) != artifact.SHA256:
+	case hex.EncodeToString(hash.Sum(nil)) != artifact.SHA256:
 		problems = append(problems, "hash_mismatch:"+artifact.Name)
 	}
-	return data, problems
+	return content.Bytes(), problems
 }
 
 func hasUnlistedFile(runDir string, manifest Manifest) bool {
@@ -176,7 +209,9 @@ func hasUnlistedFile(runDir string, manifest Manifest) bool {
 }
 
 // recalculateLatency evaluates the run's latency evidence against pins and
-// compares the result with the recorded one.
+// compares the result with the recorded one. A valid manifest lists at most
+// one latency evidence artifact (a second one is manifest_malformed rather
+// than recalculated too, the stricter choice), so the first is the only one.
 func recalculateLatency(manifest Manifest, pins Pins, intact map[string][]byte) []string {
 	for _, artifact := range manifest.Artifacts {
 		if artifact.Kind != KindLatencyEvidence {
@@ -206,7 +241,7 @@ func recalculateLatency(manifest Manifest, pins Pins, intact map[string][]byte) 
 // readManifest strictly decodes and validates a manifest file.
 func readManifest(path string) (Manifest, bool) {
 	data, err := os.ReadFile(path)
-	if err != nil || checkDuplicateKeys(data) != nil {
+	if err != nil || checkKeys(data) != nil {
 		return Manifest{}, false
 	}
 	var manifest Manifest
@@ -236,9 +271,13 @@ func (m Manifest) valid() bool {
 		return false
 	}
 	seen := make(map[string]bool, len(m.Artifacts))
+	latencyEvidence := 0
 	for _, artifact := range m.Artifacts {
+		if artifact.Kind == KindLatencyEvidence {
+			latencyEvidence++
+		}
 		if !validArtifactName(artifact.Name) || seen[artifact.Name] || !kindPattern.MatchString(artifact.Kind) ||
-			!sha256Pattern.MatchString(artifact.SHA256) || artifact.Bytes < 0 {
+			!sha256Pattern.MatchString(artifact.SHA256) || artifact.Bytes < 0 || latencyEvidence > 1 {
 			return false
 		}
 		seen[artifact.Name] = true
@@ -252,12 +291,13 @@ func parseTime(value string) (time.Time, bool) {
 	return t, err == nil && formatTime(t) == value
 }
 
-// checkDuplicateKeys rejects a repeated object key at any depth and any data
-// after the single top-level value. Keys are compared case-insensitively
-// because encoding/json matches field names that way.
-func checkDuplicateKeys(data []byte) error {
+// checkKeys rejects, at any depth, an object key that is not exactly the JSON
+// name of a Manifest field or that repeats, and any data after the single
+// top-level value. encoding/json would match a key such as "Result"
+// case-insensitively, but the manifest has one spelling.
+func checkKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := walkJSON(decoder); err != nil {
+	if err := walkJSON(decoder, reflect.TypeOf(Manifest{})); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -266,31 +306,41 @@ func checkDuplicateKeys(data []byte) error {
 	return nil
 }
 
-func walkJSON(decoder *json.Decoder) error {
+// walkJSON checks the next JSON value against t, the type it decodes into.
+func walkJSON(decoder *json.Decoder, t reflect.Type) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
 	switch token {
 	case json.Delim('{'):
+		fields := jsonFields(t)
 		seen := make(map[string]bool)
 		for decoder.More() {
 			keyToken, err := decoder.Token()
 			if err != nil {
 				return err
 			}
-			key := strings.ToLower(keyToken.(string))
+			key := keyToken.(string)
+			field, ok := fields[key]
+			if !ok {
+				return errors.New("unknown key")
+			}
 			if seen[key] {
 				return errors.New("duplicate key")
 			}
 			seen[key] = true
-			if err := walkJSON(decoder); err != nil {
+			if err := walkJSON(decoder, field); err != nil {
 				return err
 			}
 		}
 	case json.Delim('['):
+		var elem reflect.Type
+		if t != nil && t.Kind() == reflect.Slice {
+			elem = t.Elem()
+		}
 		for decoder.More() {
-			if err := walkJSON(decoder); err != nil {
+			if err := walkJSON(decoder, elem); err != nil {
 				return err
 			}
 		}
@@ -299,6 +349,27 @@ func walkJSON(decoder *json.Decoder) error {
 	}
 	_, err = decoder.Token()
 	return err
+}
+
+// jsonFields maps the exact JSON names of struct type t to their field types;
+// it is empty for any other type, so an object there has no valid key.
+func jsonFields(t reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type)
+	if t == nil || t.Kind() != reflect.Struct {
+		return fields
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if !field.IsExported() || name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields
 }
 
 func sha256Hex(data []byte) string {
