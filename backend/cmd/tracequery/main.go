@@ -42,7 +42,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	f, err := os.Open(*path)
+	f, err := openSpanFile(*path)
 	if err != nil {
 		fmt.Fprintf(stderr, "tracequery: %s: cannot open\n", *path)
 		return 2
