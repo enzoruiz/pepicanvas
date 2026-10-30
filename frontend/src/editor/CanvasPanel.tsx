@@ -3,6 +3,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   type ApiError,
   getOwnCanvas,
+  mediaContentUrl,
   type OwnCanvas,
   type Session,
   setDimensions,
@@ -52,6 +53,8 @@ interface CanvasPanelProps {
   // A moderator who owns no canvas sees its moderated canvases instead of
   // the owner's not-active notice.
   hideWhenNotOwner?: boolean;
+  // A new value loads the canvas again, for example after an upload.
+  refreshKey?: number;
 }
 
 // A whole number within the limits, or undefined for anything else
@@ -71,6 +74,7 @@ export function CanvasPanel({
   newOperationId = () => crypto.randomUUID(),
   onLoaded,
   hideWhenNotOwner = false,
+  refreshKey = 0,
 }: CanvasPanelProps) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [width, setWidth] = useState("");
@@ -102,7 +106,7 @@ export function CanvasPanel({
     return () => {
       active = false;
     };
-  }, [onLoaded]);
+  }, [onLoaded, refreshKey]);
 
   async function submit(event: FormEvent<HTMLFormElement>, canvas: OwnCanvas) {
     event.preventDefault();
@@ -182,6 +186,13 @@ export function CanvasPanel({
               width={state.canvas.width}
               height={state.canvas.height}
               objects={state.canvas.objects}
+              mediaSource={(content) =>
+                mediaContentUrl(
+                  state.canvas.tenantId,
+                  state.canvas.canvasId,
+                  content,
+                )
+              }
             />
           </div>
           <LockOwners

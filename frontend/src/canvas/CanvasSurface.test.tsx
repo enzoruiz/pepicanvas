@@ -1,5 +1,5 @@
-import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type CanvasObject, CanvasSurface } from "./CanvasSurface";
 
@@ -147,5 +147,116 @@ describe("CanvasSurface", () => {
       ["middle", "3"],
       ["top", "9"],
     ]);
+  });
+
+  it("renders an image object as an image filling its box", () => {
+    const mediaSource = vi.fn((content: string) => `/media/${content}`);
+    const { container } = render(
+      <CanvasSurface
+        width={1920}
+        height={1080}
+        mediaSource={mediaSource}
+        objects={[
+          object({
+            id: "img",
+            kind: "image",
+            content: "reference-1",
+            x: 10,
+            y: 20,
+            width: 400,
+            height: 300,
+            z: 2,
+          }),
+        ]}
+      />,
+    );
+
+    const [box] = objectsOf(container);
+    expect(box).toHaveAttribute("data-kind", "image");
+    expect(box.style.left).toBe("10px");
+    expect(box.style.width).toBe("400px");
+    expect(box.style.height).toBe("300px");
+    const images = box.querySelectorAll("img");
+    expect(images).toHaveLength(1);
+    const image = images[0];
+    expect(image).toHaveAttribute("src", "/media/reference-1");
+    expect(image).toHaveAttribute("alt", "");
+    expect(image).toHaveAttribute("draggable", "false");
+    expect(image).toHaveAttribute("decoding", "async");
+    expect(image.style.width).toBe("100%");
+    expect(image.style.height).toBe("100%");
+    expect(image.style.objectFit).toBe("contain");
+    expect(image.style.display).toBe("block");
+    expect(mediaSource).toHaveBeenCalledWith("reference-1");
+  });
+
+  it("shows an image only once it loaded completely", () => {
+    const { container } = render(
+      <CanvasSurface
+        width={1920}
+        height={1080}
+        mediaSource={(content) => `/media/${content}`}
+        objects={[object({ kind: "image", content: "reference-1" })]}
+      />,
+    );
+
+    const image = container.querySelector("img");
+    if (image === null) throw new Error("no image");
+    expect(image.style.visibility).toBe("hidden");
+    fireEvent.load(image);
+    expect(image.style.visibility).toBe("visible");
+  });
+
+  it("keeps a failed image hidden", () => {
+    const { container } = render(
+      <CanvasSurface
+        width={1920}
+        height={1080}
+        mediaSource={(content) => `/media/${content}`}
+        objects={[object({ kind: "image", content: "reference-1" })]}
+      />,
+    );
+
+    const image = container.querySelector("img");
+    if (image === null) throw new Error("no image");
+    fireEvent.error(image);
+    expect(image.style.visibility).toBe("hidden");
+  });
+
+  it.each([
+    ["without a resolver", undefined],
+    ["when the resolver has no URL", () => undefined],
+  ])("leaves an image box empty %s", (_, mediaSource) => {
+    const { container } = render(
+      <CanvasSurface
+        width={1920}
+        height={1080}
+        mediaSource={mediaSource}
+        objects={[object({ kind: "image", content: "reference-1" })]}
+      />,
+    );
+
+    const [box] = objectsOf(container);
+    expect(box).toBeEmptyDOMElement();
+    expect(container.innerHTML).not.toContain("reference-1");
+  });
+
+  it("asks the resolver only for image objects", () => {
+    const mediaSource = vi.fn(() => "/media/x");
+    const { container } = render(
+      <CanvasSurface
+        width={1920}
+        height={1080}
+        mediaSource={mediaSource}
+        objects={[
+          object({ id: "t", content: "Hello" }),
+          object({ id: "u", kind: "audio", content: "reference-2" }),
+        ]}
+      />,
+    );
+
+    expect(mediaSource).not.toHaveBeenCalled();
+    expect(container.querySelector("img")).toBeNull();
+    expect(objectsOf(container)[0]).toHaveTextContent("Hello");
   });
 });

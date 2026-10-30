@@ -31,6 +31,8 @@ function SignedInEditor({
   const [ownCanvas, setOwnCanvas] = useState<OwnCanvas | null>(null);
   const [membershipsVersion, setMembershipsVersion] = useState(0);
   const [moderates, setModerates] = useState(false);
+  // Bumped after a confirmed upload, so the canvas shows the new object.
+  const [canvasVersion, setCanvasVersion] = useState(0);
   const onListed = useCallback((count: number) => {
     setModerates(count > 0);
   }, []);
@@ -48,6 +50,7 @@ function SignedInEditor({
         session={session}
         onLoaded={setOwnCanvas}
         hideWhenNotOwner={moderates}
+        refreshKey={canvasVersion}
       />
       {ownCanvas && <InvitationsPanel session={session} />}
       {ownCanvas && <ModeratorsPanel session={session} />}
@@ -56,6 +59,7 @@ function SignedInEditor({
           session={session}
           tenantId={ownCanvas.tenantId}
           canvasId={ownCanvas.canvasId}
+          onUploaded={() => setCanvasVersion((version) => version + 1)}
         />
       )}
       <ModeratedCanvases refreshKey={membershipsVersion} onListed={onListed} />

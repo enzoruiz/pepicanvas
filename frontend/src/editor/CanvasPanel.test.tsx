@@ -403,4 +403,82 @@ describe("CanvasPanel", () => {
     expect(localStorage).toHaveLength(0);
     expect(sessionStorage).toHaveLength(0);
   });
+
+  it("draws an image object from its content route", async () => {
+    replies.push(
+      json(200, {
+        tenant_id: tenantId,
+        canvas_id: canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 1,
+        objects: [
+          {
+            id: "dddddddddddddddddddddddddddddddd",
+            kind: "image",
+            content: "reference-1",
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            rotation: 0,
+            z: 0,
+          },
+        ],
+      }),
+    );
+    renderPanel();
+    await ready();
+
+    const image = surface().querySelector("img");
+    expect(image).toHaveAttribute(
+      "src",
+      `/api/tenants/${tenantId}/canvases/${canvasId}/media/references/reference-1/content`,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("loads the canvas again when asked to refresh", async () => {
+    replies.push(ownCanvas());
+    const { rerender } = render(
+      <CanvasPanel session={session} refreshKey={0} />,
+    );
+    await ready();
+
+    replies.push(
+      json(200, {
+        tenant_id: tenantId,
+        canvas_id: canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 2,
+        objects: [
+          {
+            id: "dddddddddddddddddddddddddddddddd",
+            kind: "image",
+            content: "reference-2",
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+            rotation: 0,
+            z: 2,
+          },
+        ],
+      }),
+    );
+    rerender(<CanvasPanel session={session} refreshKey={1} />);
+
+    await waitFor(() =>
+      expect(surface().querySelector("img")).toHaveAttribute(
+        "src",
+        `/api/tenants/${tenantId}/canvases/${canvasId}/media/references/reference-2/content`,
+      ),
+    );
+    expect(calls.map((call) => [call.method, call.path])).toEqual([
+      ["GET", "/api/canvas"],
+      ["GET", "/api/canvas"],
+    ]);
+    expect(surface()).not.toHaveTextContent("Far away");
+  });
 });

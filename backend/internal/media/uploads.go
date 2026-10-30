@@ -83,24 +83,33 @@ type ObjectStore interface {
 // UploadRequest is one client upload. Operation.ID identifies the whole
 // upload; it may have at most MaxIdentifierBytes minus the longest stage
 // suffix bytes. With Replace, ReferenceID is moved to the new asset on success.
+// DeclaredType is the media type the client declared, or "" when it declared
+// none; a declared type that differs from the inspected Inspection.MediaType
+// is rejected with RejectionTypeMismatch.
 type UploadRequest struct {
 	Key           CanvasKey
 	Operation     Operation
 	DeclaredBytes int64
 	ReferenceID   string
 	Replace       bool
+	DeclaredType  string
 	Body          io.Reader
 }
 
-// UploadResult is the outcome of a successful upload.
+// UploadResult is the outcome of a successful upload. ObjectID is the canvas
+// image object the upload created, equal to AssetID, or "" when it created
+// none.
 type UploadResult struct {
-	AssetID string
-	Kind    Kind
-	Usage   Usage
+	AssetID  string
+	ObjectID string
+	Kind     Kind
+	Usage    Usage
 }
 
 // Uploads runs the upload pipeline: reserve, store, inspect, complete. Any
-// failure after the reservation releases it and deletes the stored bytes.
+// failure after the reservation releases it and deletes the stored bytes. A
+// non-replacing image or GIF upload completes with a canvas image object at
+// its decoded size; a replacement, audio, and video create none.
 type Uploads struct {
 	store     Store
 	storage   Storage
@@ -169,8 +178,18 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 	if inspection.InputBytes != req.DeclaredBytes {
 		return UploadResult{}, u.abort(ctx, req, reserved, newRejection(RejectionInvalidMetadata))
 	}
-	completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix),
-		Complete{AssetID: reserved.AssetID, ReferenceID: req.ReferenceID, Kind: inspection.Kind})
+	if req.DeclaredType != "" && req.DeclaredType != inspection.MediaType {
+		return UploadResult{}, u.abort(ctx, req, reserved, newRejection(RejectionTypeMismatch))
+	}
+	complete := Complete{AssetID: reserved.AssetID, ReferenceID: req.ReferenceID, Kind: inspection.Kind}
+	if createsObject(inspection.Kind, req.Replace) {
+		size, ok := naturalSize(inspection)
+		if !ok {
+			return UploadResult{}, u.abort(ctx, req, reserved, newRejection(RejectionInvalidMetadata))
+		}
+		complete.Object, complete.ObjectWidth, complete.ObjectHeight = true, size.Width, size.Height
+	}
+	completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix), complete)
 	if err != nil {
 		return UploadResult{}, u.abort(ctx, req, reserved, err)
 	}
@@ -181,7 +200,7 @@ func (u *Uploads) Upload(ctx context.Context, req UploadRequest) (UploadResult, 
 	if _, err := u.store.Ready(cleanup, req.Key, reserved.AssetID); errors.Is(err, ErrNotFound) {
 		_ = u.storage.Delete(cleanup, reserved.StorageKey)
 	}
-	return UploadResult{AssetID: reserved.AssetID, Kind: inspection.Kind, Usage: completed.Usage}, nil
+	return UploadResult{AssetID: reserved.AssetID, ObjectID: completed.ObjectID, Kind: inspection.Kind, Usage: completed.Usage}, nil
 }
 
 // collided answers an attempt whose bytes another attempt of the same upload
@@ -203,14 +222,42 @@ func (u *Uploads) collided(ctx context.Context, req UploadRequest, reserved Resu
 	return UploadResult{}, ErrUploadInProgress
 }
 
-// replay repeats the completion of an asset that is already ready.
+// replay repeats the completion of an asset that is already ready, with the
+// same fingerprint as the original: the object flag follows from the stored
+// kind and the request. The stored asset has no size, which the fingerprint
+// leaves out; a placeholder size is never placed, because a retained
+// completion replays its result and one no longer retained finds the asset
+// not pending and fails with ErrNotFound.
 func (u *Uploads) replay(ctx context.Context, req UploadRequest, asset Asset) (UploadResult, error) {
-	completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix),
-		Complete{AssetID: asset.ID, ReferenceID: req.ReferenceID, Kind: asset.Kind})
+	complete := Complete{AssetID: asset.ID, ReferenceID: req.ReferenceID, Kind: asset.Kind}
+	if createsObject(asset.Kind, req.Replace) {
+		complete.Object, complete.ObjectWidth, complete.ObjectHeight = true, 1, 1
+	}
+	completed, err := u.store.Apply(ctx, req.Key, stage(req.Operation, completeSuffix), complete)
 	if err != nil {
 		return UploadResult{}, requestError(ctx, err)
 	}
-	return UploadResult{AssetID: asset.ID, Kind: asset.Kind, Usage: completed.Usage}, nil
+	return UploadResult{AssetID: asset.ID, ObjectID: completed.ObjectID, Kind: asset.Kind, Usage: completed.Usage}, nil
+}
+
+// createsObject reports whether an upload's completion creates a canvas image
+// object: only a non-replacing image or GIF upload does.
+func createsObject(kind Kind, replace bool) bool {
+	return !replace && (kind == KindImage || kind == KindGIF)
+}
+
+// naturalSize is the decoded size of an image, or of a GIF's first frame,
+// which every frame matches. It is false when the inspection has no usable size.
+func naturalSize(inspection Inspection) (Dimensions, bool) {
+	size := inspection.Dimensions
+	if inspection.Kind == KindGIF {
+		if len(inspection.GIFFrameDimensions) == 0 {
+			return Dimensions{}, false
+		}
+		size = inspection.GIFFrameDimensions[0]
+	}
+	valid := size.Width >= 1 && size.Width <= MaxObjectSide && size.Height >= 1 && size.Height <= MaxObjectSide
+	return size, valid
 }
 
 // Open returns a ready asset and its bytes. Any other state is ErrNotFound.

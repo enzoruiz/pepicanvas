@@ -184,3 +184,114 @@ func TestMediaCommandFailedBeforeCommitNeverReachesTheHub(t *testing.T) {
 		t.Fatalf("hub received canvas %+v usages %+v (%v), want only the committed usage %+v", canvasEvents, usages, correlations, kept.Usage)
 	}
 }
+
+// US-011 S12 (CTRL-CONS-01): an image upload's completion commits the asset,
+// its image object, and both outbox records in one transaction. Committed
+// before a crash and before any publication, it reaches the hub exactly once
+// after the restart, as one create_object event for the asset's object and
+// one usage event.
+func TestImageObjectCommittedBeforeACrashIsDeliveredOnceAfterRestart(t *testing.T) {
+	server := pgtest.Start(t)
+	ctx := context.Background()
+	key := canvasA
+
+	store, events, pool := openPG(t, server)
+	mediaStore := postgres.NewMediaStore(pool)
+	crashed := newHub(t, realtime.Config{Authorize: allowAll})
+	stopped, err := outbox.NewPublisher(outbox.Config{Store: events, Sink: outbox.NewHubSink(submitOnly{crashed})})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	if _, err := store.Create(ctx, key); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	reserved := mustApplyMedia(t, mediaStore, key, media.Operation{ID: "upload-1/reserve", CorrelationID: "corr-upload"}, media.Reserve{DeclaredBytes: 4000})
+	completed := mustApplyMedia(t, mediaStore, key, media.Operation{ID: "upload-1/complete", CorrelationID: "corr-upload"},
+		media.Complete{AssetID: reserved.AssetID, ReferenceID: "ref-1", Kind: media.KindGIF, Object: true, ObjectWidth: 300, ObjectHeight: 200})
+	if completed.ObjectID != reserved.AssetID {
+		t.Fatalf("Complete = %+v, want the asset's object", completed)
+	}
+	if err := stopped.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := hubEvents(t, crashed, key); len(got) != 0 {
+		t.Fatalf("hub confirmed %+v before publication", got)
+	}
+	if stats := mustStats(t, events, key.TenantID); stats.Pending != 3 {
+		t.Fatalf("Stats before restart = %+v, want 3 pending: two usages and the object", stats)
+	}
+	pool.Close()
+
+	server.Restart(t)
+	canvases, events, _ := openPG(t, server)
+	commands := &seen{}
+	hub := newHub(t, realtime.Config{Authorize: commands.authorize})
+	publisher := start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(hub), PollInterval: 10 * time.Millisecond})
+	eventually(t, "every record to settle and be counted", func() bool {
+		return mustStats(t, events, key.TenantID).Pending == 0 && publisher.Counters().Delivered == 3
+	})
+
+	canvasEvents, usages, _ := usageEvents(t, hubEvents(t, hub, key))
+	assertDeliveredInOrder(t, canvasEvents, 1, 1)
+	if event := canvasEvents[0]; event.ObjectID != reserved.AssetID || event.CorrelationID != "corr-upload" {
+		t.Fatalf("object event = %+v, want object %s with the upload's correlation", event, reserved.AssetID)
+	}
+	if len(usages) != 2 || usages[1] != committedUsage(2, completed.Usage) {
+		t.Fatalf("delivered usages = %+v, want the reservation and %+v", usages, completed.Usage)
+	}
+	if got := len(commands.list()); got != 3 {
+		t.Fatalf("hub saw %d commands, want each record exactly once", got)
+	}
+	loaded, err := canvases.Load(ctx, key)
+	if err != nil || loaded.Revision != 1 || len(loaded.Objects) != 1 || loaded.Objects[0].ID != reserved.AssetID {
+		t.Fatalf("canvas after restart = %+v, %v; want the one image object", loaded, err)
+	}
+}
+
+// US-011 S7, S12: an image completion that fails at COMMIT, after its object
+// and records were written, leaves no asset, object, revision, or record, and
+// the hub never confirms the object.
+func TestImageObjectFailedAtCommitNeverReachesTheHub(t *testing.T) {
+	server := pgtest.Start(t)
+	ctx := context.Background()
+	key := canvasA
+	var publisher *outbox.Publisher
+	store, events, pool := openPG(t, server)
+	mediaStore := postgres.NewMediaStore(pool, postgres.WithMediaCommitted(func(media.CanvasKey) { publisher.Notify() }))
+	hub := newHub(t, realtime.Config{Authorize: allowAll})
+	publisher = start(t, outbox.Config{Store: events, Sink: outbox.NewHubSink(hub), PollInterval: 10 * time.Millisecond})
+	if _, err := store.Create(ctx, key); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	reserved := mustApplyMedia(t, mediaStore, key, media.Operation{ID: "upload-1/reserve"}, media.Reserve{DeclaredBytes: 900})
+	eventually(t, "the reservation to settle", func() bool { return mustStats(t, events, key.TenantID).Pending == 0 })
+
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION fail_object_commit() RETURNS trigger LANGUAGE plpgsql AS
+		$$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$;
+		CREATE CONSTRAINT TRIGGER fail_object_commit AFTER INSERT ON canvas_objects
+		DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_object_commit();`); err != nil {
+		t.Fatalf("install commit fault: %v", err)
+	}
+	complete := media.Complete{AssetID: reserved.AssetID, ReferenceID: "ref-1", Kind: media.KindImage, Object: true, ObjectWidth: 16, ObjectHeight: 16}
+	if _, err := mediaStore.Apply(ctx, mediaKey(key), media.Operation{ID: "upload-1/complete"}, complete); err == nil || !strings.Contains(err.Error(), "injected commit failure") {
+		t.Fatalf("Complete with a commit fault = %v, want the injected failure", err)
+	}
+	if pending := mustPendingRecords(t, events, key); len(pending) != 0 {
+		t.Fatalf("Pending after a failed commit = %+v", pending)
+	}
+	if loaded, err := store.Load(ctx, key); err != nil || loaded.Revision != 0 || len(loaded.Objects) != 0 {
+		t.Fatalf("canvas after a failed commit = %+v, %v; want no object and no revision", loaded, err)
+	}
+	if _, err := mediaStore.Ready(ctx, mediaKey(key), reserved.AssetID); err == nil {
+		t.Fatal("asset is ready after a failed commit")
+	}
+	if usage, err := mediaStore.Usage(ctx, mediaKey(key)); err != nil || usage.UsedBytes != 0 || usage.ReservedBytes != 900 {
+		t.Fatalf("usage after a failed commit = %+v, %v; want only the reservation", usage, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	canvasEvents, usages, _ := usageEvents(t, hubEvents(t, hub, key))
+	if len(canvasEvents) != 0 || len(usages) != 1 {
+		t.Fatalf("hub received canvas %+v usages %+v, want only the reservation's usage", canvasEvents, usages)
+	}
+}

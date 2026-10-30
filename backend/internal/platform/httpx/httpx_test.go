@@ -304,3 +304,58 @@ func TestPrivateWriterSupportsFlusher(t *testing.T) {
 		t.Fatal("flush did not reach the underlying writer")
 	}
 }
+
+// A handler that serves a private, revalidated resource asks for it right
+// before its answer; Private then sends "private, no-cache" instead of
+// no-store, keeps the Referer policy, and still overrides a weaker value.
+// Without the request every path stays no-store.
+func TestPrivateRevalidateAllowsOnlyPrivateRevalidation(t *testing.T) {
+	cases := map[string]struct {
+		handler http.HandlerFunc
+		want    string
+	}{
+		"revalidated 200": {func(w http.ResponseWriter, _ *http.Request) {
+			httpx.Revalidate(w)
+			_, _ = w.Write([]byte("image"))
+		}, "private, no-cache"},
+		"revalidated 304": {func(w http.ResponseWriter, _ *http.Request) {
+			httpx.Revalidate(w)
+			w.WriteHeader(http.StatusNotModified)
+		}, "private, no-cache"},
+		"override attempt": {func(w http.ResponseWriter, _ *http.Request) {
+			httpx.Revalidate(w)
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+			_, _ = w.Write([]byte("image"))
+		}, "private, no-cache"},
+		"through a wrapper": {func(w http.ResponseWriter, _ *http.Request) {
+			httpx.Revalidate(wrapped{w})
+			_, _ = w.Write([]byte("image"))
+		}, "private, no-cache"},
+		"not requested": {func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("private"))
+		}, "no-store"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			httpx.Private(tc.handler).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/private", nil))
+			h := rec.Result().Header
+			if got := h.Get("Cache-Control"); got != tc.want {
+				t.Errorf("Cache-Control = %q, want %q", got, tc.want)
+			}
+			if got := h.Get("Referrer-Policy"); got != "no-referrer" {
+				t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+			}
+		})
+	}
+	// Outside Private, Revalidate sets the header itself.
+	rec := httptest.NewRecorder()
+	httpx.Revalidate(rec)
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Errorf("Cache-Control without Private = %q", got)
+	}
+}
+
+type wrapped struct{ http.ResponseWriter }
+
+func (w wrapped) Unwrap() http.ResponseWriter { return w.ResponseWriter }

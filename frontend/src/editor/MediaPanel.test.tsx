@@ -51,7 +51,7 @@ function uploaded(used: number): Reply {
   });
 }
 
-function renderPanel() {
+function renderPanel(onUploaded?: () => void) {
   let operations = 0;
   let references = 0;
   return render(
@@ -61,6 +61,7 @@ function renderPanel() {
       canvasId={canvasId}
       newOperationId={() => `operation-${++operations}`}
       newReferenceId={() => `reference-${++references}`}
+      onUploaded={onUploaded}
     />,
   );
 }
@@ -73,8 +74,8 @@ async function ready(text = "Used 0 of 1,000,000,000 bytes") {
   expect(await screen.findByText(text)).toBeInTheDocument();
 }
 
-function choose(name = "cat.png", content = "12345"): File {
-  const file = new File([content], name, { type: "image/png" });
+function choose(name = "cat.png", content = "12345", type = "image/png"): File {
+  const file = new File([content], name, { type });
   fireEvent.change(screen.getByLabelText("File"), {
     target: { files: [file] },
   });
@@ -197,7 +198,7 @@ describe("MediaPanel", () => {
       path: `${uploadsPath}?operation_id=operation-1&reference_id=reference-1`,
       headers: {
         "X-CSRF-Token": "csrf-token-value",
-        "Content-Type": "application/octet-stream",
+        "Content-Type": "image/png",
       },
       body: undefined,
       raw: file,
@@ -219,25 +220,43 @@ describe("MediaPanel", () => {
       "media_rejected",
       422,
       "unsupported_kind",
-      "This file type is not supported. Upload an image, GIF, audio, or video file.",
+      "SVG and this format are not supported. Upload a PNG, JPEG, WebP, or GIF image, or an audio or video file.",
     ],
     [
       "media_rejected",
       422,
       "invalid_metadata",
-      "This file could not be read as an image, GIF, audio, or video file.",
+      "The file's type or dimensions could not be established from its content.",
     ],
     [
       "media_rejected",
       422,
       "input_too_large",
-      "This file is larger than the allowed size.",
+      "The file is larger than 10 000 000 bytes.",
     ],
     [
       "media_rejected",
       422,
       "dimensions_exceeded",
-      "This file's dimensions are larger than allowed.",
+      "Each image and GIF frame must be at most 4096×4096 pixels.",
+    ],
+    [
+      "media_rejected",
+      422,
+      "type_mismatch",
+      "The file content does not match its type.",
+    ],
+    [
+      "media_rejected",
+      422,
+      "decode_failed",
+      "The file could not be decoded completely.",
+    ],
+    [
+      "media_rejected",
+      422,
+      "resources_exceeded",
+      "The file needs more resources to check than allowed.",
     ],
     [
       "media_rejected",
@@ -339,6 +358,114 @@ describe("MediaPanel", () => {
       expect(calls).toHaveLength(2);
     },
   );
+
+  it.each([
+    ["input_too_large", "This file is larger than the allowed size."],
+    ["dimensions_exceeded", "This file's dimensions are larger than allowed."],
+  ])(
+    "keeps the general %s message for a file that is not an image",
+    async (reason, message) => {
+      replies.push(json(200, usage(0)));
+      renderPanel();
+      await ready();
+
+      choose("clip.mp4", "12345", "video/mp4");
+      replies.push(json(422, { error: "media_rejected", reason }));
+      upload();
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(calls[1].headers["Content-Type"]).toBe("application/octet-stream");
+    },
+  );
+
+  it("rejects an SVG file without sending it", async () => {
+    replies.push(json(200, usage(0)));
+    const onUploaded = vi.fn();
+    renderPanel(onUploaded);
+    await ready();
+
+    choose("logo.svg", "<svg/>", "image/svg+xml");
+    upload();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "SVG and this format are not supported. Upload a PNG, JPEG, WebP, or GIF image, or an audio or video file.",
+    );
+    await settled();
+    expect(calls).toHaveLength(1);
+    expect(onUploaded).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Used 0 of 1,000,000,000 bytes"),
+    ).toBeInTheDocument();
+  });
+
+  it("tells its parent about a confirmed upload only", async () => {
+    replies.push(json(200, usage(0)));
+    const onUploaded = vi.fn();
+    renderPanel(onUploaded);
+    await ready();
+
+    choose("one.gif", "GIF89a", "image/gif");
+    replies.push(
+      json(422, { error: "media_rejected", reason: "decode_failed" }),
+    );
+    upload();
+    await screen.findByText("The file could not be decoded completely.");
+    await settled();
+    expect(onUploaded).not.toHaveBeenCalled();
+
+    choose("two.gif", "GIF89a", "image/gif");
+    replies.push(
+      json(201, {
+        asset_id: "dddddddddddddddddddddddddddddddd",
+        kind: "gif",
+        object_id: "dddddddddddddddddddddddddddddddd",
+        usage: usage(6),
+      }),
+    );
+    upload();
+    await screen.findByText("File uploaded.");
+
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+    expect(onUploaded).toHaveBeenCalledWith({
+      assetId: "dddddddddddddddddddddddddddddddd",
+      kind: "gif",
+      objectId: "dddddddddddddddddddddddddddddddd",
+      usage: {
+        quotaBytes: 1_000_000_000,
+        usedBytes: 6,
+        reservedBytes: 0,
+        availableBytes: 999_999_994,
+      },
+    });
+    expect(calls[2].headers["Content-Type"]).toBe("image/gif");
+  });
+
+  // S9: after a lost answer the retry replays the same operation, so the
+  // confirmed result is shown once and the canvas reloads once.
+  it("shows the confirmed result of a replayed upload after a lost answer", async () => {
+    replies.push(json(200, usage(0)));
+    const onUploaded = vi.fn();
+    renderPanel(onUploaded);
+    await ready();
+
+    choose();
+    replies.push("network-error");
+    upload();
+    await screen.findByRole("alert");
+    await settled();
+    expect(onUploaded).not.toHaveBeenCalled();
+
+    replies.push(uploaded(5));
+    upload();
+    await screen.findByText("File uploaded.");
+
+    expect(calls[1].path).toBe(calls[2].path);
+    expect(calls[2].path).toBe(
+      `${uploadsPath}?operation_id=operation-1&reference_id=reference-1`,
+    );
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 
   it("shows a network failure as a fixed message and keeps the usage", async () => {
     replies.push(json(200, usage(500)));

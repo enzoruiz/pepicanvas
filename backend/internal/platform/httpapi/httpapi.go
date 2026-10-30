@@ -197,6 +197,7 @@ func New(config Config) (http.Handler, error) {
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/uploads", in.Route(ingress.Session, http.HandlerFunc(a.uploadMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references", in.Route(ingress.Session, http.HandlerFunc(a.attachMedia)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/detach", in.Route(ingress.Session, http.HandlerFunc(a.detachMedia)))
+	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/media/references/{referenceID}/content", a.mediaContent)
 	mux.HandleFunc("GET /api/tenants/{tenantID}/canvases/{canvasID}/locks", a.listLocks)
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions", in.Route(ingress.Session, http.HandlerFunc(a.openLockSession)))
 	mux.Handle("POST /api/tenants/{tenantID}/canvases/{canvasID}/locks/sessions/{sessionID}/heartbeat", in.Route(ingress.Session, http.HandlerFunc(a.heartbeatLock)))
@@ -880,13 +881,21 @@ func (a *api) canvas(w http.ResponseWriter, r *http.Request) {
 // after its confirmation (US-006 S8). A denial is the route's forbidden
 // answer and writes no part of body.
 func (a *api) deliver(w http.ResponseWriter, r *http.Request, principal access.Principal, key canvas.Key, body any) {
+	a.deliverWith(w, r, principal, key, func() {
+		writeJSON(w, http.StatusOK, body)
+	})
+}
+
+// deliverWith reauthorizes like deliver and then lets write produce the whole
+// answer; a denial writes the route's forbidden answer and never calls write.
+func (a *api) deliverWith(w http.ResponseWriter, r *http.Request, principal access.Principal, key canvas.Key, write func()) {
 	var loadErr error
 	err := access.GuardReadDelivery(func() (access.Request, error) {
 		membership, found, err := a.Memberships.MembershipOf(r.Context(), principal.AccountID, key.TenantID)
 		loadErr = err
 		return access.CanvasRequest(membership, found, key.TenantID, access.ActionView), err
 	}, func() error {
-		writeJSON(w, http.StatusOK, body)
+		write()
 		return nil
 	})
 	switch {

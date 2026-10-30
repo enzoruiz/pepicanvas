@@ -340,7 +340,16 @@ func (f *fakeInspector) block() {
 }
 
 func imageOf(data []byte) media.Inspection {
-	return media.Inspection{Kind: media.KindImage, InputBytes: int64(len(data)), StreamCount: 1, Dimensions: media.Dimensions{Width: 16, Height: 16}}
+	return media.Inspection{Kind: media.KindImage, MediaType: "image/png", InputBytes: int64(len(data)), StreamCount: 1, Dimensions: media.Dimensions{Width: 16, Height: 16}}
+}
+
+// gifOf is a three-frame GIF whose frames all measure width x height.
+func gifOf(data []byte, width, height int) media.Inspection {
+	frame := media.Dimensions{Width: width, Height: height}
+	return media.Inspection{
+		Kind: media.KindGIF, MediaType: "image/gif", InputBytes: int64(len(data)), StreamCount: 1, Dimensions: frame,
+		GIFFrameCount: 3, GIFFrameDimensions: []media.Dimensions{frame, frame, frame},
+	}
 }
 
 // dimensionsRejection obtains a real rejection from the acceptance contract.
@@ -382,6 +391,7 @@ var canvasSeq, operationSeq atomic.Int64
 type fixture struct {
 	key       media.CanvasKey
 	store     *postgres.MediaStore
+	canvases  *postgres.CanvasStore
 	storage   *fakeStorage
 	inspector *fakeInspector
 	uploads   *media.Uploads
@@ -402,8 +412,39 @@ func (s *server) fixtureWith(t *testing.T, key media.CanvasKey, storage *fakeSto
 		t.Fatalf("Create canvas: %v", err)
 	}
 	inspector := &fakeInspector{started: make(chan struct{}, 16)}
-	return &fixture{key: key, store: s.store, storage: storage, inspector: inspector, uploads: media.NewUploads(s.store, storage, inspector)}
+	return &fixture{key: key, store: s.store, canvases: s.canvases, storage: storage, inspector: inspector, uploads: media.NewUploads(s.store, storage, inspector)}
 }
+
+func (f *fixture) canvasKey() canvas.Key {
+	return canvas.Key{TenantID: f.key.TenantID, CanvasID: f.key.CanvasID}
+}
+
+// wantCanvas checks the committed canvas revision and its objects, bottom first.
+func (f *fixture) wantCanvas(t *testing.T, revision int64, objects ...canvas.Object) {
+	t.Helper()
+	loaded, err := f.canvases.Load(context.Background(), f.canvasKey())
+	if err != nil {
+		t.Fatalf("Load canvas: %v", err)
+	}
+	if loaded.Revision != revision || !slices.Equal(loaded.Objects, objects) {
+		t.Fatalf("canvas revision %d objects %+v, want revision %d objects %+v", loaded.Revision, loaded.Objects, revision, objects)
+	}
+}
+
+// wantNoObject checks S7: a failed or cancelled upload left the fresh canvas
+// without objects and without a revision.
+func (f *fixture) wantNoObject(t *testing.T) {
+	t.Helper()
+	f.wantCanvas(t, 0)
+}
+
+// imageObject is the object a non-replacing image or GIF upload creates.
+func imageObject(assetID, reference string, z int64, transform canvas.Transform) canvas.Object {
+	return canvas.Object{ID: assetID, Kind: canvas.KindImage, Content: reference, Transform: transform, Z: z}
+}
+
+// smallImage is where imageOf's 16x16 image lands on the default canvas.
+var smallImage = canvas.Transform{X: 952, Y: 532, Width: 16, Height: 16}
 
 func (f *fixture) request(content, reference string) media.UploadRequest {
 	return media.UploadRequest{
@@ -578,11 +619,12 @@ func TestUploadPipeline(t *testing.T) {
 			t.Fatalf("usage during inspection = %+v, %v; want 5 reserved", during, duringErr)
 		}
 		reserved := f.reservation(t, req)
-		want := media.UploadResult{AssetID: reserved.AssetID, Kind: media.KindImage, Usage: media.Usage{QuotaBytes: media.QuotaBytes, UsedBytes: 5}}
+		want := media.UploadResult{AssetID: reserved.AssetID, ObjectID: reserved.AssetID, Kind: media.KindImage, Usage: media.Usage{QuotaBytes: media.QuotaBytes, UsedBytes: 5}}
 		if result != want {
 			t.Fatalf("Upload = %+v, want %+v", result, want)
 		}
 		f.wantUsage(t, 5, 0)
+		f.wantCanvas(t, 1, imageObject(reserved.AssetID, "ref-1", 1, smallImage))
 		asset := f.wantServed(t, result.AssetID, "hello")
 		wantAsset := media.Asset{ID: reserved.AssetID, State: media.StateReady, Kind: media.KindImage, DeclaredBytes: 5, StorageKey: reserved.StorageKey, References: 1}
 		if asset != wantAsset {
@@ -653,10 +695,11 @@ func TestUploadPipeline(t *testing.T) {
 	// S7, S8, S10: every failure or cancellation after the reservation
 	// releases it, deletes the stored bytes, and purges the asset.
 	stages := []struct {
-		name   string
-		body   string
-		setup  func(t *testing.T, f *fixture) context.Context
-		verify func(t *testing.T, err error)
+		name     string
+		body     string
+		declared string
+		setup    func(t *testing.T, f *fixture) context.Context
+		verify   func(t *testing.T, err error)
 	}{
 		{
 			name:   "body shorter than declared",
@@ -739,11 +782,44 @@ func TestUploadPipeline(t *testing.T) {
 			},
 			verify: func(t *testing.T, err error) { wantRejection(t, err, media.RejectionInvalidMetadata) },
 		},
+		{
+			// US-011 S6: a declared type is checked against the content.
+			name:     "declared type differs from the content",
+			declared: "image/gif",
+			verify: func(t *testing.T, err error) {
+				wantRejection(t, err, media.RejectionTypeMismatch)
+				if _, unchanged := err.(*media.Rejection); !unchanged {
+					t.Fatalf("Upload error = %#v, want the rejection unchanged", err)
+				}
+			},
+		},
+		{
+			name:     "declared type of undecodable media",
+			declared: "image/png",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.inspector.reject(media.Reject(media.RejectionDecodeFailed))
+				return ctx
+			},
+			verify: func(t *testing.T, err error) { wantRejection(t, err, media.RejectionDecodeFailed) },
+		},
+		{
+			name: "GIF without decoded frames",
+			setup: func(t *testing.T, f *fixture) context.Context {
+				f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) {
+					inspection := gifOf(data, 10, 10)
+					inspection.GIFFrameDimensions = nil
+					return inspection, nil
+				})
+				return ctx
+			},
+			verify: func(t *testing.T, err error) { wantRejection(t, err, media.RejectionInvalidMetadata) },
+		},
 	}
 	for _, stage := range stages {
 		t.Run(stage.name, func(t *testing.T) {
 			f := srv.fixture(t)
 			req := f.request("hello", "ref-1")
+			req.DeclaredType = stage.declared
 			if stage.body != "" {
 				req.Body = strings.NewReader(stage.body)
 			}
@@ -762,6 +838,7 @@ func TestUploadPipeline(t *testing.T) {
 			if f.storage.objectCount() != 0 {
 				t.Fatalf("storage holds %d objects, want none", f.storage.objectCount())
 			}
+			f.wantNoObject(t)
 		})
 	}
 
@@ -775,6 +852,8 @@ func TestUploadPipeline(t *testing.T) {
 			t.Fatalf("Upload = %v, want ErrReferenceExists", err)
 		}
 		f.wantUsage(t, 5, 0)
+		// US-011 S7: the failed completion created no object of its own.
+		f.wantCanvas(t, 1, imageObject(first.AssetID, "ref-1", 1, smallImage))
 		f.wantGone(t, f.reservation(t, req))
 		f.wantServed(t, first.AssetID, "first")
 		if f.storage.objectCount() != 1 {
@@ -811,10 +890,11 @@ func TestUploadPipeline(t *testing.T) {
 		retry := req
 		retry.Body = strings.NewReader("hello")
 		again := f.mustUpload(t, retry)
-		if again != first {
-			t.Fatalf("retry = %+v, want %+v", again, first)
+		if again != first || first.ObjectID != first.AssetID {
+			t.Fatalf("retry = %+v, want %+v with the asset's object", again, first)
 		}
 		f.wantUsage(t, 5, 0)
+		f.wantCanvas(t, 1, imageObject(first.AssetID, "ref-1", 1, smallImage))
 		f.wantServed(t, first.AssetID, "hello")
 		if keys := f.storage.putKeys(); len(keys) != 1 || f.storage.objectCount() != 1 {
 			t.Fatalf("storage puts = %v with %d objects, want one", keys, f.storage.objectCount())
@@ -826,6 +906,7 @@ func TestUploadPipeline(t *testing.T) {
 			t.Fatalf("retry with another reference = %v, want ErrOperationConflict", err)
 		}
 		f.wantUsage(t, 5, 0)
+		f.wantCanvas(t, 1, imageObject(first.AssetID, "ref-1", 1, smallImage))
 		f.wantServed(t, first.AssetID, "hello")
 	})
 
@@ -833,12 +914,33 @@ func TestUploadPipeline(t *testing.T) {
 	// without a new reservation or a second write, even when the stage that
 	// failed would now succeed.
 	retries := []struct {
-		name   string
-		setup  func(t *testing.T, f *fixture) context.Context
-		heal   func(f *fixture)
-		first  func(t *testing.T, err error)
-		verify func(t *testing.T, err error)
+		name     string
+		declared string
+		setup    func(t *testing.T, f *fixture) context.Context
+		heal     func(f *fixture)
+		first    func(t *testing.T, err error)
+		verify   func(t *testing.T, err error)
 	}{
+		{
+			name:     "retry after a type mismatch repeats it",
+			declared: "image/webp",
+			setup:    func(t *testing.T, f *fixture) context.Context { return ctx },
+			// Even content of the declared type now repeats the recorded rejection.
+			heal: func(f *fixture) {
+				f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) {
+					inspection := imageOf(data)
+					inspection.MediaType = "image/webp"
+					return inspection, nil
+				})
+			},
+			first: func(t *testing.T, err error) { wantRejection(t, err, media.RejectionTypeMismatch) },
+			verify: func(t *testing.T, err error) {
+				wantRejection(t, err, media.RejectionTypeMismatch)
+				if _, unchanged := err.(*media.Rejection); !unchanged {
+					t.Fatalf("retry = %#v, want a *Rejection returned unwrapped", err)
+				}
+			},
+		},
 		{
 			name: "retry after a failure repeats ErrUploadFailed",
 			setup: func(t *testing.T, f *fixture) context.Context {
@@ -887,6 +989,7 @@ func TestUploadPipeline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := srv.fixture(t)
 			req := f.request("hello", "ref-1")
+			req.DeclaredType = tc.declared
 			_, err := f.uploads.Upload(tc.setup(t, f), req)
 			tc.first(t, err)
 			tc.heal(f)
@@ -896,6 +999,7 @@ func TestUploadPipeline(t *testing.T) {
 				_, err := f.uploads.Upload(ctx, retry)
 				tc.verify(t, err)
 			}
+			f.wantNoObject(t)
 			reserved := f.reservation(t, req)
 			f.wantUsage(t, 0, 0)
 			f.wantGone(t, reserved)
@@ -1152,6 +1256,7 @@ func TestUploadCleanupFailureIsolatesUntilSweep(t *testing.T) {
 			}
 			f.wantUsage(t, 0, 0)
 			f.wantGone(t, reserved)
+			f.wantNoObject(t)
 		})
 	}
 }
@@ -1235,4 +1340,186 @@ func TestUploadOfADeactivatedTenantReleasesItsReservation(t *testing.T) {
 		t.Fatalf("inactive upload stored %d objects (%d puts, want %d)", f.storage.objectCount(), got, puts)
 	}
 	f.wantUsage(t, 0, 0)
+	f.wantNoObject(t)
+}
+
+// US-011 S8, S9, S14: a non-replacing image or GIF upload creates one image
+// object, on top, fitted to the canvas, in the completion's transaction. A
+// retry returns the same asset and object without a second object, and a
+// different upload under the same operation ID is rejected.
+func TestUploadCreatesItsImageObject(t *testing.T) {
+	srv := startServer(t)
+	ctx := context.Background()
+	cases := []struct {
+		name     string
+		declared string
+		inspect  func(data []byte) media.Inspection
+		kind     media.Kind
+		want     canvas.Transform
+	}{
+		{"undeclared image at its natural size", "", imageOf, media.KindImage, smallImage},
+		{
+			name: "declared largest image scaled down to fit", declared: "image/png", kind: media.KindImage,
+			inspect: func(data []byte) media.Inspection {
+				inspection := imageOf(data)
+				inspection.Dimensions = media.Dimensions{Width: 4096, Height: 4096}
+				return inspection
+			},
+			want: canvas.Transform{X: 420, Width: 1080, Height: 1080},
+		},
+		{
+			name: "declared GIF at its frame size", declared: "image/gif", kind: media.KindGIF,
+			inspect: func(data []byte) media.Inspection { return gifOf(data, 300, 200) },
+			want:    canvas.Transform{X: 810, Y: 440, Width: 300, Height: 200},
+		},
+		{
+			name: "GIF sliver keeps one pixel", kind: media.KindGIF,
+			inspect: func(data []byte) media.Inspection { return gifOf(data, 1, 4096) },
+			want:    canvas.Transform{X: 959, Width: 1, Height: 1080},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := srv.fixture(t)
+			text, err := f.canvases.Apply(ctx, f.canvasKey(), canvas.Operation{ID: "text-1"},
+				canvas.CreateObject{Kind: canvas.KindText, Content: "hi", Transform: canvas.Transform{Width: 10, Height: 10}})
+			if err != nil {
+				t.Fatalf("create text object: %v", err)
+			}
+			textObject := canvas.Object{ID: text.ObjectID, Kind: canvas.KindText, Content: "hi", Transform: canvas.Transform{Width: 10, Height: 10}, Z: 1}
+			f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) { return tc.inspect(data), nil })
+			req := f.request("hello", "ref-1")
+			req.DeclaredType = tc.declared
+			result := f.mustUpload(t, req)
+			reserved := f.reservation(t, req)
+			want := media.UploadResult{AssetID: reserved.AssetID, ObjectID: reserved.AssetID, Kind: tc.kind, Usage: media.Usage{QuotaBytes: media.QuotaBytes, UsedBytes: 5}}
+			if result != want {
+				t.Fatalf("Upload = %+v, want %+v", result, want)
+			}
+			object := imageObject(reserved.AssetID, "ref-1", 2, tc.want)
+			f.wantCanvas(t, 2, textObject, object)
+			f.wantServed(t, result.AssetID, "hello")
+
+			for range 2 {
+				retry := req
+				retry.Body = strings.NewReader("hello")
+				if again := f.mustUpload(t, retry); again != result {
+					t.Fatalf("retry = %+v, want %+v", again, result)
+				}
+			}
+			conflicting := req
+			conflicting.ReferenceID = "ref-2"
+			conflicting.Body = strings.NewReader("hello")
+			if _, err := f.uploads.Upload(ctx, conflicting); !errors.Is(err, media.ErrOperationConflict) {
+				t.Fatalf("different upload under the same operation = %v, want ErrOperationConflict", err)
+			}
+			f.wantCanvas(t, 2, textObject, object)
+			f.wantUsage(t, 5, 0)
+			if keys := f.storage.putKeys(); len(keys) != 1 || f.storage.objectCount() != 1 {
+				t.Fatalf("storage puts = %v with %d objects, want one", keys, f.storage.objectCount())
+			}
+		})
+	}
+}
+
+// US-011 S8: a replacement moves its reference and creates no object; audio
+// and video keep the asset-only behavior until US-012.
+func TestUploadWithoutAnImageObject(t *testing.T) {
+	srv := startServer(t)
+
+	t.Run("replacement", func(t *testing.T) {
+		f := srv.fixture(t)
+		original := f.mustUpload(t, f.request("hello", "ref-1"))
+		req := f.request("goodbye", "ref-1")
+		req.Replace = true
+		replaced := f.mustUpload(t, req)
+		if replaced.ObjectID != "" || replaced.AssetID == original.AssetID {
+			t.Fatalf("replacement = %+v, want a new asset without an object", replaced)
+		}
+		retry := req
+		retry.Body = strings.NewReader("goodbye")
+		if again := f.mustUpload(t, retry); again != replaced {
+			t.Fatalf("retry of the replacement = %+v, want %+v", again, replaced)
+		}
+		f.wantCanvas(t, 1, imageObject(original.AssetID, "ref-1", 1, smallImage))
+		f.wantUsage(t, 7, 0)
+	})
+
+	for _, kind := range []media.Kind{media.KindAudio, media.KindVideo} {
+		t.Run(string(kind), func(t *testing.T) {
+			f := srv.fixture(t)
+			f.inspector.set(func(_ context.Context, data []byte) (media.Inspection, error) {
+				inspection := media.Inspection{Kind: kind, MediaType: "application/octet-stream", InputBytes: int64(len(data)), StreamCount: 1, Duration: time.Second}
+				if kind == media.KindVideo {
+					inspection.Dimensions = media.Dimensions{Width: 640, Height: 360}
+				}
+				return inspection, nil
+			})
+			req := f.request("hello", "ref-1")
+			result := f.mustUpload(t, req)
+			if result.ObjectID != "" || result.Kind != kind {
+				t.Fatalf("Upload = %+v, want a %s asset without an object", result, kind)
+			}
+			retry := req
+			retry.Body = strings.NewReader("hello")
+			if again := f.mustUpload(t, retry); again != result {
+				t.Fatalf("retry = %+v, want %+v", again, result)
+			}
+			f.wantNoObject(t)
+			f.wantUsage(t, 5, 0)
+			f.wantServed(t, result.AssetID, "hello")
+		})
+	}
+}
+
+// US-011 S11: concurrent uploads to one canvas, some rejected, each create
+// one object only when confirmed, and the final usage is exactly the
+// confirmed uploads. Completions lock the canvas before the quota while
+// reservations write usage records that reference the canvas, so this also
+// exercises the lock order.
+func TestConcurrentImageUploadsCountOnlyConfirmedOnes(t *testing.T) {
+	f := startServer(t).fixture(t)
+	const uploads = 12
+	results := make([]media.UploadResult, uploads)
+	errs := make([]error, uploads)
+	var wg sync.WaitGroup
+	for i := range uploads {
+		req := f.request(strings.Repeat("x", i+1), fmt.Sprintf("ref-%d", i))
+		if i%3 == 2 {
+			req.DeclaredType = "image/gif"
+		}
+		wg.Go(func() { results[i], errs[i] = f.uploads.Upload(context.Background(), req) })
+	}
+	wg.Wait()
+	var used int64
+	objects := map[string]canvas.Object{}
+	for i := range uploads {
+		if i%3 == 2 {
+			wantRejection(t, errs[i], media.RejectionTypeMismatch)
+			continue
+		}
+		if errs[i] != nil || results[i].ObjectID != results[i].AssetID {
+			t.Fatalf("upload %d = %+v, %v; want success with its object", i, results[i], errs[i])
+		}
+		used += int64(i + 1)
+		objects[results[i].AssetID] = canvas.Object{ID: results[i].AssetID, Kind: canvas.KindImage, Content: fmt.Sprintf("ref-%d", i), Transform: smallImage}
+	}
+	f.wantUsage(t, used, 0)
+	loaded, err := f.canvases.Load(context.Background(), f.canvasKey())
+	if err != nil {
+		t.Fatalf("Load canvas: %v", err)
+	}
+	if loaded.Revision != int64(len(objects)) || len(loaded.Objects) != len(objects) {
+		t.Fatalf("canvas revision %d with %d objects, want %d of each", loaded.Revision, len(loaded.Objects), len(objects))
+	}
+	for i, object := range loaded.Objects {
+		want := objects[object.ID]
+		want.Z = int64(i + 1)
+		if object != want {
+			t.Fatalf("object %d = %+v, want %+v", i, object, want)
+		}
+	}
+	if got := f.storage.objectCount(); got != len(objects) {
+		t.Fatalf("storage holds %d objects, want the %d confirmed uploads", got, len(objects))
+	}
 }

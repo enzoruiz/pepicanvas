@@ -14,6 +14,7 @@ import {
   listInvitations,
   listMembers,
   listMemberships,
+  mediaContentUrl,
   revokeInvitation,
   revokeMember,
   setDimensions,
@@ -1038,12 +1039,104 @@ describe("uploadMedia", () => {
       path: `/api/tenants/${tenantId}/canvases/${canvasId}/media/uploads?operation_id=op%2B1%2Fx&reference_id=ref%262%3Dy`,
       headers: {
         "X-CSRF-Token": "csrf",
-        "Content-Type": "application/octet-stream",
+        "Content-Type": "image/png",
       },
       body: undefined,
       raw: file,
     });
   });
+
+  it.each(["image/png", "image/jpeg", "image/webp", "image/gif"])(
+    "declares the supported image type %s",
+    async (type) => {
+      replies.push(json(201, uploaded));
+
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file: new File(["1"], "x", { type }),
+      });
+
+      expect(calls[0].headers["Content-Type"]).toBe(type);
+    },
+  );
+
+  it.each(["", "audio/mpeg", "video/mp4", "application/pdf", "text/plain"])(
+    "sends the undeclared type for a file of type %o",
+    async (type) => {
+      replies.push(json(201, uploaded));
+
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file: new File(["1"], "x", { type }),
+      });
+
+      expect(calls[0].headers["Content-Type"]).toBe("application/octet-stream");
+    },
+  );
+
+  it.each(["image/svg+xml", "image/bmp", "image/tiff"])(
+    "rejects the unsupported image type %s before any request",
+    async (type) => {
+      const result = await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file: new File(["<svg/>"], "x.svg", { type }),
+      });
+
+      expect(result).toStrictEqual({
+        ok: false,
+        error: "media_rejected",
+        reason: "unsupported_kind",
+      });
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it("reports the canvas object the upload created", async () => {
+    replies.push(
+      json(201, { ...uploaded, object_id: "dddddddddddddddddddddddddddddddd" }),
+    );
+
+    expect(
+      await uploadMedia("csrf", tenantId, canvasId, {
+        operationId: "op-1",
+        referenceId: "ref-1",
+        file,
+      }),
+    ).toStrictEqual({
+      ok: true,
+      value: {
+        assetId: "dddddddddddddddddddddddddddddddd",
+        kind: "image",
+        objectId: "dddddddddddddddddddddddddddddddd",
+        usage,
+      },
+    });
+  });
+
+  it.each([undefined, null, ""])(
+    "reports no canvas object for object_id %o",
+    async (objectId) => {
+      replies.push(json(201, { ...uploaded, object_id: objectId }));
+
+      expect(
+        await uploadMedia("csrf", tenantId, canvasId, {
+          operationId: "op-1",
+          referenceId: "ref-1",
+          file,
+        }),
+      ).toStrictEqual({
+        ok: true,
+        value: {
+          assetId: "dddddddddddddddddddddddddddddddd",
+          kind: "image",
+          usage,
+        },
+      });
+    },
+  );
 
   it("asks for a replacement with replace=true", async () => {
     replies.push(json(201, uploaded));
@@ -1090,6 +1183,9 @@ describe("uploadMedia", () => {
     "duration_exceeded",
     "frame_count_exceeded",
     "stream_count_exceeded",
+    "type_mismatch",
+    "decode_failed",
+    "resources_exceeded",
   ])("reports the rejection reason %s", async (reason) => {
     replies.push(json(422, { error: "media_rejected", reason }));
 
@@ -1136,6 +1232,7 @@ describe("uploadMedia", () => {
     ["no kind", { kind: undefined }],
     ["no usage", { usage: undefined }],
     ["a malformed usage", { usage: { ...usageBody, used_bytes: "0" } }],
+    ["a numeric object ID", { object_id: 7 }],
   ])("rejects an answer with %s", async (_, change) => {
     replies.push(json(201, { ...uploaded, ...change }));
 
@@ -1158,5 +1255,24 @@ describe("uploadMedia", () => {
         file,
       }),
     ).toEqual({ ok: false, error: "unavailable" });
+  });
+});
+
+describe("mediaContentUrl", () => {
+  it("builds the content route of a reference in its canvas", () => {
+    expect(mediaContentUrl(tenantId, canvasId, "ref-1")).toBe(
+      `/api/tenants/${tenantId}/canvases/${canvasId}/media/references/ref-1/content`,
+    );
+  });
+
+  it("encodes every segment", () => {
+    expect(mediaContentUrl("a/b", "c?d", "../e#f")).toBe(
+      "/api/tenants/a%2Fb/canvases/c%3Fd/media/references/..%2Fe%23f/content",
+    );
+  });
+
+  // A dot segment would be normalized by the browser into another route.
+  it.each(["", ".", ".."])("has no URL for the reference %o", (reference) => {
+    expect(mediaContentUrl(tenantId, canvasId, reference)).toBeUndefined();
   });
 });

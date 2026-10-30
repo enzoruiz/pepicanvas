@@ -12,9 +12,11 @@ type Limits struct {
 	MaxGIFBytes            int64
 	MaxAudioBytes          int64
 	MaxVideoBytes          int64
-	MaxWidth               int
-	MaxHeight              int
-	MaxPixels              int64
+	MaxWidth               int   // Video only.
+	MaxHeight              int   // Video only.
+	MaxPixels              int64 // Video only.
+	MaxImageWidth          int   // Images and every GIF frame.
+	MaxImageHeight         int   // Images and every GIF frame.
 	MaxGIFDuration         time.Duration
 	MaxAudioDuration       time.Duration
 	MaxVideoDuration       time.Duration
@@ -31,13 +33,15 @@ type Limits struct {
 // values are configurable safeguards, not universal definitions of valid media.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxImageBytes:          25 * mebibyte,
-		MaxGIFBytes:            25 * mebibyte,
+		MaxImageBytes:          10_000_000,
+		MaxGIFBytes:            10_000_000,
 		MaxAudioBytes:          50 * mebibyte,
 		MaxVideoBytes:          250 * mebibyte,
 		MaxWidth:               3840,
 		MaxHeight:              3840,
 		MaxPixels:              8_294_400,
+		MaxImageWidth:          4096,
+		MaxImageHeight:         4096,
 		MaxGIFDuration:         120 * time.Second,
 		MaxAudioDuration:       600 * time.Second,
 		MaxVideoDuration:       600 * time.Second,
@@ -56,6 +60,7 @@ func (limits Limits) Validate() error {
 	if limits.MaxImageBytes <= 0 || limits.MaxGIFBytes <= 0 ||
 		limits.MaxAudioBytes <= 0 || limits.MaxVideoBytes <= 0 ||
 		limits.MaxWidth <= 0 || limits.MaxHeight <= 0 || limits.MaxPixels <= 0 ||
+		limits.MaxImageWidth <= 0 || limits.MaxImageHeight <= 0 ||
 		limits.MaxGIFDuration <= 0 || limits.MaxAudioDuration <= 0 || limits.MaxVideoDuration <= 0 ||
 		limits.MaxGIFFrames <= 0 || limits.MaxStreams <= 0 ||
 		limits.InspectionTimeout <= 0 || limits.MaxCapturedOutputBytes <= 0 ||
