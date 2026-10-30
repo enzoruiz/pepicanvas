@@ -247,8 +247,10 @@ func (a *api) uploadMedia(w http.ResponseWriter, r *http.Request) {
 // not found. The type is sniffed from the stored bytes and must be one of
 // the image types, matching the asset's kind; anything else is an internal
 // error, never served under a guessed type. The answer is private and
-// revalidated against the asset ID as its ETag. Neither the URL nor the logs
-// hold a storage key.
+// revalidated against the asset ID as its ETag. The caller is reauthorized
+// after the read and before the answer, revalidation included, so bytes read
+// before a revocation are never served after it (US-006 S8). Neither the URL
+// nor the logs hold a storage key.
 func (a *api) mediaContent(w http.ResponseWriter, r *http.Request) {
 	_, principal, ok := a.authenticate(w, r)
 	if !ok {
@@ -274,9 +276,11 @@ func (a *api) mediaContent(w http.ResponseWriter, r *http.Request) {
 	}
 	etag := strconv.Quote(asset.ID)
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
-		w.Header().Set("ETag", etag)
-		httpx.Revalidate(w)
-		w.WriteHeader(http.StatusNotModified)
+		a.deliverWith(w, r, principal, key, func() {
+			w.Header().Set("ETag", etag)
+			httpx.Revalidate(w)
+			w.WriteHeader(http.StatusNotModified)
+		})
 		return
 	}
 	body, err := a.Storage.Open(r.Context(), asset.StorageKey)
@@ -296,10 +300,18 @@ func (a *api) mediaContent(w http.ResponseWriter, r *http.Request) {
 		a.responder.Error(w, r, httpx.ErrInternal, errors.New("stored bytes are not an image of the asset's kind"))
 		return
 	}
+	a.deliverWith(w, r, principal, key, func() {
+		a.writeContent(w, r, key, asset, mediaType, head, body)
+	})
+}
+
+// writeContent writes the image answer: headers, then the sniffed head and the
+// rest of the stored bytes, nothing for HEAD.
+func (a *api) writeContent(w http.ResponseWriter, r *http.Request, key canvas.Key, asset media.Asset, mediaType string, head []byte, body io.Reader) {
 	h := w.Header()
 	h.Set("Content-Type", mediaType)
 	h.Set("Content-Length", strconv.FormatInt(asset.DeclaredBytes, 10))
-	h.Set("ETag", etag)
+	h.Set("ETag", strconv.Quote(asset.ID))
 	httpx.Revalidate(w)
 	a.Logger.LogAttrs(r.Context(), slog.LevelInfo, "media content served",
 		slog.String("tenant_id", key.TenantID),

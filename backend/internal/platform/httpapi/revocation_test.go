@@ -138,8 +138,11 @@ func (u unusedStorage) Inspect(context.Context, io.Reader) (media.Inspection, er
 // object, served over the actor-recording media store.
 type revocationEnv struct {
 	*env
-	trace                *trace
-	media                *actorMedia
+	trace *trace
+	media *actorMedia
+	// store and storage, when set, replace actorMedia and unusedStorage.
+	store                media.Store
+	storage              media.Storage
 	owner, moderator     streamer
 	ownerID, moderatorID access.AccountID
 }
@@ -176,7 +179,13 @@ func (r *revocationEnv) serve(keep int, revoked access.AccountID) {
 	config.Canvases = tracedCanvases{CanvasStore: r.config.Canvases, trace: r.trace}
 	r.media.revoked = revoked
 	config.Media = r.media
+	if r.store != nil {
+		config.Media = r.store
+	}
 	config.Storage = unusedStorage{r.t}
+	if r.storage != nil {
+		config.Storage = r.storage
+	}
 	config.Inspector = unusedStorage{r.t}
 	handler, err := httpapi.New(config)
 	if err != nil {
