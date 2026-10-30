@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 )
@@ -36,10 +38,17 @@ func tracerFromEnv(getenv func(string) string, logger *slog.Logger) (*telemetry.
 		_ = file.Close()
 		return nil, nil, err
 	}
+	return tracer, stopTracer(tracer, file, logger, shutdownTimeout), nil
+}
+
+// stopTracer returns the idempotent function that closes tracer within
+// timeout, then file, and logs the tracer's counters: at info level, or at
+// warn level with a fixed reason when either close fails.
+func stopTracer(tracer *telemetry.Tracer, file io.Closer, logger *slog.Logger, timeout time.Duration) func() {
 	var once sync.Once
-	stop := func() {
+	return func() {
 		once.Do(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			// Close fails only with ctx's error; a file error names the
 			// path, so it is reported by a fixed reason.
@@ -64,5 +73,4 @@ func tracerFromEnv(getenv func(string) string, logger *slog.Logger) (*telemetry.
 			logger.Info("telemetry stopped", attrs...)
 		})
 	}
-	return tracer, stop, nil
 }

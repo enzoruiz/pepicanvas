@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -304,5 +306,93 @@ func TestServerExportsTheSpansOfARequestByCorrelation(t *testing.T) {
 		if strings.Contains(string(data), s) {
 			t.Errorf("trace file contains the %s", name)
 		}
+	}
+}
+
+// blockingExporter signals each export and blocks it until its context ends.
+type blockingExporter struct{ called chan struct{} }
+
+func (e blockingExporter) Export(ctx context.Context, _ []telemetry.SpanData) error {
+	select {
+	case e.called <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// okExporter accepts every export.
+type okExporter struct{}
+
+func (okExporter) Export(context.Context, []telemetry.SpanData) error { return nil }
+
+// failingCloser counts its calls and fails with a path-like decoy.
+type failingCloser struct{ calls int }
+
+func (c *failingCloser) Close() error {
+	c.calls++
+	return errors.New("close /var/private-decoy/spans.jsonl: input/output error")
+}
+
+// S9, L9: when the tracer misses its close deadline or the span file fails to
+// close, stopping logs telemetry stopped once at warn level with the four
+// counters and a fixed reason, never the cause's text; the file is closed
+// once even when the deadline passes first.
+func TestStopTracerWarnsWithCountersAndAFixedReason(t *testing.T) {
+	cases := map[string]struct {
+		exporter telemetry.Exporter
+		reason   string
+		counts   map[string]float64
+	}{
+		"close deadline": {
+			exporter: blockingExporter{called: make(chan struct{}, 1)},
+			reason:   context.DeadlineExceeded.Error(),
+			counts:   map[string]float64{"exported": 0, "dropped": 0, "failed": 3, "discarded": 0},
+		},
+		"file close failure": {
+			exporter: okExporter{},
+			reason:   "span file close failed",
+			counts:   map[string]float64{"exported": 3, "dropped": 0, "failed": 0, "discarded": 0},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			logger, logs := testLogger()
+			tracer, err := telemetry.New(telemetry.Config{Exporter: c.exporter, Interval: time.Millisecond, Logger: logger})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := telemetry.WithTracer(context.Background(), tracer)
+			for range 3 {
+				_, span := telemetry.Start(ctx, telemetry.SpanHTTPRequest)
+				span.End(nil)
+			}
+			if blocking, ok := c.exporter.(blockingExporter); ok {
+				<-blocking.called
+			}
+			closer := &failingCloser{}
+			stop := stopTracer(tracer, closer, logger, 50*time.Millisecond)
+			stop()
+			stop()
+
+			if closer.calls != 1 {
+				t.Fatalf("span file closed %d times, want once", closer.calls)
+			}
+			if strings.Count(logs.String(), "telemetry stopped") != 1 {
+				t.Fatalf("telemetry stopped logged other than once:\n%s", logs)
+			}
+			record := logRecord(logs.String(), "telemetry stopped")
+			want := map[string]any{"level": "WARN", "msg": "telemetry stopped", "error": c.reason}
+			for field, count := range c.counts {
+				want[field] = count
+			}
+			delete(record, "time")
+			if !maps.Equal(record, want) {
+				t.Fatalf("telemetry stopped = %v, want %v", record, want)
+			}
+			if strings.Contains(logs.String(), "private-decoy") || strings.Contains(logs.String(), "input/output") {
+				t.Fatalf("logs echo the close error:\n%s", logs)
+			}
+		})
 	}
 }
