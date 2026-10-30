@@ -50,6 +50,9 @@ type Tracer struct {
 	done        chan struct{}
 
 	exported, dropped, failed, discarded atomic.Uint64
+
+	// reportedDrops is the dropped count last logged; only the worker uses it.
+	reportedDrops uint64
 }
 
 // New starts a tracer and its export worker.
@@ -123,6 +126,12 @@ func (t *Tracer) Close(ctx context.Context) error {
 	}
 	t.mu.Unlock()
 
+	// A worker that already exited has drained the queue, whatever ctx says.
+	select {
+	case <-t.done:
+		return nil
+	default:
+	}
 	select {
 	case <-t.done:
 		return nil
@@ -145,6 +154,7 @@ func (t *Tracer) run() {
 		case data, ok := <-t.queue:
 			if !ok {
 				t.flush(batch)
+				t.reportDrops()
 				return
 			}
 			batch = append(batch, data)
@@ -153,10 +163,23 @@ func (t *Tracer) run() {
 				batch = nil
 			}
 		case <-ticker.C:
+			t.reportDrops()
 			t.flush(batch)
 			batch = nil
 		}
 	}
+}
+
+// reportDrops logs the spans dropped since the last report, at most once per
+// interval and off the path that ends spans.
+func (t *Tracer) reportDrops() {
+	total := t.dropped.Load()
+	if total == t.reportedDrops {
+		return
+	}
+	// Counts only: dropped spans are never described.
+	t.config.Logger.Warn("telemetry spans dropped", "spans", total-t.reportedDrops, "dropped_total", total)
+	t.reportedDrops = total
 }
 
 // flush exports batch, or discards it once Close has given up waiting.
