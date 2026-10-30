@@ -17,6 +17,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 )
 
 // DefaultReservationTTL is how long a pending upload holds its reservation
@@ -126,8 +127,12 @@ func (s *MediaStore) Usage(ctx context.Context, key media.CanvasKey) (media.Usag
 // Complete with Object, replayed or not, carries the object ID. A command with
 // an acting account that is no longer a member of the tenant returns
 // access.ErrAccessDenied and writes nothing, without a replay either (US-006);
-// Abandon and system work, without an actor, are not checked.
-func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (media.Result, error) {
+// Abandon and system work, without an actor, are not checked. It runs in a
+// postgres span of the caller's trace.
+func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation media.Operation, command media.Command) (_ media.Result, err error) {
+	var replay bool
+	ctx, span := telemetry.Start(ctx, telemetry.SpanPostgres, telemetry.Attr("operation", "media.apply"))
+	defer func() { endApply(span, replay, err) }()
 	if err := media.ValidateCommand(key, operation, command); err != nil {
 		return media.Result{}, err
 	}
@@ -135,7 +140,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 	complete, _ := command.(media.Complete)
 	var result media.Result
 	var written bool
-	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		written = false
 		q := db.New(tx)
 		var area canvas.Dimensions
@@ -187,7 +192,7 @@ func (s *MediaStore) Apply(ctx context.Context, key media.CanvasKey, operation m
 			return media.ErrInactive
 		}
 		if err != nil || found {
-			result = replayed
+			result, replay = replayed, found
 			if complete.Object {
 				result.ObjectID = complete.AssetID
 			}

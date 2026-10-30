@@ -42,6 +42,10 @@ type ReconcilerConfig struct {
 	// NewCorrelation returns the correlation ID of a pass that has none; it
 	// defaults to 32 random lowercase hex characters.
 	NewCorrelation func() string
+	// Correlate returns ctx carrying the pass's correlation ID, so every
+	// store and storage call of the pass relates to it. It defaults to
+	// returning ctx unchanged.
+	Correlate func(ctx context.Context, correlationID string) context.Context
 }
 
 // Report is the outcome of one reconciliation pass. It holds counts only and
@@ -126,6 +130,9 @@ func NewReconciler(config ReconcilerConfig) (*Reconciler, error) {
 	}
 	if config.NewCorrelation == nil {
 		config.NewCorrelation = newCorrelation
+	}
+	if config.Correlate == nil {
+		config.Correlate = func(ctx context.Context, _ string) context.Context { return ctx }
 	}
 	abort, cancelAbort := context.WithCancel(context.Background())
 	return &Reconciler{
@@ -292,6 +299,7 @@ func (r *Reconciler) run() {
 
 // pass runs the garbage, orphan, and ready steps and records the report.
 func (r *Reconciler) pass(ctx context.Context, correlationID string) (Report, error) {
+	ctx = r.config.Correlate(ctx, correlationID)
 	report := Report{CorrelationID: correlationID, StartedAt: r.config.Now()}
 	var first error
 	complete := true

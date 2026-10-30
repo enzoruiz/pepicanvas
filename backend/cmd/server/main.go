@@ -10,7 +10,7 @@
 // media_unavailable. Object locks are held in memory, in lock sessions bound
 // to registry leases (US-020). Shutdown stops HTTP, then the publisher and
 // the hub, then the reconciler, then the relay, then the lock sessions and
-// the lock manager, then the registry.
+// the lock manager, then the registry, then the tracer.
 //
 // Usage:
 //
@@ -28,6 +28,9 @@
 //	PEPICANVAS_ALLOWED_ORIGIN  exact editor origin, scheme://host[:port] (required)
 //	PEPICANVAS_LISTEN_ADDR     listen address (default 127.0.0.1:8080)
 //	PEPICANVAS_STATIC_DIR      built frontend directory (optional)
+//	PEPICANVAS_TRACE_FILE      owner-only file of exported spans, one JSON
+//	                           object per line (optional; unset keeps export
+//	                           disabled and local logs correlated)
 //
 // Media storage (optional; setting any of the first six requires the five
 // without a default, or the server refuses to start):
@@ -75,6 +78,8 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/password"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/s3"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/tracing"
 	"github.com/enzoruiz/pepicanvas/backend/internal/realtime"
 	"github.com/enzoruiz/pepicanvas/backend/internal/revocation"
 	"github.com/enzoruiz/pepicanvas/backend/internal/subscription"
@@ -185,6 +190,12 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 			return err
 		}
 	}
+	// So does an unusable trace file. The tracer stops last, after the hub.
+	tracer, stopTracer, err := tracerFromEnv(getenv, logger)
+	if err != nil {
+		return err
+	}
+	defer stopTracer()
 
 	startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
@@ -206,7 +217,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	publisher, err := outbox.NewPublisher(outbox.Config{
 		Store:  postgres.NewOutboxStore(pool),
-		Sink:   outbox.NewHubSink(hub),
+		Sink:   tracing.Sink(outbox.NewHubSink(tracing.Actor(hub, tracer)), tracer),
 		Logger: logger,
 	})
 	if err != nil {
@@ -249,7 +260,10 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 			return fmt.Errorf("media storage: %w", err)
 		}
 		storage = objects
-		if reconciler, err = media.NewReconciler(media.ReconcilerConfig{Store: mediaStore, Storage: objects}); err != nil {
+		if reconciler, err = media.NewReconciler(media.ReconcilerConfig{Store: mediaStore, Storage: objects, Correlate: func(ctx context.Context, id string) context.Context {
+			// Passes run outside requests, so they also need the tracer to export.
+			return telemetry.WithTracer(correlate(ctx, id), tracer)
+		}}); err != nil {
 			return err
 		}
 	}
@@ -281,6 +295,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		Ingress:     in,
 		Logger:      logger,
 		Limits:      httpapi.DefaultLimits,
+		Tracer:      tracer,
 	})
 	if err != nil {
 		return err
@@ -391,8 +406,8 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 }
 
 // correlate carries a stored cut's correlation ID into the registry's context,
-// so its logs relate to the deactivation request. A missing or malformed ID
-// is dropped.
+// so its logs relate to the deactivation request, and a reconciliation pass's
+// into its store and storage calls. A missing or malformed ID is dropped.
 func correlate(ctx context.Context, id string) context.Context {
 	parsed, err := correlation.Parse(id)
 	if err != nil {

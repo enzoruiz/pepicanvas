@@ -17,6 +17,7 @@ import (
 	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/outbox"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/db"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 )
 
 // DefaultOperationRetention is how long an accepted operation ID replays its
@@ -131,8 +132,12 @@ func (s *CanvasStore) Load(ctx context.Context, key canvas.Key) (canvas.Canvas, 
 // returns canvas.ErrOperationConflict when it differs. A new mutation of a
 // tenant whose subscription is not active returns canvas.ErrInactive and
 // writes nothing; an equal retry of a mutation committed before the
-// deactivation still replays its result, since a replay has no effect.
-func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (canvas.Result, error) {
+// deactivation still replays its result, since a replay has no effect. It
+// runs in a postgres span of the caller's trace.
+func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canvas.Operation, mutation canvas.Mutation) (_ canvas.Result, err error) {
+	var replay bool
+	ctx, span := telemetry.Start(ctx, telemetry.SpanPostgres, telemetry.Attr("operation", "canvas.apply"))
+	defer func() { endApply(span, replay, err) }()
 	if err := canvas.Validate(key, operation, mutation); err != nil {
 		return canvas.Result{}, err
 	}
@@ -142,7 +147,6 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		return canvas.Result{}, err
 	}
 	var result canvas.Result
-	var replay bool
 	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := db.New(tx)
 		if _, err := q.LockCanvas(ctx, db.LockCanvasParams{TenantID: key.TenantID, CanvasID: key.CanvasID}); errors.Is(err, pgx.ErrNoRows) {
@@ -195,6 +199,20 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		s.committed(key)
 	}
 	return result, nil
+}
+
+// endApply ends the span of a store transaction with its closed outcome:
+// committed, replayed, or error. The error text is never exported.
+func endApply(span *telemetry.Span, replay bool, err error) {
+	switch {
+	case err != nil:
+		span.SetAttr("outcome", "error")
+	case replay:
+		span.SetAttr("outcome", "replayed")
+	default:
+		span.SetAttr("outcome", "committed")
+	}
+	span.End(err)
 }
 
 // retained returns the result of an equal retry of an operation accepted

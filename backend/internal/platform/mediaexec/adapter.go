@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
+	"github.com/enzoruiz/pepicanvas/backend/internal/platform/telemetry"
 )
 
 const maxCapturedOutputBytes = int64(16 * 1024 * 1024)
@@ -59,7 +60,14 @@ func New(config Config, runner Runner) (*Adapter, error) {
 // A failure the content causes is a *media.Rejection naming the broken rule;
 // timeout, cancellation, containment, staging I/O, output overflow, cleanup
 // and execution failures are an *Error.
+// The inspection runs in a media.inspect span and each command in a
+// subprocess span of the caller's trace; the commands' environment is left
+// unchanged, since the tools cannot consume a trace context.
 func (adapter *Adapter) Inspect(parent context.Context, source io.Reader) (inspection media.Inspection, resultErr error) {
+	parent, span := telemetry.Start(parent, telemetry.SpanMediaInspect)
+	// Deferred first, so it ends the span with the final error of the
+	// cleanup below.
+	defer func() { endSpan(span, resultErr) }()
 	ctx, cancel := context.WithTimeout(parent, adapter.config.Limits.InspectionTimeout)
 	defer cancel()
 	rawExecution, beginResult := adapter.runner.Begin(ctx, adapter.config.Limits)
@@ -223,7 +231,9 @@ func boundedReadCapacity(limit, written int64, capacity int) int {
 }
 
 // run returns the command's stdout and whether it wrote to stderr.
-func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *captureBudget, command Command) ([]byte, bool, error) {
+func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *captureBudget, command Command) (_ []byte, _ bool, err error) {
+	_, span := telemetry.Start(ctx, telemetry.SpanSubprocess, telemetry.Attr("operation", adapter.tool(command.Path)))
+	defer func() { endSpan(span, err) }()
 	if ctx.Err() != nil {
 		return nil, false, newError(ErrorTimeout)
 	}
@@ -242,6 +252,38 @@ func (adapter *Adapter) run(ctx context.Context, execution Execution, budget *ca
 		return nil, false, newError(ErrorTimeout)
 	}
 	return capture.output(), capture.diagnosed(), nil
+}
+
+// tool names a configured executable by its role, never by its path.
+func (adapter *Adapter) tool(path string) string {
+	switch path {
+	case adapter.config.FFprobePath:
+		return "ffprobe"
+	case adapter.config.FFmpegPath:
+		return "ffmpeg"
+	default:
+		return "unknown"
+	}
+}
+
+// endSpan ends span with outcome ok or the fixed code of the adapter error;
+// no message, path, or argument is exported.
+func endSpan(span *telemetry.Span, err error) {
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+		var adapterError *Error
+		var rejection *media.Rejection
+		switch {
+		case errors.As(err, &adapterError):
+			outcome = string(adapterError.Code())
+		case errors.As(err, &rejection):
+			// A content rejection names its closed rule, never tool output.
+			outcome = string(rejection.Code())
+		}
+	}
+	span.SetAttr("outcome", outcome)
+	span.End(err)
 }
 
 func removeArgument(arguments []string, target string) []string {
