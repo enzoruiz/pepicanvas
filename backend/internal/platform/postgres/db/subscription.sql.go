@@ -312,7 +312,7 @@ func (q *Queries) InsertOwnedTenant(ctx context.Context, arg InsertOwnedTenantPa
 }
 
 const listPendingCuts = `-- name: ListPendingCuts :many
-SELECT id, tenant_id, version, correlation_id, created_at
+SELECT id, kind, tenant_id, account_id, version, correlation_id, created_at
 FROM access_cuts
 WHERE applied_at IS NULL
 ORDER BY id
@@ -321,12 +321,16 @@ LIMIT $1
 
 type ListPendingCutsRow struct {
 	ID            int64
+	Kind          string
 	TenantID      string
+	AccountID     pgtype.Text
 	Version       int64
 	CorrelationID pgtype.Text
 	CreatedAt     pgtype.Timestamptz
 }
 
+// Deactivation and revocation cuts share one outbox; account_id names the
+// revoked account of a revocation cut.
 func (q *Queries) ListPendingCuts(ctx context.Context, limit int32) ([]ListPendingCutsRow, error) {
 	rows, err := q.db.Query(ctx, listPendingCuts, limit)
 	if err != nil {
@@ -338,7 +342,9 @@ func (q *Queries) ListPendingCuts(ctx context.Context, limit int32) ([]ListPendi
 		var i ListPendingCutsRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.Kind,
 			&i.TenantID,
+			&i.AccountID,
 			&i.Version,
 			&i.CorrelationID,
 			&i.CreatedAt,

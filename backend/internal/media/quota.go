@@ -17,6 +17,10 @@ const QuotaBytes int64 = 1_000_000_000
 // operation identifier.
 const MaxIdentifierBytes = 128
 
+// MaxObjectSide bounds each side of a Complete object's natural size. It
+// equals canvas.MaxObjectSize, which this package does not import.
+const MaxObjectSide = 32768
+
 // Errors returned by ValidateCommand and by Store implementations.
 var (
 	// ErrInvalid reports a command rejected before it reaches storage.
@@ -76,10 +80,13 @@ type CanvasKey struct {
 }
 
 // Operation identifies one client intent. Retrying the same command with the
-// same ID returns the original result without a second effect.
+// same ID returns the original result without a second effect. AccountID is
+// the acting account, whose membership the store rechecks at the commit; it
+// is empty for system work and is not part of the intent's fingerprint.
 type Operation struct {
 	ID            string
 	CorrelationID string
+	AccountID     string
 }
 
 // Usage is the committed accounting of one canvas. UsedBytes counts ready
@@ -121,10 +128,20 @@ type Reserve struct {
 // used quota, and ReferenceID is attached to it. For a replacing reservation
 // ReferenceID must be the replaced reference, which moves to the new asset;
 // the old asset is released when that was its last reference.
+//
+// With Object, the same transaction also creates the canvas image object that
+// shows the asset: its ID is the asset ID, its content ReferenceID, and it is
+// placed from the natural size ObjectWidth x ObjectHeight. The size is set
+// exactly when Object is. The fingerprint includes Object but not the size:
+// the size is decoded from the same stored bytes as the rest of the command,
+// so it adds no intent, and a retry that replays a ready asset cannot read it.
 type Complete struct {
-	AssetID     string
-	ReferenceID string
-	Kind        Kind
+	AssetID      string
+	ReferenceID  string
+	Kind         Kind
+	Object       bool
+	ObjectWidth  int
+	ObjectHeight int
 }
 
 // AbandonReason says why a pending asset will never become ready.
@@ -174,9 +191,11 @@ type Asset struct {
 }
 
 // Result is the committed outcome of one command. StorageKey is set by
-// Reserve. Usage is the canvas accounting right after the command committed.
+// Reserve, and ObjectID, equal to AssetID, by a Complete with Object. Usage is
+// the canvas accounting right after the command committed.
 type Result struct {
 	AssetID    string
+	ObjectID   string
 	StorageKey string
 	Usage      Usage
 }
@@ -197,6 +216,9 @@ type Store interface {
 	Apply(ctx context.Context, key CanvasKey, operation Operation, command Command) (Result, error)
 	// Ready returns a ready asset, or ErrNotFound for any other state.
 	Ready(ctx context.Context, key CanvasKey, assetID string) (Asset, error)
+	// ReadyReference returns the ready asset a reference of the canvas names,
+	// or ErrNotFound for a missing reference or an asset in any other state.
+	ReadyReference(ctx context.Context, key CanvasKey, referenceID string) (Asset, error)
 	// Collect releases expired reservations and returns up to limit assets
 	// whose stored bytes must be deleted.
 	Collect(ctx context.Context, limit int) ([]Garbage, error)
@@ -284,6 +306,15 @@ func (c Complete) validate() error {
 	if !c.Kind.Valid() {
 		return fmt.Errorf("%w: unsupported media kind", ErrInvalid)
 	}
+	if !c.Object {
+		if c.ObjectWidth != 0 || c.ObjectHeight != 0 {
+			return fmt.Errorf("%w: only a completion with an object has an object size", ErrInvalid)
+		}
+		return nil
+	}
+	if c.ObjectWidth < 1 || c.ObjectWidth > MaxObjectSide || c.ObjectHeight < 1 || c.ObjectHeight > MaxObjectSide {
+		return fmt.Errorf("%w: object size must be within 1 and %d", ErrInvalid, MaxObjectSide)
+	}
 	return nil
 }
 
@@ -322,8 +353,14 @@ func (c Reserve) fields() []string {
 	return []string{"reserve", strconv.FormatInt(c.DeclaredBytes, 10), c.ReplacesReference}
 }
 
+// A Complete without Object keeps the fields it had before objects existed,
+// so its retained operations still replay across the upgrade.
 func (c Complete) fields() []string {
-	return []string{"complete", c.AssetID, c.ReferenceID, string(c.Kind)}
+	fields := []string{"complete", c.AssetID, c.ReferenceID, string(c.Kind)}
+	if c.Object {
+		fields = append(fields, "object")
+	}
+	return fields
 }
 
 func (c Abandon) fields() []string {

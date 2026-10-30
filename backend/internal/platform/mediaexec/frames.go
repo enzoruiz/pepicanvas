@@ -17,7 +17,9 @@ type frame struct {
 	Height int `json:"height"`
 }
 
-func mergeGIFFrames(inspection media.Inspection, data []byte) (media.Inspection, error) {
+// mergeGIFFrames records one decoded size per declared frame. Every decoded
+// frame must measure exactly the declared stream size.
+func mergeGIFFrames(inspection media.Inspection, declared media.Dimensions, data []byte) (media.Inspection, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var document frameDocument
@@ -31,7 +33,7 @@ func mergeGIFFrames(inspection media.Inspection, data []byte) (media.Inspection,
 
 	dimensions := make([]media.Dimensions, len(document.Frames))
 	for index, frame := range document.Frames {
-		if frame.Width <= 0 || frame.Height <= 0 {
+		if frame.Width <= 0 || frame.Height <= 0 || frame.Width != declared.Width || frame.Height != declared.Height {
 			return media.Inspection{}, newError(ErrorInvalidFrames)
 		}
 		dimensions[index] = media.Dimensions{Width: frame.Width, Height: frame.Height}

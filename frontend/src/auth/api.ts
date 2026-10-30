@@ -1,6 +1,6 @@
 // Client for the account, session, activation, deactivation, invitation,
-// membership, canvas, and media API (US-001, US-002, US-003, US-004,
-// US-005, US-007, US-016). Responses are reduced to a closed set of outcomes;
+// membership, member, canvas, and media API (US-001, US-002, US-003, US-004,
+// US-005, US-006, US-007, US-016). Responses are reduced to a closed set of outcomes;
 // server text never reaches the UI.
 
 import type { CanvasObject } from "../canvas/CanvasSurface";
@@ -69,6 +69,19 @@ export interface Membership {
   role: "moderator";
 }
 
+// A moderator of the owner's tenant (US-006). acceptedAt is null when no
+// accepted invitation records the acceptance.
+export interface Member {
+  accountId: string;
+  email: string;
+  acceptedAt: Date | null;
+}
+
+export interface MemberRevocation {
+  tenantId: string;
+  accountId: string;
+}
+
 // The aggregate storage accounting of a canvas (US-016). It never names an
 // asset or the size of one.
 export interface MediaUsage {
@@ -81,6 +94,8 @@ export interface MediaUsage {
 export interface UploadedMedia {
   assetId: string;
   kind: string;
+  // The canvas object the upload created, when it created one (US-011).
+  objectId?: string;
   usage: MediaUsage;
 }
 
@@ -124,7 +139,10 @@ export type MediaRejection =
   | "dimensions_exceeded"
   | "duration_exceeded"
   | "frame_count_exceeded"
-  | "stream_count_exceeded";
+  | "stream_count_exceeded"
+  | "type_mismatch"
+  | "decode_failed"
+  | "resources_exceeded";
 
 // reason is set only on a media_rejected failure with a known category.
 export type MediaResult<T> =
@@ -162,6 +180,18 @@ const knownRejections = new Set<MediaRejection>([
   "duration_exceeded",
   "frame_count_exceeded",
   "stream_count_exceeded",
+  "type_mismatch",
+  "decode_failed",
+  "resources_exceeded",
+]);
+
+// The image types an upload may declare (US-011); any other file is sent
+// undeclared and the server inspects its content alone.
+const declaredImageTypes = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
 ]);
 
 // A raw answer: the body of a success, or the untrusted error code and
@@ -652,6 +682,71 @@ function toMembership(value: unknown): Membership | undefined {
   return undefined;
 }
 
+const rfc3339Pattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function toInstant(value: unknown): Date | undefined {
+  if (typeof value !== "string" || !rfc3339Pattern.test(value)) {
+    return undefined;
+  }
+  const instant = new Date(value);
+  return Number.isNaN(instant.getTime()) ? undefined : instant;
+}
+
+function toMember(value: unknown): Member | undefined {
+  if (typeof value === "object" && value !== null) {
+    const { account_id, email, accepted_at } = value as Record<string, unknown>;
+    const acceptedAt = accepted_at === null ? null : toInstant(accepted_at);
+    if (
+      isResourceId(account_id) &&
+      typeof email === "string" &&
+      email !== "" &&
+      acceptedAt !== undefined
+    ) {
+      return { accountId: account_id, email, acceptedAt };
+    }
+  }
+  return undefined;
+}
+
+// The moderators of the signed-in owner's tenant, with their email.
+export async function listMembers(): Promise<Result<Member[]>> {
+  const result = await call("GET", "/api/members");
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { members } = result.value as Record<string, unknown>;
+    if (Array.isArray(members)) {
+      const parsed = members.map(toMember);
+      if (parsed.every((member) => member !== undefined)) {
+        return { ok: true, value: parsed };
+      }
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
+export async function revokeMember(
+  csrfToken: string,
+  operationId: string,
+  accountId: string,
+): Promise<Result<MemberRevocation>> {
+  if (!isResourceId(accountId)) return { ok: false, error: "bad_request" };
+  const result = await call(
+    "POST",
+    `/api/members/${accountId}/revoke`,
+    { operation_id: operationId },
+    { "X-CSRF-Token": csrfToken },
+  );
+  if (!result.ok) return result;
+  if (typeof result.value === "object" && result.value !== null) {
+    const { tenant_id, account_id } = result.value as Record<string, unknown>;
+    if (isResourceId(tenant_id) && account_id === accountId) {
+      return { ok: true, value: { tenantId: tenant_id, accountId } };
+    }
+  }
+  return { ok: false, error: "unavailable" };
+}
+
 function isByteCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
@@ -708,14 +803,39 @@ export async function getMediaUsage(
     : { ok: false, error: "unavailable" };
 }
 
+// The URL that serves the content of a media reference of a canvas, or
+// undefined for a reference that cannot name one path segment.
+export function mediaContentUrl(
+  tenantId: string,
+  canvasId: string,
+  referenceId: string,
+): string | undefined {
+  if (referenceId === "" || referenceId === "." || referenceId === "..") {
+    return undefined;
+  }
+  return mediaPath(
+    tenantId,
+    canvasId,
+    `references/${encodeURIComponent(referenceId)}/content`,
+  );
+}
+
 // The file travels as the raw request body; the browser sets its exact
-// Content-Length, which the server reserves as the declared size.
+// Content-Length, which the server reserves as the declared size. A
+// supported image declares its type, which the server checks against the
+// inspected content; another image type (SVG) is refused here with the
+// reason the server would give, and the server stays the authority.
 export async function uploadMedia(
   csrfToken: string,
   tenantId: string,
   canvasId: string,
   upload: MediaUpload,
 ): Promise<MediaResult<UploadedMedia>> {
+  const type = upload.file.type.toLowerCase();
+  const declared = declaredImageTypes.has(type);
+  if (!declared && type.startsWith("image/")) {
+    return { ok: false, error: "media_rejected", reason: "unsupported_kind" };
+  }
   const query = new URLSearchParams({
     operation_id: upload.operationId,
     reference_id: upload.referenceId,
@@ -726,16 +846,31 @@ export async function uploadMedia(
     `${mediaPath(tenantId, canvasId, "uploads")}?${query.toString()}`,
     {
       "X-CSRF-Token": csrfToken,
-      "Content-Type": "application/octet-stream",
+      "Content-Type": declared ? type : "application/octet-stream",
     },
     upload.file,
   );
   if (!result.ok) return result;
   if (typeof result.value === "object" && result.value !== null) {
-    const { asset_id, kind, usage } = result.value as Record<string, unknown>;
+    const { asset_id, kind, object_id, usage } = result.value as Record<
+      string,
+      unknown
+    >;
     const parsed = toMediaUsage(usage);
-    if (typeof asset_id === "string" && typeof kind === "string" && parsed) {
-      return { ok: true, value: { assetId: asset_id, kind, usage: parsed } };
+    // An upload that created no object answers without an object ID.
+    const noObject =
+      object_id === undefined || object_id === null || object_id === "";
+    if (
+      typeof asset_id === "string" &&
+      typeof kind === "string" &&
+      parsed &&
+      (noObject || typeof object_id === "string")
+    ) {
+      const value: UploadedMedia = { assetId: asset_id, kind, usage: parsed };
+      if (typeof object_id === "string" && object_id !== "") {
+        value.objectId = object_id;
+      }
+      return { ok: true, value };
     }
   }
   return { ok: false, error: "unavailable" };

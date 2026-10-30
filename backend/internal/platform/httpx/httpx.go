@@ -14,9 +14,39 @@ import (
 // CorrelationHeader carries the server-assigned correlation ID back to the client.
 const CorrelationHeader = "X-Correlation-ID"
 
+// revalidatedCacheControl lets the browser keep a private copy that it must
+// revalidate before each use, so an ETag can answer 304. Shared caches never
+// store it.
+const revalidatedCacheControl = "private, no-cache"
+
 func setPrivateHeaders(h http.Header) {
-	h.Set("Cache-Control", "no-store")
+	setCacheHeaders(h, "no-store")
+}
+
+func setCacheHeaders(h http.Header, cacheControl string) {
+	h.Set("Cache-Control", cacheControl)
 	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// Revalidate marks the answer about to be written as a private resource
+// that the browser may keep and must revalidate: Private then sends
+// "private, no-cache" instead of no-store. Call it right before writing a
+// successful or not-modified answer; outside Private it sets the header
+// itself.
+func Revalidate(w http.ResponseWriter) {
+	for {
+		switch rw := w.(type) {
+		case *privateWriter:
+			rw.revalidate = true
+			setCacheHeaders(rw.Header(), revalidatedCacheControl)
+			return
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = rw.Unwrap()
+		default:
+			setCacheHeaders(w.Header(), revalidatedCacheControl)
+			return
+		}
+	}
 }
 
 // Private marks every response of next as non-cacheable and referrer-free.
@@ -36,12 +66,18 @@ func Private(next http.Handler) http.Handler {
 type privateWriter struct {
 	http.ResponseWriter
 	wroteHeader bool
+	// revalidate is set by Revalidate.
+	revalidate bool
 }
 
 func (w *privateWriter) WriteHeader(status int) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
-		setPrivateHeaders(w.Header())
+		if w.revalidate {
+			setCacheHeaders(w.Header(), revalidatedCacheControl)
+		} else {
+			setPrivateHeaders(w.Header())
+		}
 	}
 	w.ResponseWriter.WriteHeader(status)
 }
@@ -115,6 +151,14 @@ const (
 	ErrReferenceExists  ErrorCode = "reference_exists"
 	ErrUploadFailed     ErrorCode = "upload_failed"
 	ErrMediaUnavailable ErrorCode = "media_unavailable"
+
+	// Object lock codes (US-020). ErrLockSessionGone answers a lock session
+	// that ended, whose locks are already free; the client opens a new one.
+	// ErrNotLockHolder answers a release of a lock the session does not
+	// hold; ErrLockUnavailable a server whose lock service is not serving.
+	ErrLockSessionGone ErrorCode = "lock_session_gone"
+	ErrNotLockHolder   ErrorCode = "not_lock_holder"
+	ErrLockUnavailable ErrorCode = "lock_unavailable"
 )
 
 var errorStatus = map[ErrorCode]int{
@@ -134,6 +178,9 @@ var errorStatus = map[ErrorCode]int{
 	ErrReferenceExists:      http.StatusConflict,
 	ErrUploadFailed:         http.StatusBadGateway,
 	ErrMediaUnavailable:     http.StatusServiceUnavailable,
+	ErrLockSessionGone:      http.StatusGone,
+	ErrNotLockHolder:        http.StatusConflict,
+	ErrLockUnavailable:      http.StatusServiceUnavailable,
 }
 
 // maxReasonBytes bounds the public reason of an error.

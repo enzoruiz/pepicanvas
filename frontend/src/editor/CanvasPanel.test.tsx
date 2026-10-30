@@ -10,6 +10,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import { CanvasPanel } from "./CanvasPanel";
 
+// The lock holders poll their own route; their behavior is tested in
+// locks/LockOwners.test.tsx.
+vi.mock("../locks/LockOwners", () => ({
+  LockOwners: ({
+    tenantId,
+    canvasId,
+  }: {
+    tenantId: string;
+    canvasId: string;
+  }) => <p data-lock-owners={`${tenantId}/${canvasId}`} />,
+}));
+
 let calls: Call[];
 let replies: Reply[];
 
@@ -102,6 +114,17 @@ describe("CanvasPanel", () => {
     ).toBeInTheDocument();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ method: "GET", path: "/api/canvas" });
+  });
+
+  it("shows who holds each lock of the own canvas", async () => {
+    replies.push(ownCanvas());
+    renderPanel();
+    await ready();
+    expect(
+      [...document.querySelectorAll("[data-lock-owners]")].map((element) =>
+        element.getAttribute("data-lock-owners"),
+      ),
+    ).toEqual([`${tenantId}/${canvasId}`]);
   });
 
   it("draws the confirmed surface and prefills the size form", async () => {
@@ -379,5 +402,83 @@ describe("CanvasPanel", () => {
     expect(screen.getByLabelText("Width")).toHaveValue("2560");
     expect(localStorage).toHaveLength(0);
     expect(sessionStorage).toHaveLength(0);
+  });
+
+  it("draws an image object from its content route", async () => {
+    replies.push(
+      json(200, {
+        tenant_id: tenantId,
+        canvas_id: canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 1,
+        objects: [
+          {
+            id: "dddddddddddddddddddddddddddddddd",
+            kind: "image",
+            content: "reference-1",
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            rotation: 0,
+            z: 0,
+          },
+        ],
+      }),
+    );
+    renderPanel();
+    await ready();
+
+    const image = surface().querySelector("img");
+    expect(image).toHaveAttribute(
+      "src",
+      `/api/tenants/${tenantId}/canvases/${canvasId}/media/references/reference-1/content`,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("loads the canvas again when asked to refresh", async () => {
+    replies.push(ownCanvas());
+    const { rerender } = render(
+      <CanvasPanel session={session} refreshKey={0} />,
+    );
+    await ready();
+
+    replies.push(
+      json(200, {
+        tenant_id: tenantId,
+        canvas_id: canvasId,
+        width: 1920,
+        height: 1080,
+        revision: 2,
+        objects: [
+          {
+            id: "dddddddddddddddddddddddddddddddd",
+            kind: "image",
+            content: "reference-2",
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+            rotation: 0,
+            z: 2,
+          },
+        ],
+      }),
+    );
+    rerender(<CanvasPanel session={session} refreshKey={1} />);
+
+    await waitFor(() =>
+      expect(surface().querySelector("img")).toHaveAttribute(
+        "src",
+        `/api/tenants/${tenantId}/canvases/${canvasId}/media/references/reference-2/content`,
+      ),
+    );
+    expect(calls.map((call) => [call.method, call.path])).toEqual([
+      ["GET", "/api/canvas"],
+      ["GET", "/api/canvas"],
+    ]);
+    expect(surface()).not.toHaveTextContent("Far away");
   });
 });

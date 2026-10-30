@@ -1,7 +1,8 @@
 // Package invitation lets the owner of an active tenant create, list, and
 // revoke single-use moderator invitations (US-004), lets an authenticated
-// account accept one to become moderator of exactly that tenant's canvas, and
-// lists the canvases an account moderates (US-005).
+// account accept one to become moderator of exactly that tenant's canvas,
+// lists the canvases an account moderates (US-005), and lets the owner list
+// and revoke the tenant's moderators (US-006).
 package invitation
 
 import (
@@ -18,7 +19,8 @@ var (
 	// ErrInvalid reports a request rejected before storage.
 	ErrInvalid = errors.New("invitation: invalid request")
 	// ErrNotFound reports an invitation ID that is unknown or belongs to
-	// another tenant. Both cases are indistinguishable.
+	// another tenant, or a revoked account that is unknown, not a moderator
+	// of the owner's tenant, or the owner. The cases are indistinguishable.
 	ErrNotFound = errors.New("invitation: not found")
 	// ErrUnavailable is the only acceptance failure. It never says whether
 	// the token is unknown, revoked, accepted, or expired.
@@ -44,6 +46,9 @@ const (
 	// OperationRetention is how long an operation ID replays its answer. An
 	// operation accepted at T is retained while now < T + OperationRetention.
 	OperationRetention = 10 * time.Minute
+	// MaxCorrelationBytes bounds the correlation a revocation stores on its
+	// record and its cut, as PostgreSQL checks.
+	MaxCorrelationBytes = 128
 )
 
 // CreateRequest is one owner's request to store a client-generated token.
@@ -71,6 +76,61 @@ type AcceptRequest struct {
 	// Token is the secret of kind secret.KindInvitationToken.
 	Token         secret.Value
 	CorrelationID string
+}
+
+// RevokeMemberRequest is one owner's request to revoke the moderator
+// membership of AccountID in the owner's tenant.
+type RevokeMemberRequest struct {
+	OwnerID       access.AccountID
+	OperationID   string
+	AccountID     access.AccountID
+	CorrelationID string
+}
+
+// Member is a moderator of the owner's tenant as the owner sees it (US-006
+// L2). AcceptedAt is the latest acceptance by the account of an invitation of
+// the tenant, or the zero time when no invitation records one.
+type Member struct {
+	AccountID  access.AccountID
+	Email      string
+	AcceptedAt time.Time
+}
+
+// MemberRevocation is the answer to a confirmed membership revocation.
+type MemberRevocation struct {
+	TenantID  string
+	AccountID access.AccountID
+}
+
+// RevocationCut is the pending access cut of one account in one tenant,
+// written in the transaction that removes its membership (CTRL-CONS-01).
+// Version is the tenant's access version after the revocation.
+type RevocationCut struct {
+	TenantID      string
+	AccountID     access.AccountID
+	Version       uint64
+	CorrelationID string
+	CreatedAt     time.Time
+}
+
+// MemberRevocationRecord is the retained answer of one membership
+// revocation. Fingerprint is the SHA-256 of OperationRevokeMember, the owner
+// ID, and the revoked account ID.
+type MemberRevocationRecord struct {
+	OperationID   string
+	OwnerID       access.AccountID
+	Fingerprint   [32]byte
+	Result        MemberRevocation
+	Version       uint64
+	CorrelationID string
+	AcceptedAt    time.Time
+}
+
+// MemberAccess is an account's membership in a tenant with the tenant's
+// subscription status and access version, read together.
+type MemberAccess struct {
+	Membership access.Membership
+	Version    uint64
 }
 
 // Invitation is what the owner sees of an invitation. It never carries the token.
@@ -149,6 +209,9 @@ const (
 	OperationCreate OperationKind = "create"
 	OperationRevoke OperationKind = "revoke"
 	OperationAccept OperationKind = "accept"
+	// OperationRevokeMember names membership revocations. Their records are
+	// MemberRevocationRecord, kept apart from Record.
+	OperationRevokeMember OperationKind = "revoke-member"
 )
 
 // Record is the retained answer of one operation. OwnerID is the acting
@@ -203,6 +266,32 @@ type Tx interface {
 	// ModeratedCanvases returns the account's moderator memberships with
 	// their tenant's canvas and status, by tenant ID.
 	ModeratedCanvases(ctx context.Context, account access.AccountID) ([]ModeratedCanvas, error)
+	// LockOwnedTenantForUpdate reads the tenant the account owns FOR UPDATE,
+	// so its memberships and access version change one revocation at a time
+	// and never under a share-locked mutation.
+	LockOwnedTenantForUpdate(ctx context.Context, owner access.AccountID) (Tenant, bool, error)
+	// Members returns the tenant's moderators with their email and latest
+	// acceptance, oldest acceptance first, then by account ID.
+	Members(ctx context.Context, tenantID string) ([]Member, error)
+	// MemberRevocation returns the membership revocation record of
+	// operationID accepted after notBefore.
+	MemberRevocation(ctx context.Context, operationID string, notBefore time.Time) (MemberRevocationRecord, bool, error)
+	// LockMembership reads the account's role in the tenant FOR UPDATE.
+	LockMembership(ctx context.Context, tenantID string, account access.AccountID) (access.Role, bool, error)
+	// RemoveModerator deletes the account's moderator membership.
+	RemoveModerator(ctx context.Context, tenantID string, account access.AccountID) error
+	// IncrementAccessVersion increments the tenant's access version and
+	// returns the new one.
+	IncrementAccessVersion(ctx context.Context, tenantID string) (uint64, error)
+	// RecordCut stores one pending revocation cut.
+	RecordCut(ctx context.Context, cut RevocationCut) error
+	// RecordMemberRevocation drops records accepted at or before purgeBefore
+	// and retains record. It returns ErrOperationRetained for a retained ID.
+	RecordMemberRevocation(ctx context.Context, record MemberRevocationRecord, purgeBefore time.Time) error
+	// MemberAccess reads the account's role in the tenant with the tenant's
+	// status and access version in one statement. found is false when the
+	// account has no role there, including when the tenant does not exist.
+	MemberAccess(ctx context.Context, tenantID string, account access.AccountID) (MemberAccess, bool, error)
 }
 
 // Store runs invitation transactions.

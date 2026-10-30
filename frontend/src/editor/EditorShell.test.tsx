@@ -10,6 +10,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Call, json, type Reply, stubFetch } from "../test/fetchStub";
 import { EditorShell } from "./EditorShell";
 
+// The lock holders poll their own route; their behavior is tested in
+// locks/LockOwners.test.tsx.
+vi.mock("../locks/LockOwners", () => ({
+  LockOwners: ({
+    tenantId,
+    canvasId,
+  }: {
+    tenantId: string;
+    canvasId: string;
+  }) => <p data-lock-owners={`${tenantId}/${canvasId}`} />,
+}));
+
 let calls: Call[];
 let replies: Reply[];
 
@@ -97,12 +109,13 @@ describe("EditorShell", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows an active owner the invitations and storage panels", async () => {
+  it("shows an active owner the invitations, moderators, and storage panels", async () => {
     replies.push(
       session(false),
       ownCanvas,
       noMemberships,
       json(200, { invitations: [] }),
+      json(200, { members: [] }),
       json(200, {
         quota_bytes: 1_000_000_000,
         used_bytes: 0,
@@ -121,12 +134,95 @@ describe("EditorShell", () => {
     expect(
       screen.getByRole("region", { name: "Canvas storage" }),
     ).toBeInTheDocument();
-    await waitFor(() => expect(calls).toHaveLength(5));
+    expect(
+      screen.getByRole("region", { name: "Moderators" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("No moderators yet.")).toBeInTheDocument();
+    await waitFor(() => expect(calls).toHaveLength(6));
     expect(calls[3]).toMatchObject({ method: "GET", path: "/api/invitations" });
-    expect(calls[4]).toMatchObject({
+    expect(calls[4]).toMatchObject({ method: "GET", path: "/api/members" });
+    expect(calls[5]).toMatchObject({
       method: "GET",
       path: "/api/tenants/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/canvases/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/media/usage",
     });
+  });
+
+  it("reloads the own canvas after a confirmed upload and draws the image", async () => {
+    const tenant = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const canvas = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const usage = {
+      quota_bytes: 1_000_000_000,
+      used_bytes: 0,
+      reserved_bytes: 0,
+      available_bytes: 1_000_000_000,
+    };
+    replies.push(
+      session(false),
+      ownCanvas,
+      noMemberships,
+      json(200, { invitations: [] }),
+      json(200, { members: [] }),
+      json(200, usage),
+    );
+    render(<EditorShell />);
+    await screen.findByText("Used 0 of 1,000,000,000 bytes");
+
+    const file = new File(["GIF89a"], "party.gif", { type: "image/gif" });
+    fireEvent.change(screen.getByLabelText("File"), {
+      target: { files: [file] },
+    });
+    replies.push(
+      json(201, {
+        asset_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        kind: "gif",
+        object_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        usage: { ...usage, used_bytes: 6, available_bytes: 999_999_994 },
+      }),
+      json(200, {
+        tenant_id: tenant,
+        canvas_id: canvas,
+        width: 1920,
+        height: 1080,
+        revision: 1,
+        objects: [
+          {
+            id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            kind: "image",
+            content: "reference-1",
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+            rotation: 0,
+            z: 0,
+          },
+        ],
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await screen.findByText("File uploaded.");
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-canvas-surface] img"),
+      ).toHaveAttribute(
+        "src",
+        `/api/tenants/${tenant}/canvases/${canvas}/media/references/reference-1/content`,
+      ),
+    );
+    expect(calls.slice(6).map((call) => [call.method, call.path])).toEqual([
+      [
+        "POST",
+        expect.stringContaining(
+          `/api/tenants/${tenant}/canvases/${canvas}/media/uploads?`,
+        ),
+      ],
+      ["GET", "/api/canvas"],
+    ]);
+    // The usage panel keeps the confirmed answer and is not reloaded.
+    expect(
+      screen.getByText("Used 6 of 1,000,000,000 bytes"),
+    ).toBeInTheDocument();
   });
 
   it.each([
@@ -158,6 +254,9 @@ describe("EditorShell", () => {
       ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("region", { name: "Canvas storage" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("region", { name: "Moderators" }),
       ).not.toBeInTheDocument();
       await waitFor(() => expect(calls).toHaveLength(3));
       expect(calls[2]).toMatchObject({

@@ -6,6 +6,7 @@ import {
   type MediaRejection,
   type MediaUsage,
   type Session,
+  type UploadedMedia,
   uploadMedia,
 } from "../auth/api";
 
@@ -29,16 +30,27 @@ const uploadMessages: Partial<Record<MediaError, string>> = {
   bad_request: "This file cannot be uploaded.",
   length_required: "This file cannot be uploaded.",
 };
+// Each names the rule the file broke (US-011 S6).
 const rejectionMessages: Partial<Record<MediaRejection, string>> = {
   unsupported_kind:
-    "This file type is not supported. Upload an image, GIF, audio, or video file.",
+    "SVG and this format are not supported. Upload a PNG, JPEG, WebP, or GIF image, or an audio or video file.",
   invalid_metadata:
-    "This file could not be read as an image, GIF, audio, or video file.",
+    "The file's type or dimensions could not be established from its content.",
   input_too_large: "This file is larger than the allowed size.",
   dimensions_exceeded: "This file's dimensions are larger than allowed.",
   duration_exceeded: "This file is longer than allowed.",
   frame_count_exceeded: "This file has more frames than allowed.",
   stream_count_exceeded: "This file has more streams than allowed.",
+  type_mismatch: "The file content does not match its type.",
+  decode_failed: "The file could not be decoded completely.",
+  resources_exceeded: "The file needs more resources to check than allowed.",
+};
+// The image limits, named only for a file that declares an image type;
+// audio and video have other limits.
+const imageRejectionMessages: Partial<Record<MediaRejection, string>> = {
+  input_too_large: "The file is larger than 10 000 000 bytes.",
+  dimensions_exceeded:
+    "Each image and GIF frame must be at most 4096×4096 pixels.",
 };
 
 // Answers after which the same operation may still be pending or was never
@@ -68,11 +80,23 @@ interface MediaPanelProps {
   canvasId: string;
   newOperationId?: () => string;
   newReferenceId?: () => string;
+  // Called once per confirmed upload, so the canvas can show its object.
+  onUploaded?: (upload: UploadedMedia) => void;
 }
 
-function uploadMessage(error: MediaError, reason?: MediaRejection): string {
+function uploadMessage(
+  file: File,
+  error: MediaError,
+  reason?: MediaRejection,
+): string {
   if (error === "media_rejected") {
-    return (reason && rejectionMessages[reason]) ?? rejectedMessage;
+    if (reason === undefined) return rejectedMessage;
+    const image = file.type.toLowerCase().startsWith("image/");
+    return (
+      (image ? imageRejectionMessages[reason] : undefined) ??
+      rejectionMessages[reason] ??
+      rejectedMessage
+    );
   }
   return uploadMessages[error] ?? uploadFailedMessage;
 }
@@ -83,6 +107,7 @@ export function MediaPanel({
   canvasId,
   newOperationId = () => crypto.randomUUID(),
   newReferenceId = () => crypto.randomUUID(),
+  onUploaded,
 }: MediaPanelProps) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [file, setFile] = useState<File | null>(null);
@@ -140,8 +165,9 @@ export function MediaPanel({
         setFile(null);
         form.current?.reset();
         setNotice("File uploaded.");
+        onUploaded?.(result.value);
       } else {
-        setError(uploadMessage(result.error, result.reason));
+        setError(uploadMessage(file, result.error, result.reason));
       }
     } finally {
       setBusy(false);

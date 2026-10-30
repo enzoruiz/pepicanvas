@@ -261,10 +261,13 @@ func usageFor(used, reserved int64) usageJSON {
 	return usageJSON{QuotaBytes: media.QuotaBytes, UsedBytes: used, ReservedBytes: reserved, AvailableBytes: media.QuotaBytes - used - reserved}
 }
 
+// uploadJSON is the exact upload body; object_id is absent when the upload
+// created no canvas object.
 type uploadJSON struct {
-	AssetID string    `json:"asset_id"`
-	Kind    string    `json:"kind"`
-	Usage   usageJSON `json:"usage"`
+	AssetID  string    `json:"asset_id"`
+	ObjectID string    `json:"object_id,omitempty"`
+	Kind     string    `json:"kind"`
+	Usage    usageJSON `json:"usage"`
 }
 
 type attachJSON struct {
@@ -318,7 +321,7 @@ func fieldsEqual(a, b map[string]any) bool {
 func wantUploaded(t *testing.T, s sent, used, reserved int64) uploadJSON {
 	t.Helper()
 	got := strictBody[uploadJSON](t, s, http.StatusCreated)
-	if got.AssetID == "" || got.Kind != "image" || got.Usage != usageFor(used, reserved) {
+	if got.AssetID == "" || got.Kind != "image" || (got.ObjectID != "" && got.ObjectID != got.AssetID) || got.Usage != usageFor(used, reserved) {
 		t.Fatalf("upload = %+v, want an image asset with usage %+v", got, usageFor(used, reserved))
 	}
 	return got
@@ -754,9 +757,10 @@ func TestMediaIsolatesTenants(t *testing.T) {
 	m.wantBucket()
 }
 
-// The media mutations are ingress Session routes: a hostile Origin or a
-// missing CSRF token is refused before the domain, with nothing reserved or
-// stored.
+// S15 (CTRL-WEB-01): the media mutations are ingress Session routes: a
+// hostile or absent Origin, or a missing or invalid CSRF token, is refused
+// before the domain, with nothing reserved or stored, for an undeclared and
+// for a declared image upload alike; the valid token and Origin are accepted.
 func TestMediaMutationsCheckOriginAndCSRFFirst(t *testing.T) {
 	m := newMediaEnv(t, httpapi.DefaultLimits)
 	alice := m.streamer(m.op, "alice1", "alice@example.com")
@@ -764,11 +768,16 @@ func TestMediaMutationsCheckOriginAndCSRFFirst(t *testing.T) {
 	before := m.count("SELECT count(*) FROM media_operations")
 	for name, refuse := range map[string][]option{
 		"hostile Origin": {withOrigin("https://evil.test")},
+		"absent Origin":  {withoutOrigin()},
 		"missing CSRF":   {withCSRF("")},
 		"invalid CSRF":   {withCSRF("not-the-token")},
 	} {
 		t.Run(name, func(t *testing.T) {
-			wantMediaError(t, m.upload(alice.signedIn, alice.path, "op-web-02", "ref-02", false, []byte("data"), refuse...), http.StatusForbidden, "forbidden", "")
+			for _, contentType := range []string{"application/octet-stream", "image/png", "image/svg+xml"} {
+				answer := m.serveRaw(context.Background(), http.MethodPost, alice.path+"/media/uploads?"+uploadQuery("op-web-02", "ref-02", false),
+					contentType, unreadable{t}, 4, append(authOf(alice.signedIn), refuse...)...)
+				wantMediaError(t, answer, http.StatusForbidden, "forbidden", "")
+			}
 			wantMediaError(t, m.attach(alice.signedIn, alice.path, "op-web-03", up.AssetID, "ref-03", refuse...), http.StatusForbidden, "forbidden", "")
 			wantMediaError(t, m.detach(alice.signedIn, alice.path, "op-web-04", "ref-01", refuse...), http.StatusForbidden, "forbidden", "")
 			if got := m.count("SELECT count(*) FROM media_operations"); got != before {
@@ -778,6 +787,10 @@ func TestMediaMutationsCheckOriginAndCSRFFirst(t *testing.T) {
 			m.wantBucket()
 		})
 	}
+	m.faults.set(inspectAs(media.KindImage, "image/png"))
+	defer m.faults.reset()
+	data := pngOf(t, 2, 2)
+	wantUploaded(t, m.uploadAs(alice.signedIn, alice.path, "op-web-05", "ref-05", "image/png", data), 4+int64(len(data)), 0)
 }
 
 // S9: access lost between the route check and a commit is rechecked at the
@@ -1164,9 +1177,10 @@ func TestMediaRetriesHaveOneEffect(t *testing.T) {
 	}
 }
 
-// S14 (CTRL-RATE-01): the per-account upload limit answers 429 with
-// Retry-After before anything is reserved or read, recovers after its
-// window, and leaves another streamer's account unaffected.
+// S14, US-011 S16 (CTRL-RATE-01): the per-account upload limit answers 429
+// with Retry-After before anything is reserved or read, whatever type the
+// upload declares, recovers after its window, and leaves another streamer's
+// account unaffected.
 func TestMediaUploadLimitPerAccount(t *testing.T) {
 	limits := httpapi.DefaultLimits
 	limits.UploadsPerAccount = httpapi.Rate{Limit: 2, Window: time.Hour}
@@ -1174,18 +1188,23 @@ func TestMediaUploadLimitPerAccount(t *testing.T) {
 	alice := m.streamer(m.op, "alice1", "alice@example.com")
 	bob := m.streamer(m.op, "bob001", "bob@example.com")
 	_, mod := m.moderatorOf(alice, "mod001", "mod@example.com")
+	// Every upload inspects as a PNG, so undeclared and declared ones pass.
+	m.faults.set(inspectAs(media.KindImage, "image/png"))
 
 	wantUploaded(t, m.upload(alice.signedIn, alice.path, "op-rate-01", "ref-01", false, []byte("one")), 3, 0)
-	wantUploaded(t, m.upload(alice.signedIn, alice.path, "op-rate-02", "ref-02", false, []byte("two")), 6, 0)
+	wantUploaded(t, m.uploadAs(alice.signedIn, alice.path, "op-rate-02", "ref-02", "image/png", []byte("two")), 6, 0)
 	limited := reasonCount(m.http.ingress, ingress.ReasonRateAccount)
 	operations := m.count("SELECT count(*) FROM media_operations")
-	refused := m.uploadBody(context.Background(), alice.signedIn, alice.path, uploadQuery("op-rate-03", "ref-03", false), unreadable{t}, 5)
-	if got := refused.header.Get("Retry-After"); got != "3600" {
-		t.Fatalf("Retry-After = %q, want 3600", got)
-	}
-	wantMediaError(t, refused, http.StatusTooManyRequests, "rate_limited", "")
-	if got := reasonCount(m.http.ingress, ingress.ReasonRateAccount); got != limited+1 {
-		t.Fatalf("rate_account count = %d, want %d", got, limited+1)
+	for i, contentType := range []string{"application/octet-stream", "image/png", "image/svg+xml"} {
+		refused := m.serveRaw(context.Background(), http.MethodPost, alice.path+"/media/uploads?"+uploadQuery("op-rate-03", "ref-03", false),
+			contentType, unreadable{t}, 5, authOf(alice.signedIn)...)
+		if got := refused.header.Get("Retry-After"); got != "3600" {
+			t.Fatalf("%s: Retry-After = %q, want 3600", contentType, got)
+		}
+		wantMediaError(t, refused, http.StatusTooManyRequests, "rate_limited", "")
+		if got := reasonCount(m.http.ingress, ingress.ReasonRateAccount); got != limited+uint64(i)+1 {
+			t.Fatalf("rate_account count = %d, want %d", got, limited+uint64(i)+1)
+		}
 	}
 	if got := m.count("SELECT count(*) FROM media_operations"); got != operations {
 		t.Fatalf("media operations %d -> %d", operations, got)
@@ -1194,11 +1213,11 @@ func TestMediaUploadLimitPerAccount(t *testing.T) {
 	m.wantBucket()
 
 	// Another streamer, and the moderator's own account, are unaffected.
-	wantUploaded(t, m.upload(bob.signedIn, bob.path, "op-rate-04", "ref-04", false, []byte("bob")), 3, 0)
+	wantUploaded(t, m.uploadAs(bob.signedIn, bob.path, "op-rate-04", "ref-04", "image/png", []byte("bob")), 3, 0)
 	wantUploaded(t, m.upload(mod, alice.path, "op-rate-05", "ref-05", false, []byte("mod")), 9, 0)
 
 	m.limits.Set(m.limits.Now().Add(time.Hour))
-	wantUploaded(t, m.upload(alice.signedIn, alice.path, "op-rate-03", "ref-03", false, []byte("three")), 14, 0)
+	wantUploaded(t, m.uploadAs(alice.signedIn, alice.path, "op-rate-03", "ref-03", "image/png", []byte("three")), 14, 0)
 }
 
 // A server without media storage answers media_unavailable on the upload

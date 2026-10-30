@@ -10,15 +10,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/enzoruiz/pepicanvas/backend/internal/canvas"
 	"github.com/enzoruiz/pepicanvas/backend/internal/media"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres"
 	"github.com/enzoruiz/pepicanvas/backend/internal/platform/postgres/pgtest"
 )
 
 // mediaState is every committed row of one canvas: usage, assets, references,
-// and retained operations.
+// retained operations, and the canvas itself with its objects and outbox
+// records, which an object-creating completion also writes.
 type mediaState struct {
-	usage, assets, references, operations string
+	usage, assets, references, operations, canvas string
 }
 
 func mediaSnapshot(t *testing.T, pool *pgxpool.Pool, key media.CanvasKey) mediaState {
@@ -34,8 +36,13 @@ func mediaSnapshot(t *testing.T, pool *pgxpool.Pool, key media.CanvasKey) mediaS
 				FROM media_references WHERE tenant_id = $1 AND canvas_id = $2), ''),
 			COALESCE((SELECT string_agg(format('%s %s %s %s %s/%s/%s %s %s %s %s', operation_id, encode(fingerprint, 'hex'), asset_id, storage_key,
 					quota_bytes, used_bytes, reserved_bytes, correlation_id, accepted_at, abandon_reason, rejection_code), ',' ORDER BY operation_id)
-				FROM media_operations WHERE tenant_id = $1 AND canvas_id = $2), '')`,
-		key.TenantID, key.CanvasID).Scan(&state.usage, &state.assets, &state.references, &state.operations)
+				FROM media_operations WHERE tenant_id = $1 AND canvas_id = $2), ''),
+			COALESCE((SELECT format('%s/%s', revision, next_z) FROM canvases WHERE tenant_id = $1 AND canvas_id = $2), '') || ' ' ||
+			COALESCE((SELECT string_agg(format('%s %s %s %s,%s %sx%s %s %s', object_id, kind, content, x, y, width, height, rotation, z), ',' ORDER BY z)
+				FROM canvas_objects WHERE tenant_id = $1 AND canvas_id = $2), '') || ' ' ||
+			COALESCE((SELECT string_agg(format('%s %s %s %s %s %s %s %s', id, kind, revision, operation_id, correlation_id, object_id, z, mutation), ',' ORDER BY id)
+				FROM canvas_outbox WHERE tenant_id = $1 AND canvas_id = $2), '')`,
+		key.TenantID, key.CanvasID).Scan(&state.usage, &state.assets, &state.references, &state.operations, &state.canvas)
 	if err != nil {
 		t.Fatalf("media snapshot: %v", err)
 	}
@@ -94,10 +101,35 @@ var mediaCases = []mediaCase{
 			return media.Complete{AssetID: reserved.AssetID, ReferenceID: "object-1", Kind: media.KindImage}
 		},
 		wantUsed: 100,
-		check: func(t *testing.T, store media.Store, _ *pgxpool.Pool, result media.Result) {
+		check: func(t *testing.T, store media.Store, pool *pgxpool.Pool, result media.Result) {
 			if asset, err := store.Ready(context.Background(), mediaA, result.AssetID); err != nil || asset.References != 1 {
 				t.Fatalf("completed asset = %+v, %v; want ready with one reference", asset, err)
 			}
+			if result.ObjectID != "" {
+				t.Fatalf("completion without an object = %+v, want no object ID", result)
+			}
+			wantMediaCanvas(t, pool, mediaA, 0)
+		},
+	},
+	{
+		// US-011 S8: the completion of an image upload also creates its object.
+		name: "complete with object",
+		setup: func(t *testing.T, store media.Store) media.Command {
+			reserved := run(t, store, mediaA, media.Reserve{DeclaredBytes: 100})
+			return media.Complete{AssetID: reserved.AssetID, ReferenceID: "object-1", Kind: media.KindImage, Object: true, ObjectWidth: 4096, ObjectHeight: 4096}
+		},
+		wantUsed: 100,
+		check: func(t *testing.T, store media.Store, pool *pgxpool.Pool, result media.Result) {
+			if asset, err := store.Ready(context.Background(), mediaA, result.AssetID); err != nil || asset.References != 1 {
+				t.Fatalf("completed asset = %+v, %v; want ready with one reference", asset, err)
+			}
+			if result.ObjectID != result.AssetID {
+				t.Fatalf("completion with an object = %+v, want the asset ID as object ID", result)
+			}
+			wantMediaCanvas(t, pool, mediaA, 1, canvas.Object{
+				ID: result.AssetID, Kind: canvas.KindImage, Content: "object-1",
+				Transform: canvas.Transform{X: 420, Width: 1080, Height: 1080}, Z: 1,
+			})
 		},
 	},
 	{
@@ -247,7 +279,7 @@ func TestMediaLostAnswerAfterCommitReplaysTheSameResultAfterRestart(t *testing.T
 	server := pgtest.Start(t)
 	store, pool := openMedia(t, server, []media.CanvasKey{mediaA})
 
-	var first, second media.Result
+	var first, second, third media.Result
 	steps := []struct {
 		name    string
 		command func() media.Command
@@ -261,6 +293,10 @@ func TestMediaLostAnswerAfterCommitReplaysTheSameResultAfterRestart(t *testing.T
 		{"detach", func() media.Command { return media.Detach{ReferenceID: "object-2"} }, nil},
 		{"reserve again", func() media.Command { return media.Reserve{DeclaredBytes: 50} }, &second},
 		{"abandon", func() media.Command { return media.Abandon{AssetID: second.AssetID, Reason: media.AbandonCancelled} }, nil},
+		{"reserve an image", func() media.Command { return media.Reserve{DeclaredBytes: 30} }, &third},
+		{"complete with object", func() media.Command {
+			return media.Complete{AssetID: third.AssetID, ReferenceID: "object-3", Kind: media.KindGIF, Object: true, ObjectWidth: 20, ObjectHeight: 10}
+		}, nil},
 	}
 	for _, step := range steps {
 		command := step.command()
@@ -285,7 +321,7 @@ func TestMediaLostAnswerAfterCommitReplaysTheSameResultAfterRestart(t *testing.T
 			t.Fatalf("%s retry produced a second effect:\n got %+v\nwant %+v", step.name, got, want)
 		}
 	}
-	wantUsage(t, store, pool, mediaA, 100, 0)
+	wantUsage(t, store, pool, mediaA, 130, 0)
 }
 
 func TestMediaFailureBeforeCommitLeavesNoTraceAndRetryAppliesOnce(t *testing.T) {

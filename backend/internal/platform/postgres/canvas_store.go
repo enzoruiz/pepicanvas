@@ -184,14 +184,7 @@ func (s *CanvasStore) Apply(ctx context.Context, key canvas.Key, operation canva
 		}); err != nil {
 			return err
 		}
-		if err := q.InsertOutboxEvent(ctx, db.InsertOutboxEventParams{
-			TenantID: key.TenantID, CanvasID: key.CanvasID, Revision: result.Revision,
-			OperationID:   operation.ID,
-			CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
-			Kind:          kind, Mutation: payload,
-			ObjectID: result.ObjectID, Z: result.Z,
-			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
-		}); err != nil {
+		if err := insertMutationRecord(ctx, q, key, operation, kind, payload, result, now); err != nil {
 			return err
 		}
 		if s.beforeCommit != nil {
@@ -259,22 +252,11 @@ func mutate(ctx context.Context, q *db.Queries, key canvas.Key, mutation canvas.
 		return canvas.Result{Revision: revision}, err
 
 	case canvas.CreateObject:
-		top, err := q.TakeTopZ(ctx, db.TakeTopZParams{TenantID: tenant, CanvasID: canvasID})
-		if err != nil {
-			return canvas.Result{}, err
-		}
 		id, err := newObjectID()
 		if err != nil {
 			return canvas.Result{}, err
 		}
-		t := m.Transform
-		err = q.InsertObject(ctx, db.InsertObjectParams{
-			TenantID: tenant, CanvasID: canvasID, ObjectID: id,
-			Kind: string(m.Kind), Content: m.Content,
-			X: int32(t.X), Y: int32(t.Y), Width: int32(t.Width), Height: int32(t.Height),
-			Rotation: t.Rotation, Z: top.Z,
-		})
-		return canvas.Result{Revision: top.Revision, ObjectID: id, Z: top.Z}, err
+		return createObject(ctx, q, key, id, m)
 
 	case canvas.SetContent:
 		if err := requireObject(ctx, q, key, m.ObjectID); err != nil {
@@ -317,6 +299,36 @@ func mutate(ctx context.Context, q *db.Queries, key canvas.Key, mutation canvas.
 	default:
 		return canvas.Result{}, fmt.Errorf("%w: unsupported mutation %T", canvas.ErrInvalid, mutation)
 	}
+}
+
+// createObject inserts object id above every object of the canvas and bumps
+// its revision, inside the transaction that holds the canvas lock.
+func createObject(ctx context.Context, q *db.Queries, key canvas.Key, id string, m canvas.CreateObject) (canvas.Result, error) {
+	top, err := q.TakeTopZ(ctx, db.TakeTopZParams{TenantID: key.TenantID, CanvasID: key.CanvasID})
+	if err != nil {
+		return canvas.Result{}, err
+	}
+	t := m.Transform
+	err = q.InsertObject(ctx, db.InsertObjectParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, ObjectID: id,
+		Kind: string(m.Kind), Content: m.Content,
+		X: int32(t.X), Y: int32(t.Y), Width: int32(t.Width), Height: int32(t.Height),
+		Rotation: t.Rotation, Z: top.Z,
+	})
+	return canvas.Result{Revision: top.Revision, ObjectID: id, Z: top.Z}, err
+}
+
+// insertMutationRecord writes the outbox record of a committed mutation, in
+// the transaction that committed it.
+func insertMutationRecord(ctx context.Context, q *db.Queries, key canvas.Key, operation canvas.Operation, kind string, payload []byte, result canvas.Result, now time.Time) error {
+	return q.InsertOutboxEvent(ctx, db.InsertOutboxEventParams{
+		TenantID: key.TenantID, CanvasID: key.CanvasID, Revision: result.Revision,
+		OperationID:   operation.ID,
+		CorrelationID: pgtype.Text{String: operation.CorrelationID, Valid: operation.CorrelationID != ""},
+		Kind:          kind, Mutation: payload,
+		ObjectID: result.ObjectID, Z: result.Z,
+		CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	})
 }
 
 // requireObject reports ErrNotFound for an object that is missing from this

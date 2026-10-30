@@ -262,7 +262,7 @@ func newEnvWith(t *testing.T, limits httpapi.Limits, ingressLimits ingress.Limit
 		Canvases:      e.canvases,
 		Subscriptions: faultySubscriptions{Subscriptions: subscription.NewService(e.subs, subscription.WithClock(e.clock.Now)), faults: e.faults, calls: e.calls},
 		Tenants:       faultyTenants{Tenants: e.subs, faults: e.faults},
-		Invitations:   invitation.NewService(e.invs, invitation.WithClock(e.clock.Now)),
+		Invitations:   countingInvitations{Service: invitation.NewService(e.invs, invitation.WithClock(e.clock.Now)), calls: e.calls},
 		Ingress:       e.ingress,
 		Logger:        logger,
 		Now:           e.clock.Now,
@@ -377,6 +377,7 @@ func (e *env) register(op, email string, options ...option) access.AccountID {
 	// Both stores read one accounts table in PostgreSQL.
 	normalized, _ := access.NormalizeEmail(email)
 	e.subs.AddAccount(id, normalized)
+	e.invs.AddAccount(id, normalized)
 	return id
 }
 

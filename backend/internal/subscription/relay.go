@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,12 @@ type RelayCounters struct {
 	Retries uint64
 	// StoreErrors counts failed store calls; their cuts stay pending.
 	StoreErrors uint64
+	// Unknown counts cuts of a kind this release does not know, once per
+	// cut; they stay pending for a release that knows it.
+	Unknown uint64
+	// Stalled counts passes whose full batch held only unknown cuts, so the
+	// cuts behind them wait for a release that knows the kind.
+	Stalled uint64
 }
 
 // CutRelay applies the pending access cuts of the cut outbox to the live
@@ -81,9 +88,18 @@ type CutRelay struct {
 	config RelayConfig
 	// failures counts consecutive failed passes. Only the loop uses it.
 	failures int
-	wake     chan struct{}
-	stop     chan struct{}
-	done     chan struct{}
+	// unknownLogged holds the pending cuts of an unknown kind already
+	// logged, so each is logged once. A pass that reads its whole batch
+	// keeps only the ones it saw; one that returns early only adds. Only
+	// the loop uses it.
+	unknownLogged map[int64]struct{}
+	// stalled reports that the last pass's full batch held only unknown
+	// cuts, so the stall is logged once until a batch delivers again. Only
+	// the loop uses it.
+	stalled bool
+	wake    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
 	// abort cancels the apply in flight when Close runs out of time.
 	abort       context.Context
 	cancelAbort context.CancelFunc
@@ -92,7 +108,7 @@ type CutRelay struct {
 	started bool
 	closed  bool
 
-	applied, exceeded, rejected, retries, storeErrors atomic.Uint64
+	applied, exceeded, rejected, retries, storeErrors, unknown, stalls atomic.Uint64
 }
 
 // NewCutRelay validates the configuration. Start runs it.
@@ -181,6 +197,8 @@ func (r *CutRelay) Counters() RelayCounters {
 		Rejected:    r.rejected.Load(),
 		Retries:     r.retries.Load(),
 		StoreErrors: r.storeErrors.Load(),
+		Unknown:     r.unknown.Load(),
+		Stalled:     r.stalls.Load(),
 	}
 }
 
@@ -243,8 +261,8 @@ func (r *CutRelay) stopping() bool {
 }
 
 // pass applies up to BatchSize pending cuts, oldest first. It returns zero
-// when a full batch settled, so a backlog does not wait for the poll, the
-// backoff when a cut stayed pending, or the poll interval.
+// when a full batch delivered a cut, so a backlog does not wait for the
+// poll, the backoff when a cut stayed pending, or the poll interval.
 func (r *CutRelay) pass() time.Duration {
 	// The pass reads the store after every commit notified so far.
 	select {
@@ -258,32 +276,84 @@ func (r *CutRelay) pass() time.Duration {
 		r.storeFailed("read pending cuts", err)
 		return r.backoff()
 	}
-	for _, cut := range cuts {
+	logged := make(map[int64]struct{})
+	read := false
+	defer func() {
+		if !read {
+			// The cuts this pass did not reach are still pending and
+			// already logged; keep them.
+			maps.Copy(logged, r.unknownLogged)
+		}
+		r.unknownLogged = logged
+	}()
+	delivered := 0
+	for _, pending := range cuts {
 		if r.stopping() {
 			return 0
 		}
-		if !r.deliver(cut) {
+		cut, err := pending.cut()
+		if err != nil {
+			// Applying it as anything else could cut the wrong connections,
+			// and settling it would lose it for a release that knows its
+			// kind. It stays pending and does not hold back later cuts.
+			r.skipUnknown(pending, logged, err)
+			continue
+		}
+		if !r.deliver(pending, cut) {
 			return r.backoff()
 		}
+		delivered++
 	}
+	read = true
 	r.failures = 0
-	if len(cuts) == r.config.BatchSize {
+	full := len(cuts) == r.config.BatchSize
+	r.reportStall(full && delivered == 0, cuts)
+	if full && delivered > 0 {
 		return 0
 	}
 	return r.config.PollInterval
 }
 
+// reportStall counts every pass whose full batch held only unknown cuts and
+// logs the first of a run of them: the cuts behind that batch wait until a
+// release that knows the kind runs.
+func (r *CutRelay) reportStall(stalled bool, cuts []PendingCut) {
+	if stalled {
+		r.stalls.Add(1)
+		if !r.stalled {
+			r.config.Logger.Warn("access cut batch holds only unknown kinds",
+				slog.Int("batch", len(cuts)), slog.Int64("first_cut_id", cuts[0].ID))
+		}
+	}
+	r.stalled = stalled
+}
+
+// skipUnknown leaves a cut of an unknown kind pending and logs it once, with
+// its kind and never its account.
+func (r *CutRelay) skipUnknown(pending PendingCut, logged map[int64]struct{}, err error) {
+	logged[pending.ID] = struct{}{}
+	if _, seen := r.unknownLogged[pending.ID]; seen {
+		return
+	}
+	r.unknown.Add(1)
+	r.cutLog(pending).Warn("access cut kind unknown", slog.String("error", err.Error()))
+}
+
+func (r *CutRelay) cutLog(pending PendingCut) *slog.Logger {
+	return r.config.Logger.With(
+		slog.Int64("cut_id", pending.ID),
+		slog.String("kind", string(pending.Kind)),
+		slog.String("tenant_id", pending.TenantID),
+		slog.Uint64("version", pending.Version),
+		slog.String("correlation_id", pending.CorrelationID),
+	)
+}
+
 // deliver applies one cut and records its outcome. It reports whether the
 // cut settled. A cut the Cutter applied, even over its close budget, or can
 // never apply settles; any other failure leaves it pending for a retry.
-func (r *CutRelay) deliver(pending PendingCut) bool {
-	cut := revocation.Cut{
-		OperationID:   fmt.Sprintf("cut-%d", pending.ID),
-		Type:          revocation.TypeDeactivation,
-		Target:        revocation.Target{Kind: revocation.TargetTenant, TenantID: pending.TenantID},
-		Version:       pending.Version,
-		CorrelationID: pending.CorrelationID,
-	}
+func (r *CutRelay) deliver(pending PendingCut, cut revocation.Cut) bool {
+	log := r.cutLog(pending)
 	ctx, cancel := context.WithTimeout(r.config.Correlate(r.abort, pending.CorrelationID), r.config.AttemptTimeout)
 	report, err := r.config.Cutter.Apply(ctx, cut)
 	cancel()
@@ -291,12 +361,6 @@ func (r *CutRelay) deliver(pending PendingCut) bool {
 		// Close ran out of time: the cut stays pending as it was.
 		return false
 	}
-	log := r.config.Logger.With(
-		slog.Int64("cut_id", pending.ID),
-		slog.String("tenant_id", pending.TenantID),
-		slog.Uint64("version", pending.Version),
-		slog.String("correlation_id", pending.CorrelationID),
-	)
 	switch {
 	case err == nil || errors.Is(err, revocation.ErrBudgetExceeded):
 		if !r.settle(pending) {
@@ -312,16 +376,43 @@ func (r *CutRelay) deliver(pending PendingCut) bool {
 		log.Info("access cut applied", attrs...)
 	case errors.Is(err, revocation.ErrInvalidCut) || errors.Is(err, revocation.ErrOperationConflict):
 		// Retrying cannot succeed.
-		if !r.settle(pending) {
-			return false
-		}
-		r.rejected.Add(1)
-		log.Error("access cut rejected", slog.String("error", err.Error()))
+		return r.reject(pending, log, err)
 	default:
 		r.retries.Add(1)
 		log.Warn("access cut apply failed", slog.String("error", err.Error()))
 		return false
 	}
+	return true
+}
+
+// cut maps a pending cut to the registry's cut: a deactivation targets the
+// whole tenant, a revocation the revoked account in that tenant.
+func (p PendingCut) cut() (revocation.Cut, error) {
+	cut := revocation.Cut{
+		OperationID:   fmt.Sprintf("cut-%d", p.ID),
+		Version:       p.Version,
+		CorrelationID: p.CorrelationID,
+	}
+	switch p.Kind {
+	case CutDeactivation:
+		cut.Type = revocation.TypeDeactivation
+		cut.Target = revocation.Target{Kind: revocation.TargetTenant, TenantID: p.TenantID}
+	case CutRevocation:
+		cut.Type = revocation.TypeRevocation
+		cut.Target = revocation.Target{Kind: revocation.TargetAccount, TenantID: p.TenantID, ID: string(p.AccountID)}
+	default:
+		return revocation.Cut{}, fmt.Errorf("subscription: unknown cut kind %q", p.Kind)
+	}
+	return cut, nil
+}
+
+// reject settles a cut that can never be applied and logs it as an error.
+func (r *CutRelay) reject(pending PendingCut, log *slog.Logger, err error) bool {
+	if !r.settle(pending) {
+		return false
+	}
+	r.rejected.Add(1)
+	log.Error("access cut rejected", slog.String("error", err.Error()))
 	return true
 }
 

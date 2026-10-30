@@ -26,6 +26,39 @@ func (q *Queries) DeleteExpiredInvitationOperation(ctx context.Context, arg Dele
 	return err
 }
 
+const deleteExpiredMembershipRevocation = `-- name: DeleteExpiredMembershipRevocation :exec
+DELETE FROM membership_revocations
+WHERE operation_id = $1 AND accepted_at <= $2
+`
+
+type DeleteExpiredMembershipRevocationParams struct {
+	OperationID string
+	ExpiredAt   pgtype.Timestamptz
+}
+
+func (q *Queries) DeleteExpiredMembershipRevocation(ctx context.Context, arg DeleteExpiredMembershipRevocationParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredMembershipRevocation, arg.OperationID, arg.ExpiredAt)
+	return err
+}
+
+const deleteModeratorMembership = `-- name: DeleteModeratorMembership :execrows
+DELETE FROM memberships
+WHERE tenant_id = $1 AND account_id = $2 AND role = 'moderator'
+`
+
+type DeleteModeratorMembershipParams struct {
+	TenantID  string
+	AccountID string
+}
+
+func (q *Queries) DeleteModeratorMembership(ctx context.Context, arg DeleteModeratorMembershipParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteModeratorMembership, arg.TenantID, arg.AccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getInvitationOperation = `-- name: GetInvitationOperation :one
 SELECT kind, owner_account_id, fingerprint, tenant_id, invitation_id, created_at, expires_at, status, canvas_id, correlation_id, accepted_at
 FROM invitation_operations
@@ -68,6 +101,82 @@ func (q *Queries) GetInvitationOperation(ctx context.Context, arg GetInvitationO
 		&i.AcceptedAt,
 	)
 	return i, err
+}
+
+const getMemberAccess = `-- name: GetMemberAccess :one
+SELECT m.role, t.subscription_status, t.access_version
+FROM memberships m
+JOIN tenants t ON t.tenant_id = m.tenant_id
+WHERE m.tenant_id = $1 AND m.account_id = $2
+`
+
+type GetMemberAccessParams struct {
+	TenantID  string
+	AccountID string
+}
+
+type GetMemberAccessRow struct {
+	Role               string
+	SubscriptionStatus string
+	AccessVersion      int64
+}
+
+// The account's role with its tenant's status and access version, read in
+// one statement so the grant's version matches the facts it was read with.
+func (q *Queries) GetMemberAccess(ctx context.Context, arg GetMemberAccessParams) (GetMemberAccessRow, error) {
+	row := q.db.QueryRow(ctx, getMemberAccess, arg.TenantID, arg.AccountID)
+	var i GetMemberAccessRow
+	err := row.Scan(&i.Role, &i.SubscriptionStatus, &i.AccessVersion)
+	return i, err
+}
+
+const getMembershipRevocation = `-- name: GetMembershipRevocation :one
+SELECT owner_account_id, fingerprint, tenant_id, account_id, version, correlation_id, accepted_at
+FROM membership_revocations
+WHERE operation_id = $1 AND accepted_at > $2
+`
+
+type GetMembershipRevocationParams struct {
+	OperationID string
+	NotBefore   pgtype.Timestamptz
+}
+
+type GetMembershipRevocationRow struct {
+	OwnerAccountID string
+	Fingerprint    []byte
+	TenantID       string
+	AccountID      string
+	Version        int64
+	CorrelationID  pgtype.Text
+	AcceptedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) GetMembershipRevocation(ctx context.Context, arg GetMembershipRevocationParams) (GetMembershipRevocationRow, error) {
+	row := q.db.QueryRow(ctx, getMembershipRevocation, arg.OperationID, arg.NotBefore)
+	var i GetMembershipRevocationRow
+	err := row.Scan(
+		&i.OwnerAccountID,
+		&i.Fingerprint,
+		&i.TenantID,
+		&i.AccountID,
+		&i.Version,
+		&i.CorrelationID,
+		&i.AcceptedAt,
+	)
+	return i, err
+}
+
+const incrementAccessVersion = `-- name: IncrementAccessVersion :one
+UPDATE tenants SET access_version = access_version + 1
+WHERE tenant_id = $1
+RETURNING access_version
+`
+
+func (q *Queries) IncrementAccessVersion(ctx context.Context, tenantID string) (int64, error) {
+	row := q.db.QueryRow(ctx, incrementAccessVersion, tenantID)
+	var access_version int64
+	err := row.Scan(&access_version)
+	return access_version, err
 }
 
 const insertInvitation = `-- name: InsertInvitation :exec
@@ -137,6 +246,60 @@ func (q *Queries) InsertInvitationOperation(ctx context.Context, arg InsertInvit
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const insertMembershipRevocation = `-- name: InsertMembershipRevocation :exec
+INSERT INTO membership_revocations (operation_id, fingerprint, owner_account_id, tenant_id, account_id, version, correlation_id, accepted_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`
+
+type InsertMembershipRevocationParams struct {
+	OperationID    string
+	Fingerprint    []byte
+	OwnerAccountID string
+	TenantID       string
+	AccountID      string
+	Version        int64
+	CorrelationID  pgtype.Text
+	AcceptedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) InsertMembershipRevocation(ctx context.Context, arg InsertMembershipRevocationParams) error {
+	_, err := q.db.Exec(ctx, insertMembershipRevocation,
+		arg.OperationID,
+		arg.Fingerprint,
+		arg.OwnerAccountID,
+		arg.TenantID,
+		arg.AccountID,
+		arg.Version,
+		arg.CorrelationID,
+		arg.AcceptedAt,
+	)
+	return err
+}
+
+const insertRevocationCut = `-- name: InsertRevocationCut :exec
+INSERT INTO access_cuts (tenant_id, kind, account_id, version, correlation_id, created_at)
+VALUES ($1, 'revocation', $2, $3, $4, $5)
+`
+
+type InsertRevocationCutParams struct {
+	TenantID      string
+	AccountID     pgtype.Text
+	Version       int64
+	CorrelationID pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) InsertRevocationCut(ctx context.Context, arg InsertRevocationCutParams) error {
+	_, err := q.db.Exec(ctx, insertRevocationCut,
+		arg.TenantID,
+		arg.AccountID,
+		arg.Version,
+		arg.CorrelationID,
+		arg.CreatedAt,
+	)
+	return err
 }
 
 const isTenantMember = `-- name: IsTenantMember :one
@@ -232,6 +395,48 @@ func (q *Queries) ListPendingInvitations(ctx context.Context, arg ListPendingInv
 	return items, nil
 }
 
+const listTenantModerators = `-- name: ListTenantModerators :many
+SELECT m.account_id, a.email, i.accepted_at
+FROM memberships m
+JOIN accounts a ON a.account_id = m.account_id
+LEFT JOIN LATERAL (
+    SELECT inv.accepted_at FROM invitations inv
+    WHERE inv.tenant_id = m.tenant_id AND inv.accepted_by = m.account_id
+    ORDER BY inv.accepted_at DESC
+    LIMIT 1
+) i ON true
+WHERE m.tenant_id = $1 AND m.role = 'moderator'
+ORDER BY i.accepted_at NULLS FIRST, m.account_id
+`
+
+type ListTenantModeratorsRow struct {
+	AccountID  string
+	Email      string
+	AcceptedAt pgtype.Timestamptz
+}
+
+// Each moderator with its email and the latest acceptance by the account of
+// an invitation of the tenant; NULL when none records one.
+func (q *Queries) ListTenantModerators(ctx context.Context, tenantID string) ([]ListTenantModeratorsRow, error) {
+	rows, err := q.db.Query(ctx, listTenantModerators, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTenantModeratorsRow
+	for rows.Next() {
+		var i ListTenantModeratorsRow
+		if err := rows.Scan(&i.AccountID, &i.Email, &i.AcceptedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockInvitation = `-- name: LockInvitation :one
 SELECT invitation_id, tenant_id, token_hash, created_by, created_at, expires_at, revoked_at, accepted_at, accepted_by FROM invitations
 WHERE tenant_id = $1 AND invitation_id = $2
@@ -283,6 +488,24 @@ func (q *Queries) LockInvitationByToken(ctx context.Context, tokenHash []byte) (
 	return i, err
 }
 
+const lockMembership = `-- name: LockMembership :one
+SELECT role FROM memberships
+WHERE tenant_id = $1 AND account_id = $2
+FOR UPDATE
+`
+
+type LockMembershipParams struct {
+	TenantID  string
+	AccountID string
+}
+
+func (q *Queries) LockMembership(ctx context.Context, arg LockMembershipParams) (string, error) {
+	row := q.db.QueryRow(ctx, lockMembership, arg.TenantID, arg.AccountID)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
 const lockOwnedTenantShare = `-- name: LockOwnedTenantShare :one
 SELECT tenant_id, subscription_status
 FROM tenants
@@ -300,6 +523,27 @@ type LockOwnedTenantShareRow struct {
 func (q *Queries) LockOwnedTenantShare(ctx context.Context, ownerAccountID pgtype.Text) (LockOwnedTenantShareRow, error) {
 	row := q.db.QueryRow(ctx, lockOwnedTenantShare, ownerAccountID)
 	var i LockOwnedTenantShareRow
+	err := row.Scan(&i.TenantID, &i.SubscriptionStatus)
+	return i, err
+}
+
+const lockOwnedTenantUpdate = `-- name: LockOwnedTenantUpdate :one
+SELECT tenant_id, subscription_status
+FROM tenants
+WHERE owner_account_id = $1
+FOR UPDATE
+`
+
+type LockOwnedTenantUpdateRow struct {
+	TenantID           string
+	SubscriptionStatus string
+}
+
+// The row lock conflicts with the FOR SHARE read of every mutation of the
+// tenant, so mutations and membership revocations commit one at a time.
+func (q *Queries) LockOwnedTenantUpdate(ctx context.Context, ownerAccountID pgtype.Text) (LockOwnedTenantUpdateRow, error) {
+	row := q.db.QueryRow(ctx, lockOwnedTenantUpdate, ownerAccountID)
+	var i LockOwnedTenantUpdateRow
 	err := row.Scan(&i.TenantID, &i.SubscriptionStatus)
 	return i, err
 }
@@ -361,6 +605,21 @@ WHERE operation_id IN (
 // Rows locked by a concurrent purge are left for the next one.
 func (q *Queries) PurgeExpiredInvitationOperations(ctx context.Context, expiredAt pgtype.Timestamptz) error {
 	_, err := q.db.Exec(ctx, purgeExpiredInvitationOperations, expiredAt)
+	return err
+}
+
+const purgeExpiredMembershipRevocations = `-- name: PurgeExpiredMembershipRevocations :exec
+DELETE FROM membership_revocations
+WHERE operation_id IN (
+    SELECT r.operation_id FROM membership_revocations r
+    WHERE r.accepted_at <= $1
+    FOR UPDATE SKIP LOCKED
+)
+`
+
+// Rows locked by a concurrent purge are left for the next one.
+func (q *Queries) PurgeExpiredMembershipRevocations(ctx context.Context, expiredAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, purgeExpiredMembershipRevocations, expiredAt)
 	return err
 }
 

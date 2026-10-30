@@ -1,9 +1,12 @@
 package mediaexec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/gif"
 	"io"
 	"math"
 	"os"
@@ -264,7 +267,7 @@ func TestInspectRejectsStagingOverflowBeforeRunningCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = adapter.Inspect(context.Background(), strings.NewReader("1234567"))
-	assertAdapterError(t, err, ErrorInputTooLarge)
+	assertRejectionCode(t, err, media.RejectionInputTooLarge)
 	if calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", calls)
 	}
@@ -293,17 +296,25 @@ func TestInspectRejectsReaderFailureAndCleansStaging(t *testing.T) {
 func TestInspectOrchestratesApprovedKindsAndCompleteDecode(t *testing.T) {
 	t.Parallel()
 
+	validGIF := encodeGIF(t, &gif.GIF{
+		Image:  []*image.Paletted{image.NewPaletted(image.Rect(0, 0, 10, 20), gifPalette), image.NewPaletted(image.Rect(0, 0, 10, 20), gifPalette)},
+		Delay:  []int{10, 10},
+		Config: image.Config{ColorModel: gifPalette, Width: 10, Height: 20},
+	})
 	tests := []struct {
 		name      string
 		metadata  string
 		frames    string
+		input     []byte
 		want      media.Inspection
 		wantCalls int
 	}{
-		{name: "image", metadata: imageProbe(), want: media.Inspection{Kind: media.KindImage, InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}}, wantCalls: 2},
-		{name: "audio", metadata: audioProbe(), want: media.Inspection{Kind: media.KindAudio, InputBytes: 1, StreamCount: 1, Duration: time.Second}, wantCalls: 2},
-		{name: "video", metadata: videoProbeJSON(), want: media.Inspection{Kind: media.KindVideo, InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}, Duration: time.Second}, wantCalls: 2},
-		{name: "GIF all frames", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":30,"height":40}]}`, want: media.Inspection{Kind: media.KindGIF, InputBytes: 1, StreamCount: 1, Duration: time.Second, GIFFrameCount: 2, GIFFrameDimensions: []media.Dimensions{{Width: 10, Height: 20}, {Width: 30, Height: 40}}}, wantCalls: 3},
+		{name: "image", metadata: imageProbe(), want: media.Inspection{Kind: media.KindImage, MediaType: "image/png", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}}, wantCalls: 2},
+		{name: "JPEG", metadata: `{"format":{"format_name":"jpeg_pipe"},"streams":[{"codec_type":"video","codec_name":"mjpeg","width":10,"height":20}]}`, want: media.Inspection{Kind: media.KindImage, MediaType: "image/jpeg", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}}, wantCalls: 2},
+		{name: "WebP", metadata: `{"format":{"format_name":"webp_pipe"},"streams":[{"codec_type":"video","codec_name":"webp","width":10,"height":20}]}`, want: media.Inspection{Kind: media.KindImage, MediaType: "image/webp", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}}, wantCalls: 2},
+		{name: "audio", metadata: audioProbe(), want: media.Inspection{Kind: media.KindAudio, MediaType: "audio/mpeg", InputBytes: 1, StreamCount: 1, Duration: time.Second}, wantCalls: 2},
+		{name: "video", metadata: videoProbeJSON(), want: media.Inspection{Kind: media.KindVideo, MediaType: "video/webm", InputBytes: 1, StreamCount: 1, Dimensions: media.Dimensions{Width: 10, Height: 20}, Duration: time.Second}, wantCalls: 2},
+		{name: "GIF all frames", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, input: validGIF, want: media.Inspection{Kind: media.KindGIF, MediaType: "image/gif", InputBytes: int64(len(validGIF)), StreamCount: 1, Duration: time.Second, GIFFrameCount: 2, GIFFrameDimensions: []media.Dimensions{{Width: 10, Height: 20}, {Width: 10, Height: 20}}}, wantCalls: 3},
 	}
 
 	for _, tt := range tests {
@@ -327,7 +338,11 @@ func TestInspectOrchestratesApprovedKindsAndCompleteDecode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := adapter.Inspect(context.Background(), strings.NewReader("x"))
+			input := tt.input
+			if input == nil {
+				input = []byte("x")
+			}
+			got, err := adapter.Inspect(context.Background(), bytes.NewReader(input))
 			if err != nil || !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Inspect() = %#v, %v, want %#v, nil", got, err, tt.want)
 			}
@@ -345,16 +360,16 @@ func TestInspectValidatesBeforeDecodeAndRejectsGIFCountMismatch(t *testing.T) {
 		name     string
 		metadata string
 		frames   string
-		code     ErrorCode
+		code     media.RejectionCode
 		calls    int
 	}{
-		{name: "domain validation precedes decode", metadata: strings.Replace(imageProbe(), `"width":10`, `"width":11`, 1), code: ErrorValidation, calls: 1},
-		{name: "GIF frame count mismatch", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20}]}`, code: ErrorInvalidFrames, calls: 2},
+		{name: "domain validation precedes decode", metadata: strings.Replace(imageProbe(), `"width":10`, `"width":11`, 1), code: media.RejectionDimensionsExceeded, calls: 1},
+		{name: "GIF frame count mismatch", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20}]}`, code: media.RejectionInvalidMetadata, calls: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := testConfig(t)
-			config.Limits.MaxWidth = 10
+			config.Limits.MaxImageWidth = 10
 			calls := 0
 			adapter, err := New(config, runnerFunc(func(_ context.Context, command Command, stdout, _ io.Writer) error {
 				calls++
@@ -371,7 +386,7 @@ func TestInspectValidatesBeforeDecodeAndRejectsGIFCountMismatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = adapter.Inspect(context.Background(), strings.NewReader("x"))
-			assertAdapterError(t, err, tt.code)
+			assertRejectionCode(t, err, tt.code)
 			if calls != tt.calls {
 				t.Fatalf("runner calls = %d, want %d", calls, tt.calls)
 			}
@@ -423,7 +438,7 @@ func TestInspectRejectsFailedCompleteDecodeWithoutPartialAcceptance(t *testing.T
 		t.Fatal(err)
 	}
 	inspection, err := adapter.Inspect(context.Background(), strings.NewReader("x"))
-	assertAdapterError(t, err, ErrorCommandFailed)
+	assertRejectionCode(t, err, media.RejectionDecodeFailed)
 	if !reflect.DeepEqual(inspection, media.Inspection{}) {
 		t.Fatalf("inspection = %#v, want zero value after failed decode", inspection)
 	}
@@ -475,7 +490,7 @@ func TestInspectReturnsFixedSafeErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = adapter.Inspect(context.Background(), strings.NewReader("x"))
-	assertAdapterError(t, err, ErrorCommandFailed)
+	assertRejectionCode(t, err, media.RejectionUnsupportedKind)
 	if strings.Contains(err.Error(), unsafe) || len(err.Error()) > 64 {
 		t.Fatalf("public error = %q, want bounded fixed safe text", err)
 	}
@@ -600,4 +615,169 @@ func videoProbeJSON() string {
 
 func gifProbe() string {
 	return `{"format":{"format_name":"gif","duration":"1"},"streams":[{"codec_type":"video","codec_name":"gif","width":10,"height":20,"duration":"1","nb_frames":"2"}]}`
+}
+
+// TestInspectRejectsContentCausedFailuresWithTheirRule pins the public rule of
+// every failure the media content causes; the rest stay adapter errors.
+func TestInspectRejectsContentCausedFailuresWithTheirRule(t *testing.T) {
+	t.Parallel()
+
+	const (
+		stageMetadata = "metadata"
+		stageFrames   = "frames"
+		stageDecode   = "decode"
+	)
+	svgProbe := `{"format":{"format_name":"svg_pipe"},"streams":[{"codec_type":"video","codec_name":"svg","width":10,"height":20}]}`
+	largeGIFProbe := strings.NewReplacer(`"width":10`, `"width":4097`, `"height":20`, `"height":4096`).Replace(gifProbe())
+	tests := []struct {
+		name     string
+		metadata string
+		frames   string
+		input    string
+		limits   func(*media.Limits)
+		stderr   map[string]string
+		fail     map[string]Result
+		want     media.RejectionCode
+		calls    int
+	}{
+		{name: "probe cannot identify the content", fail: map[string]Result{stageMetadata: FailedResult(FailureToolExit)}, want: media.RejectionUnsupportedKind, calls: 1},
+		{name: "SVG", metadata: svgProbe, want: media.RejectionUnsupportedKind, calls: 1},
+		{name: "unsupported codec in a supported container", metadata: strings.Replace(imageProbe(), `"codec_name":"png"`, `"codec_name":"apng"`, 1), want: media.RejectionUnsupportedKind, calls: 1},
+		{name: "malformed probe", metadata: `{"format":`, want: media.RejectionInvalidMetadata, calls: 1},
+		{name: "image declares a duration", metadata: strings.Replace(imageProbe(), `"png_pipe"`, `"png_pipe","duration":"1"`, 1), want: media.RejectionInvalidMetadata, calls: 1},
+		{name: "GIF without a frame count", metadata: strings.Replace(gifProbe(), `"nb_frames":"2"`, `"nb_frames":"N/A"`, 1), want: media.RejectionInvalidMetadata, calls: 1},
+		{name: "GIF frames are not decodable", metadata: gifProbe(), fail: map[string]Result{stageFrames: FailedResult(FailureToolExit)}, want: media.RejectionDecodeFailed, calls: 2},
+		{name: "GIF frame metadata is malformed", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20}`, want: media.RejectionInvalidMetadata, calls: 2},
+		{name: "GIF decoded frame narrower than declared", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":9,"height":20}]}`, want: media.RejectionInvalidMetadata, calls: 2},
+		{name: "GIF decoded frame taller than declared", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":21},{"width":10,"height":20}]}`, want: media.RejectionInvalidMetadata, calls: 2},
+		{name: "GIF frame over 4096", metadata: largeGIFProbe, frames: `{"frames":[{"width":4097,"height":4096},{"width":4097,"height":4096}]}`, want: media.RejectionDimensionsExceeded, calls: 2},
+		{name: "image over 4096", metadata: strings.Replace(imageProbe(), `"height":20`, `"height":4097`, 1), want: media.RejectionDimensionsExceeded, calls: 1},
+		{name: "image bytes over the image limit", metadata: imageProbe(), input: "xx", limits: func(l *media.Limits) { l.MaxImageBytes = 1 }, want: media.RejectionInputTooLarge, calls: 1},
+		{name: "GIF frame count over the limit", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, limits: func(l *media.Limits) { l.MaxGIFFrames = 1 }, want: media.RejectionFrameCountExceeded, calls: 2},
+		{name: "full decode fails", metadata: imageProbe(), fail: map[string]Result{stageDecode: FailedResult(FailureToolExit)}, want: media.RejectionDecodeFailed, calls: 2},
+		// ffmpeg clips a frame that overflows the logical screen and only warns,
+		// so only the image descriptor reveals the contradiction.
+		{name: "GIF frame declared outside its screen", metadata: gifProbe(), frames: `{"frames":[{"width":10,"height":20},{"width":10,"height":20}]}`, input: string(gifPatchedFrame(1, frameDescriptor{width: 5000, height: 16})(t)), want: media.RejectionInvalidMetadata, calls: 3},
+		// ffmpeg logs some decode errors, such as a truncated GIF, and exits 0.
+		{name: "full decode reports an error", metadata: imageProbe(), stderr: map[string]string{stageDecode: "LZW decode failed"}, want: media.RejectionDecodeFailed, calls: 2},
+		{name: "probe memory limit", fail: map[string]Result{stageMetadata: FailedResult(FailureMemoryLimit)}, want: media.RejectionResourcesExceeded, calls: 1},
+		{name: "frame probe task limit", metadata: gifProbe(), fail: map[string]Result{stageFrames: FailedResult(FailureTaskLimit)}, want: media.RejectionResourcesExceeded, calls: 2},
+		{name: "decode CPU limit", metadata: imageProbe(), fail: map[string]Result{stageDecode: FailedResult(FailureCPULimit)}, want: media.RejectionResourcesExceeded, calls: 2},
+		{name: "decode memory limit", metadata: imageProbe(), fail: map[string]Result{stageDecode: FailedResult(FailureMemoryLimit)}, want: media.RejectionResourcesExceeded, calls: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := testConfig(t)
+			if tt.limits != nil {
+				tt.limits(&config.Limits)
+			}
+			calls := 0
+			adapter, err := New(config, beginFunc(func(context.Context, media.Limits) (Execution, Result) {
+				return &stagedExecution{run: func(command Command, stdout, stderr io.Writer) Result {
+					calls++
+					stage := stageDecode
+					output := ""
+					switch {
+					case command.Path == config.FFprobePath && contains(command.Args, "-show_frames"):
+						stage, output = stageFrames, tt.frames
+					case command.Path == config.FFprobePath:
+						stage, output = stageMetadata, tt.metadata
+					}
+					if result, failed := tt.fail[stage]; failed {
+						return result
+					}
+					_, _ = io.WriteString(stderr, tt.stderr[stage])
+					_, _ = io.WriteString(stdout, output)
+					return SuccessfulResult()
+				}}, SuccessfulResult()
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := tt.input
+			if input == "" {
+				input = "x"
+			}
+			inspection, err := adapter.Inspect(context.Background(), strings.NewReader(input))
+			assertRejectionCode(t, err, tt.want)
+			if !reflect.DeepEqual(inspection, media.Inspection{}) {
+				t.Fatalf("inspection = %#v, want zero value after a rejection", inspection)
+			}
+			if calls != tt.calls {
+				t.Fatalf("runner calls = %d, want %d", calls, tt.calls)
+			}
+			entries, readErr := os.ReadDir(config.TempRoot)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("temp root entries = %v, %v, want empty after a rejection", entries, readErr)
+			}
+		})
+	}
+}
+
+// TestInspectKeepsOperationalFailuresAsAdapterErrors pins the failures the
+// content does not cause: they stay *Error and become upload failures.
+func TestInspectKeepsOperationalFailuresAsAdapterErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		result Result
+		want   ErrorCode
+	}{
+		{name: "timeout", result: FailedResult(FailureTimeout), want: ErrorTimeout},
+		{name: "cancellation", result: FailedResult(FailureCancelled), want: ErrorCancelled},
+		{name: "containment setup", result: FailedResult(FailureContainmentSetup), want: ErrorContainmentSetup},
+		{name: "internal", result: FailedResult(FailureInternal), want: ErrorExecutionFailed},
+	} {
+		for _, stage := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s/command %d", tt.name, stage), func(t *testing.T) {
+				t.Parallel()
+				config := testConfig(t)
+				calls := 0
+				adapter, err := New(config, beginFunc(func(context.Context, media.Limits) (Execution, Result) {
+					return &stagedExecution{run: func(command Command, stdout, _ io.Writer) Result {
+						calls++
+						if calls == stage {
+							return tt.result
+						}
+						if command.Path == config.FFprobePath {
+							_, _ = io.WriteString(stdout, imageProbe())
+						}
+						return SuccessfulResult()
+					}}, SuccessfulResult()
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = adapter.Inspect(context.Background(), strings.NewReader("x"))
+				assertAdapterError(t, err, tt.want)
+			})
+		}
+	}
+}
+
+type stagedExecution struct {
+	run func(Command, io.Writer, io.Writer) Result
+}
+
+func (execution *stagedExecution) Run(command Command, stdout, stderr io.Writer) Result {
+	return execution.run(command, stdout, stderr)
+}
+
+func (*stagedExecution) Close() Result { return SuccessfulResult() }
+
+func assertRejectionCode(t *testing.T, err error, code media.RejectionCode) {
+	t.Helper()
+	var rejection *media.Rejection
+	if !errors.As(err, &rejection) {
+		t.Fatalf("error = %T %v, want *media.Rejection %q", err, err, code)
+	}
+	if rejection.Code() != code {
+		t.Fatalf("rejection code = %q, want %q", rejection.Code(), code)
+	}
+	var adapterError *Error
+	if errors.As(err, &adapterError) {
+		t.Fatalf("rejection also wraps adapter error %q", adapterError.Code())
+	}
 }

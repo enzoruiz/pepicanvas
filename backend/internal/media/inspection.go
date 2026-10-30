@@ -30,8 +30,11 @@ type Dimensions struct {
 
 // Inspection is normalized, content-derived metadata produced by an inspection
 // adapter. GIFFrameDimensions must contain one entry for every decoded GIF frame.
+// MediaType is the content-derived type (image/png, image/gif, ...); it is
+// informative and Validate ignores it.
 type Inspection struct {
 	Kind               Kind
+	MediaType          string
 	InputBytes         int64
 	StreamCount        int
 	Dimensions         Dimensions
@@ -64,20 +67,20 @@ func Validate(inspection Inspection, limits Limits) error {
 
 	switch inspection.Kind {
 	case KindImage:
-		return validateDimensions(inspection.Dimensions, limits)
+		return validateImageDimensions(inspection.Dimensions, limits)
 	case KindGIF:
 		if inspection.GIFFrameCount > limits.MaxGIFFrames {
 			return newRejection(RejectionFrameCountExceeded)
 		}
 		for _, frame := range inspection.GIFFrameDimensions {
-			if err := validateDimensions(frame, limits); err != nil {
+			if err := validateImageDimensions(frame, limits); err != nil {
 				return err
 			}
 		}
 	case KindAudio:
 		return nil
 	case KindVideo:
-		return validateDimensions(inspection.Dimensions, limits)
+		return validateVideoDimensions(inspection.Dimensions, limits)
 	}
 
 	return nil
@@ -104,7 +107,16 @@ func validMetadata(inspection Inspection) bool {
 	}
 }
 
-func validateDimensions(dimensions Dimensions, limits Limits) error {
+// validateImageDimensions applies the image axis limits; images and GIF frames
+// have no pixel cap beyond them.
+func validateImageDimensions(dimensions Dimensions, limits Limits) error {
+	if dimensions.Width > limits.MaxImageWidth || dimensions.Height > limits.MaxImageHeight {
+		return newRejection(RejectionDimensionsExceeded)
+	}
+	return nil
+}
+
+func validateVideoDimensions(dimensions Dimensions, limits Limits) error {
 	if dimensions.Width > limits.MaxWidth || dimensions.Height > limits.MaxHeight ||
 		int64(dimensions.Width) > limits.MaxPixels/int64(dimensions.Height) {
 		return newRejection(RejectionDimensionsExceeded)

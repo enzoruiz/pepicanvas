@@ -55,6 +55,14 @@ SELECT a.kind, a.declared_bytes, a.storage_key,
 FROM media_assets a
 WHERE a.tenant_id = $1 AND a.canvas_id = $2 AND a.asset_id = $3 AND a.state = 'ready';
 
+-- name: GetReadyReference :one
+SELECT a.asset_id, a.kind, a.declared_bytes, a.storage_key,
+    (SELECT count(*) FROM media_references c
+     WHERE c.tenant_id = a.tenant_id AND c.canvas_id = a.canvas_id AND c.asset_id = a.asset_id)::bigint AS refs
+FROM media_references r
+JOIN media_assets a ON a.tenant_id = r.tenant_id AND a.canvas_id = r.canvas_id AND a.asset_id = r.asset_id
+WHERE r.tenant_id = $1 AND r.canvas_id = $2 AND r.reference_id = $3 AND a.state = 'ready';
+
 -- name: AssetExists :one
 SELECT EXISTS (
     SELECT 1 FROM media_assets WHERE tenant_id = $1 AND canvas_id = $2 AND asset_id = $3
@@ -143,3 +151,11 @@ WHERE state = 'ready'
     AND (tenant_id, canvas_id, asset_id) > (sqlc.arg(after_tenant)::text, sqlc.arg(after_canvas)::text, sqlc.arg(after_asset)::text)
 ORDER BY tenant_id, canvas_id, asset_id
 LIMIT sqlc.arg(max_assets);
+
+-- name: LockActorMembership :one
+-- Read after the tenant lock and held until commit, so a membership
+-- revocation commits either before this read, and the command is rejected,
+-- or after this commit.
+SELECT role FROM memberships
+WHERE tenant_id = $1 AND account_id = $2
+FOR SHARE;

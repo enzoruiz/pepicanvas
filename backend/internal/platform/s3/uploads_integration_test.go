@@ -52,12 +52,13 @@ func (r *recordingStorage) last(t *testing.T) string {
 
 // pipeline is media.Uploads over PostgreSQL and MinIO.
 type pipeline struct {
-	uploads *media.Uploads
-	store   *postgres.MediaStore
-	storage *recordingStorage
-	server  *s3test.Server
-	ready   map[string]bool // storage keys of ready assets
-	seq     int
+	uploads  *media.Uploads
+	store    *postgres.MediaStore
+	canvases *postgres.CanvasStore
+	storage  *recordingStorage
+	server   *s3test.Server
+	ready    map[string]bool // storage keys of ready assets
+	seq      int
 }
 
 func newPipeline(t *testing.T, inspector media.Inspector) *pipeline {
@@ -72,14 +73,15 @@ func newPipeline(t *testing.T, inspector media.Inspector) *pipeline {
 	if err := postgres.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if _, err := postgres.NewCanvasStore(pool).Create(ctx, canvas.Key{TenantID: uploadKey.TenantID, CanvasID: uploadKey.CanvasID}); err != nil {
+	canvases := postgres.NewCanvasStore(pool)
+	if _, err := canvases.Create(ctx, canvas.Key{TenantID: uploadKey.TenantID, CanvasID: uploadKey.CanvasID}); err != nil {
 		t.Fatalf("create canvas: %v", err)
 	}
 	store := postgres.NewMediaStore(pool)
 	storage := &recordingStorage{Storage: open(t, server)}
 	return &pipeline{
 		uploads: media.NewUploads(store, storage, inspector),
-		store:   store, storage: storage, server: server,
+		store:   store, canvases: canvases, storage: storage, server: server,
 		ready: map[string]bool{},
 	}
 }
@@ -125,6 +127,31 @@ func (p *pipeline) upload(t *testing.T, data []byte) media.UploadResult {
 	}
 	p.ready[asset.StorageKey] = true
 	return result
+}
+
+// objects returns the committed canvas objects, bottom first.
+func (p *pipeline) objects(t *testing.T) []canvas.Object {
+	t.Helper()
+	loaded, err := p.canvases.Load(context.Background(), canvas.Key{TenantID: uploadKey.TenantID, CanvasID: uploadKey.CanvasID})
+	if err != nil {
+		t.Fatalf("Load canvas: %v", err)
+	}
+	return loaded.Objects
+}
+
+// wantImageObject checks US-011 S8: the upload created exactly one image
+// object, on top, named after its asset and showing its reference.
+func (p *pipeline) wantImageObject(t *testing.T, result media.UploadResult, transform canvas.Transform) {
+	t.Helper()
+	objects := p.objects(t)
+	if result.ObjectID != result.AssetID || len(objects) == 0 {
+		t.Fatalf("upload %+v with canvas objects %+v, want the asset's object", result, objects)
+	}
+	top := objects[len(objects)-1]
+	want := canvas.Object{ID: result.AssetID, Kind: canvas.KindImage, Content: fmt.Sprintf("object-%d", p.seq), Transform: transform, Z: top.Z}
+	if top != want {
+		t.Fatalf("top object = %+v, want %+v", top, want)
+	}
 }
 
 func (p *pipeline) usage(t *testing.T) media.Usage {
@@ -178,7 +205,7 @@ func (f fakeInspector) Inspect(ctx context.Context, input io.Reader) (media.Insp
 }
 
 func validImage(_ context.Context, n int64) (media.Inspection, error) {
-	return media.Inspection{Kind: media.KindImage, InputBytes: n, StreamCount: 1, Dimensions: media.Dimensions{Width: 16, Height: 16}}, nil
+	return media.Inspection{Kind: media.KindImage, MediaType: "image/png", InputBytes: n, StreamCount: 1, Dimensions: media.Dimensions{Width: 16, Height: 16}}, nil
 }
 
 func TestUploadsOverS3LeaveNothingRecoverable(t *testing.T) {
@@ -201,7 +228,9 @@ func TestUploadsOverS3LeaveNothingRecoverable(t *testing.T) {
 
 	mode = "accept"
 	kept := p.upload(t, data)
+	p.wantImageObject(t, kept, canvas.Transform{X: 952, Y: 532, Width: 16, Height: 16})
 	baseline := p.usage(t)
+	keptObjects := p.objects(t)
 
 	t.Run("rejected upload", func(t *testing.T) {
 		mode = "reject"
@@ -211,6 +240,23 @@ func TestUploadsOverS3LeaveNothingRecoverable(t *testing.T) {
 			t.Fatalf("Upload = %v, want the unsupported kind rejection", err)
 		}
 		p.wantNothingRecoverable(t, "", p.storage.last(t), baseline)
+	})
+
+	// US-011 S6, S7: a declared type the content does not match is rejected,
+	// and its retry repeats the rejection without storing anything.
+	t.Run("declared type mismatch", func(t *testing.T) {
+		mode = "accept"
+		req := p.request(data, nil)
+		req.DeclaredType = "image/gif"
+		for range 2 {
+			req.Body = bytes.NewReader(data)
+			_, err := p.uploads.Upload(context.Background(), req)
+			var rejection *media.Rejection
+			if !errors.As(err, &rejection) || rejection.Code() != media.RejectionTypeMismatch {
+				t.Fatalf("Upload = %v, want the type mismatch rejection", err)
+			}
+			p.wantNothingRecoverable(t, "", p.storage.last(t), baseline)
+		}
 	})
 
 	t.Run("cancelled while the body streams", func(t *testing.T) {
@@ -263,6 +309,11 @@ func TestUploadsOverS3LeaveNothingRecoverable(t *testing.T) {
 	if _, _, err := p.uploads.Open(context.Background(), uploadKey, kept.AssetID); err != nil {
 		t.Fatalf("the kept asset is no longer served: %v", err)
 	}
+	// US-011 S7: no failed upload created an object; the released upload's
+	// object stays, since releasing a reference does not edit the canvas.
+	if objects := p.objects(t); len(objects) != len(keptObjects)+1 || !slices.Equal(objects[:len(keptObjects)], keptObjects) {
+		t.Fatalf("canvas objects = %+v, want %+v and the released upload's", objects, keptObjects)
+	}
 }
 
 // TestUploadsOverS3WithRealInspector runs the real ffprobe and ffmpeg inside
@@ -311,9 +362,22 @@ func TestUploadsOverS3WithRealInspector(t *testing.T) {
 	}
 
 	active = adapter(media.DefaultLimits())
-	p.upload(t, valid)
+	p.wantImageObject(t, p.upload(t, valid), canvas.Transform{X: 928, Y: 516, Width: 64, Height: 48})
 	wantEmptyTempRoot(t)
 	baseline := p.usage(t)
+
+	t.Run("declared type mismatch", func(t *testing.T) {
+		active = adapter(media.DefaultLimits())
+		req := p.request(valid, nil)
+		req.DeclaredType = "image/webp"
+		_, err := p.uploads.Upload(context.Background(), req)
+		var rejection *media.Rejection
+		if !errors.As(err, &rejection) || rejection.Code() != media.RejectionTypeMismatch {
+			t.Fatalf("Upload = %v, want the type mismatch rejection", err)
+		}
+		p.wantNothingRecoverable(t, "", p.storage.last(t), baseline)
+		wantEmptyTempRoot(t)
+	})
 
 	t.Run("undecodable bytes are rejected", func(t *testing.T) {
 		active = adapter(media.DefaultLimits())

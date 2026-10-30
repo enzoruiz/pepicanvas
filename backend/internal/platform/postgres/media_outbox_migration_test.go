@@ -43,6 +43,10 @@ const insertMediaRecord = `INSERT INTO canvas_outbox (tenant_id, canvas_id, revi
 func TestMediaOutboxSchemaKeepsUsageRecordsApartFromRevisions(t *testing.T) {
 	ctx := context.Background()
 	canvases, pool := openStore(t, pgtest.Start(t))
+	// The test exercises 00011 as the latest applied migration.
+	if _, err := migrationProvider(t, pool).DownTo(ctx, 11); err != nil {
+		t.Fatalf("DownTo(11): %v", err)
+	}
 	mustCreate(t, canvases, canvas.Key{TenantID: "tenant-a", CanvasID: "canvas-1"})
 	exec(t, pool, "INSERT INTO media_usage (tenant_id, canvas_id) VALUES ('tenant-a', 'canvas-1')")
 	if got, want := readMediaOutboxSchema(t, pool), (mediaOutboxSchema{version: 11, usageVersion: true, nullRevision: true}); got != want {
@@ -73,6 +77,10 @@ func TestMediaOutboxRollbackRefusesToLoseUsageRecords(t *testing.T) {
 	ctx := context.Background()
 	canvases, pool := openStore(t, pgtest.Start(t))
 	provider := migrationProvider(t, pool)
+	// The test exercises 00011 as the latest applied migration.
+	if _, err := provider.DownTo(ctx, 11); err != nil {
+		t.Fatalf("DownTo(11): %v", err)
+	}
 	mustCreate(t, canvases, canvas.Key{TenantID: "tenant-a", CanvasID: "canvas-1"})
 	exec(t, pool, "INSERT INTO media_usage (tenant_id, canvas_id, version) VALUES ('tenant-a', 'canvas-1', 1)")
 	exec(t, pool, insertMediaRecord, nil, "media_usage", `{"version":1,"quota_bytes":1000000000,"used_bytes":0,"reserved_bytes":5}`, "")
